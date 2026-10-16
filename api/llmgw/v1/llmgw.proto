@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package llmgw.v1;
+
+option go_package = "github.com/choucisan/ai-gaokao-counselor/api/llmgw/v1;llmgwv1";
+
+import "api/common/v1/common.proto";
+
+// svc-llm-gateway（Go）实现；svc-orchestrator 调用。
+// 职责：按 role 路由模型、缓存、预算闸门、重试/降级、成本记账。**模型 key 只存在于此服务。**
+// 关键约束：本服务直连模型厂商，**绝不回调 svc-orchestrator**（否则破坏 DAG）。
+service LLMGateway {
+  rpc Chat(ChatRequest) returns (ChatResponse);
+  rpc StreamChat(ChatRequest) returns (stream ChatDelta);
+}
+
+message Msg {
+  string role    = 1; // system | user | assistant
+  string content = 2;
+}
+
+message ChatRequest {
+  common.v1.Trace trace      = 1;
+  string          role       = 2; // profile|strategy|critic|report|verify —— 据此路由模型
+  repeated Msg    messages   = 3;
+  string          json_schema = 4; // 非空则强制结构化输出
+  double          temperature = 5;
+  int32           max_tokens  = 6;
+  int32           timeout_ms  = 7;
+}
+
+message ChatResponse {
+  string content    = 1;
+  string model      = 2;
+  int32  in_tokens  = 3;
+  int32  out_tokens = 4;
+  double cost       = 5; // 记账用
+}
+
+message ChatDelta {
+  string content = 1;
+  bool   done    = 2;
+}

@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package orchestrator.v1;
+
+option go_package = "github.com/choucisan/ai-gaokao-counselor/api/orchestrator/v1;orchestratorv1";
+
+import "api/common/v1/common.proto";
+
+// svc-orchestrator（Python · LangGraph）实现；svc-gateway 调用它来驱动编排。
+// 图的"节点 / 条件边 / 循环闸门 / 检查点"由 LangGraph 承载；gateway 只负责门控与推送。
+service Orchestrator {
+  // 启动图：从用户输入开始跑，事件以流返回（含 HITL 中断点）。
+  rpc StartGraph(StartGraphRequest) returns (stream GraphEvent);
+
+  // 恢复图：用户在中断点确认/补充后继续。
+  rpc ResumeGraph(ResumeGraphRequest) returns (stream GraphEvent);
+}
+
+message StartGraphRequest {
+  common.v1.Trace trace     = 1;
+  string          user_text = 2;
+}
+
+message ResumeGraphRequest {
+  common.v1.Trace trace          = 1;
+  string          session_id     = 2;
+  string          user_reply_json = 3; // 用户在中断点的回复（确认/修正/补充）
+}
+
+// 图事件：节点级进度 + 需要用户介入的提示 + 最终结果。
+message GraphEvent {
+  string node         = 1; // INIT / INTAKE / PROFILE_CONFIRM / RETRIEVING / CHECK_CONDITIONAL / ...
+  string type         = 2; // progress | interrupt | result | error
+  string payload_json = 3;
+}

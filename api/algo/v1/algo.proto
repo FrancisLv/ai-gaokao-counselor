@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package algo.v1;
+
+option go_package = "github.com/choucisan/ai-gaokao-counselor/api/algo/v1;algov1";
+
+import "api/common/v1/common.proto";
+
+// svc-algo（Go）实现；svc-orchestrator 调用。
+// 纯确定性计算：可复现、可审计、可独立单测。与 LLM 边界清晰（数值由算法给，解释由 LLM 写）。
+service Algo {
+  // 分数 ↔ 位次 换算（不一问用户，由分数推算）。
+  rpc RankConvert(RankConvertRequest) returns (RankConvertReply);
+
+  // 某院校专业的录取概率估计（历史位次分布 → 分位数 / 核密度）。
+  rpc EstimateProb(EstimateProbRequest) returns (EstimateProbReply);
+
+  // 硬规则裁决：选科 / 单科 / 体检 / 批次 / 性别 → 剔除并记录原因。
+  rpc CheckConstraints(CheckConstraintsRequest) returns (CheckConstraintsReply);
+
+  // 志愿表排序与配比（约束满足 + 启发式搜索）。
+  rpc OptimizeWishlist(OptimizeWishlistRequest) returns (OptimizeWishlistReply);
+}
+
+message RankConvertRequest {
+  common.v1.Trace trace    = 1;
+  string          province = 2;
+  string          year     = 3;
+  string          track    = 4;
+  int32           score    = 5;
+}
+message RankConvertReply {
+  int32 rank = 1;
+}
+
+message EstimateProbRequest {
+  common.v1.Trace trace      = 1;
+  string          college_id = 2;
+  string          major_code = 3;
+  string          province   = 4;
+  string          year       = 5;
+  string          track      = 6;
+  int32           user_rank  = 7;
+}
+message EstimateProbReply {
+  double prob       = 1;
+  string basis_json = 2; // 概率依据（样本年份 / 分位数），供解释与审计
+}
+
+message CheckConstraintsRequest {
+  common.v1.Trace trace          = 1;
+  string          profile_json   = 2;
+  string          candidates_json = 3;
+}
+message CheckConstraintsReply {
+  string kept_json     = 1; // 通过校验的候选
+  string rejected_json = 2; // 被剔除的候选 + 原因
+}
+
+message OptimizeWishlistRequest {
+  common.v1.Trace trace           = 1;
+  string          candidates_json = 2;
+  string          profile_json    = 3;
+}
+message OptimizeWishlistReply {
+  string wishlist_json = 1; // 冲/稳/保配比与梯度平滑后的志愿表
+}

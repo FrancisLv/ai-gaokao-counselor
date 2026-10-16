@@ -1,0 +1,38 @@
+"""svc-orchestrator 入口：启动 grpc.aio 服务。
+
+本地开发： cd services/orchestrator && python -m app.main
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+
+
+async def _serve() -> None:
+    import grpc
+
+    from app.server import OrchestratorServicer
+    from pb import orchestrator_pb2_grpc
+
+    addr = os.getenv("ORCHESTRATOR_ADDR", "[::]:9100")
+    server = grpc.aio.server()
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(OrchestratorServicer(), server)
+    server.add_insecure_port(addr)
+    logging.info("svc-orchestrator listening on %s", addr)
+    await server.start()
+    await server.wait_for_termination()
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+    try:
+        asyncio.run(_serve())
+    except ImportError as e:
+        raise SystemExit(
+            "缺少生成的 pb —— 先运行 `make api-py`（需要 grpcio-tools）。原始错误: %r" % (e,)
+        )
+
+
+if __name__ == "__main__":
+    main()

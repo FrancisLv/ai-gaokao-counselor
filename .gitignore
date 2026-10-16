@@ -1,0 +1,37 @@
+# --- Go ---
+/bin/
+**/bin/
+*.test
+*.out
+
+# 生成的 gRPC/proto 代码（由 `make api` 产出，不入库）
+api/**/*.pb.go
+api/**/*_grpc.pb.go
+api/**/*.pb.gw.go
+api/**/*.swagger.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+services/orchestrator/pb/*_pb2.py
+services/orchestrator/pb/*_pb2_grpc.py
+
+# --- 环境 / 密钥 ---
+.env
+.env.*
+!.env.example
+*.local
+
+# --- 数据（大文件不入库，仅保留 golden 集）---
+data/**/*.csv
+data/**/*.jsonl
+!data/golden/**
+
+# --- OS / IDE ---
+.DS_Store
+.idea/
+.vscode/

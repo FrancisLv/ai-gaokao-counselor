@@ -1,0 +1,5 @@
+# 入口反代：TLS + 域名。Caddy 默认不缓冲响应体，SSE 可直接透传。
+# 若换成 nginx，务必关闭响应缓冲：proxy_buffering off;
+:80 {
+	reverse_proxy gateway:8000
+}

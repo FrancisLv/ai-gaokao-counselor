@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package gateway.v1;
+
+option go_package = "github.com/choucisan/ai-gaokao-counselor/api/gateway/v1;gatewayv1";
+
+import "google/api/annotations.proto";
+
+// svc-gateway 对外 API。唯一对客户端暴露的服务。
+// 流式输出（token / 节点事件）走 HTTP SSE，由 gateway 转推。
+service Gateway {
+  // 提交一次志愿规划请求（自然语言），返回 session，随后经 SSE 订阅事件。
+  rpc CreatePlan(CreatePlanRequest) returns (CreatePlanReply) {
+    option (google.api.http) = { post: "/v1/plans" body: "*" };
+  }
+
+  // 人工确认 / 修正画像（HITL 恢复点）。
+  rpc ConfirmProfile(ConfirmProfileRequest) returns (ConfirmProfileReply) {
+    option (google.api.http) = {
+      post: "/v1/plans/{session_id}/profile:confirm"
+      body: "*"
+    };
+  }
+
+  // 补充"条件必需"信息（体检 / 单科 / 语种）后的恢复点。
+  rpc BackfillProfile(BackfillProfileRequest) returns (BackfillProfileReply) {
+    option (google.api.http) = {
+      post: "/v1/plans/{session_id}/profile:backfill"
+      body: "*"
+    };
+  }
+}
+
+message CreatePlanRequest {
+  string user_text = 1; // 用户自然语言描述
+}
+
+message CreatePlanReply {
+  string session_id = 1;
+  string status     = 2; // accepted | interrupted
+}
+
+message ConfirmProfileRequest {
+  string session_id   = 1;
+  string profile_json = 2; // 用户确认/修正后的画像
+}
+
+message ConfirmProfileReply {
+  string session_id = 1;
+  string status     = 2;
+}
+
+message BackfillProfileRequest {
+  string session_id  = 1;
+  string backfill_json = 2; // 条件必需项的补充
+}
+
+message BackfillProfileReply {
+  string session_id = 1;
+  string status     = 2;
+}

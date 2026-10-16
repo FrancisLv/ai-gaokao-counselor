@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package common.v1;
+
+option go_package = "github.com/choucisan/ai-gaokao-counselor/api/common/v1;commonv1";
+
+// Trace 全链路透传：Go 与 Python 的 span 靠它合并到同一棵调用树。
+// 约束：任何跨服务调用都必须带上 Trace。
+message Trace {
+  string trace_id   = 1;
+  string session_id = 2;
+  string node       = 3; // 发起调用的节点名（profile / retrieve / strategy / critic / report / verify）
+}
+
+// QueryFilters 检索的元数据硬过滤条件（省份/年份/科类必须作为 filter，而非排序因素）。
+message QueryFilters {
+  string province      = 1; // 必填，硬过滤
+  string year          = 2;
+  string subject_track = 3; // 物理类/历史类/理科/文科/综合
+  string batch         = 4;
+  repeated string college_ids  = 5;
+  repeated string major_codes  = 6;
+}
