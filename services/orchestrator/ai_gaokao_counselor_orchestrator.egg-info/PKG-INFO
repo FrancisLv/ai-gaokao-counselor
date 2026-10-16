@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: ai-gaokao-counselor-orchestrator
+Version: 0.0.1
+Summary: svc-orchestrator：LangGraph 编排 + 检索 + 本地推理
+Requires-Python: >=3.11
+Requires-Dist: grpcio>=1.63
+Requires-Dist: grpcio-tools>=1.63
+Requires-Dist: protobuf>=4.25
+Requires-Dist: langgraph>=0.2
+Requires-Dist: langchain-core>=0.3
+Requires-Dist: sentence-transformers>=3.0
+Requires-Dist: psycopg[binary]>=3.1
+Requires-Dist: pgvector>=0.2
+Requires-Dist: redis>=5.0
+Requires-Dist: httpx>=0.27

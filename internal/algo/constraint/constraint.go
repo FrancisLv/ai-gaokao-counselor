@@ -18,8 +18,7 @@ type Verdict struct {
 
 // Check 对候选集合逐条裁决，返回通过项与被剔除项（含原因）。
 //
-// profile 与 candidates 为结构化数据（由调用方从 JSON 反序列化，
-// 或后续升级为强类型）。此处用 any 占位。
+// profile 与 candidates 为结构化数据（由调用方从 JSON 反序列化，或后续升级为强类型）。
 func Check(profile, candidates any) (kept, rejected []Verdict, err error) {
 	// TODO(M4): 规则表驱动；保证每条规则可单测。
 	return nil, nil, ErrNotImplemented
