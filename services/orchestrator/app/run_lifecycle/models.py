@@ -28,12 +28,13 @@ class RunLifecycleError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class StructuredProfileInput:
-    province: str
-    application_year: int
-    category: str
-    batch: str | None
-    score: int
-    subjects: tuple[str, ...]
+    province: str = ""
+    application_year: int | None = None
+    category: str = ""
+    batch: str | None = None
+    score: int | None = None
+    subjects: tuple[str, ...] = ()
+    rank: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +43,45 @@ class SubmitRunCommand:
     session_id: UUID | None
     task_kind: TaskKind
     input: StructuredProfileInput
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerFields:
+    fields: dict[str, dict[str, Any]]
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmProfileAnswer:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class RejectOrEditProfileAnswer:
+    patch: dict[str, dict[str, Any]]
+
+
+@dataclass(frozen=True, slots=True)
+class DeclineFieldsAnswer:
+    field_keys: tuple[str, ...]
+
+
+ResumeAnswer = (
+    AnswerFields
+    | ConfirmProfileAnswer
+    | RejectOrEditProfileAnswer
+    | DeclineFieldsAnswer
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeRunCommand:
+    principal_id: str
+    run_id: UUID
+    interrupt_id: UUID
+    expected_state_version: int
+    profile_version: UUID | None
+    answer: ResumeAnswer
     idempotency_key: str
 
 

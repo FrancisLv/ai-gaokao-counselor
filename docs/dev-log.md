@@ -783,3 +783,29 @@ sqlc 的 `:many` 先收集类型化结果 slice，再映射领域对象，相较
 
 - 当前只支持 `GENERATE_PLAN` 的结构化画像输入；自然语言解析、ResumeRun、interrupt、官方 LangGraph saver、租约接管、四算法 RPC 和 ALGORITHM_PREVIEW 不做提前实现。
 - WatchRun 使用数据库短轮询；Redis/发布订阅仅可作为后续可重建通知投影，不是权威事件源。
+
+## 23. M2 ticket #3：画像 revision、interrupt 与官方 saver 恢复
+
+**日期与范围**：2026-11-18。落地 issue #3 的结构化画像 revision、画像确认/补问 interrupt、ResumeRun、官方 LangGraph PostgreSQL saver 与崩溃恢复；worker 租约接管留给 issue #4。
+
+### 实现要点
+
+- 新增 additive 迁移 `09_profile_run_lifecycle.sql`：`release_scope`、不可变 `profile_revision`、`profile_confirmation`、`run_interrupt`；历史迁移未修改。
+- `ProfileRuntime` 作为 RunLifecycle 内部深模块，集中 CreateDraft / ApplyPatch / Validate / Confirm / ToAlgoInput；外部仍只使用 RunLifecycle 五操作。
+- 结构化画像使用 `category`，主输入只接受分数；缺批次写 `DEFAULT=本科批` 并在确认卡展示。缺字段、非法选科、rank-only、release 范围不支持均回到 INTAKE_ASK，不进入算法。
+- 接入官方 `langgraph-checkpoint-postgres==3.2.1`（并约束 `langgraph>=1.2.15,<2`）。画像确认图通过官方 AsyncPostgresSaver 编译；中断在 checkpoint 持久化后才写业务 interrupt。`plan_checkpoint` 保持审计表定位，不承担恢复。
+- ResumeRun 校验 principal、WAITING_HITL、state_version、interrupt 状态/有效期、profile_version 和 release 时效；receipt、interrupt 消费、回答命令和转 QUEUED 原子提交。
+- 回答图恢复与业务 revision 应用可重入：崩溃发生在 checkpoint 后或 Resume receipt 后，重试可识别既有 pending checkpoint/已存回答并只应用一次。
+- gRPC additive 增加 ResumeRun、强类型回答 oneof、画像字段/finding/interrupt 事件；身份仍只来自可信 metadata。
+
+### 测试
+
+- PostgreSQL 行为测试覆盖：确认卡与默认 batch、精确 revision 确认、补问后新 revision、卡片编辑、DECLINED 保真、非法选科、rank-only、unsupported scope、旧 profile_version、release 撤销、双击重放、双标签并发、checkpoint 前后崩溃、事件连续补发。
+- fresh schema 验证 `00 → 09`，并确认官方 saver 四张表由 `.setup()` 安装、`plan_checkpoint` 未被用作恢复。
+- 全部 run lifecycle PostgreSQL 测试 33 项通过；`make py-check py-test`、`make build check test` 通过。
+
+### 边界
+
+- 当前自动画像推进是 RunLifecycle 内部同步处理；跨进程 worker 扫描、租约与 fencing epoch 由 issue #4 完成。
+- 确认后 run 保持 QUEUED / `PROFILE_CONFIRMED`，四算法 RPC 与 ALGORITHM_PREVIEW 由后续 tickets 接线。
+- 旧 `StartGraph/ResumeGraph` 仍保留为兼容入口，但新的画像确认状态只以 RunLifecycle 为权威。

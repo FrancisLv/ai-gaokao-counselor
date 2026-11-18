@@ -96,3 +96,100 @@ class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
 
         self.assertEqual(raised.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
         self.assertEqual(raised.exception.details(), "PRINCIPAL_REQUIRED")
+
+    async def test_grpc_resume_confirms_the_interrupt_profile_version(self):
+        from app.run_lifecycle import RunLifecycle
+        from app.server import OrchestratorServicer
+
+        await self.seed_release()
+        server = grpc.aio.server()
+        pb_grpc.add_OrchestratorServicer_to_server(
+            OrchestratorServicer(
+                lifecycle=RunLifecycle(self.dsn, auto_profile=True),
+            ),
+            server,
+        )
+        port = server.add_insecure_port("127.0.0.1:0")
+        await server.start()
+        channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+        client = pb_grpc.OrchestratorStub(channel)
+        metadata = (("x-principal-id", "principal-a"),)
+
+        try:
+            receipt = await client.SubmitRun(
+                pb.SubmitRunRequest(
+                    task_kind=pb.GENERATE_PLAN,
+                    profile_input=pb.StructuredProfileInput(
+                        province="湖南",
+                        application_year=2025,
+                        category="物理类",
+                        batch="本科批",
+                        score=600,
+                        subjects=["物理", "化学", "生物"],
+                    ),
+                    idempotency_key="grpc-profile-submit",
+                ),
+                metadata=metadata,
+            )
+            waiting = await self._wait_for_grpc_interrupt(client, receipt.run_id, metadata)
+            profile_version = waiting.current_interrupt.profile_version
+            events = client.WatchRun(
+                pb.WatchRunRequest(run_id=receipt.run_id, after_event_seq=0),
+                metadata=metadata,
+            )
+            replayed_interrupt = None
+            try:
+                while replayed_interrupt is None:
+                    event = await events.read()
+                    if event.type == pb.INTERRUPT:
+                        replayed_interrupt = event.interrupt
+            finally:
+                events.cancel()
+
+            resumed = await client.ResumeRun(
+                pb.ResumeRunRequest(
+                    run_id=receipt.run_id,
+                    interrupt_id=waiting.current_interrupt.interrupt_id,
+                    expected_state_version=waiting.state_version,
+                    profile_version=profile_version,
+                    confirm_profile=pb.ConfirmProfileAnswer(),
+                    idempotency_key="grpc-profile-confirm",
+                ),
+                metadata=metadata,
+            )
+            view = await self._wait_for_grpc_confirmation(client, receipt.run_id, metadata)
+
+            self.assertTrue(resumed.accepted)
+            self.assertEqual(resumed.state, pb.QUEUED)
+            self.assertEqual(view.confirmed_profile_version, profile_version)
+            self.assertFalse(view.HasField("current_interrupt"))
+            self.assertEqual(replayed_interrupt.profile_version, profile_version)
+        finally:
+            await channel.close()
+            await server.stop(grace=None)
+
+    async def _wait_for_grpc_interrupt(self, client, run_id, metadata):
+        import asyncio
+
+        for _ in range(200):
+            view = await client.GetRun(
+                pb.GetRunRequest(run_id=run_id),
+                metadata=metadata,
+            )
+            if view.HasField("current_interrupt"):
+                return view
+            await asyncio.sleep(0.01)
+        self.fail("gRPC run 未进入 interrupt")
+
+    async def _wait_for_grpc_confirmation(self, client, run_id, metadata):
+        import asyncio
+
+        for _ in range(200):
+            view = await client.GetRun(
+                pb.GetRunRequest(run_id=run_id),
+                metadata=metadata,
+            )
+            if view.confirmed_profile_version:
+                return view
+            await asyncio.sleep(0.01)
+        self.fail("gRPC run 未确认画像")

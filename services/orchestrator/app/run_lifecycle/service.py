@@ -5,31 +5,65 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+from collections.abc import Callable
 from typing import Any, AsyncIterator
 from uuid import UUID, uuid4
 
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.types import Command
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.run_lifecycle.models import (
+    AnswerFields,
+    ConfirmProfileAnswer,
     CancelRunCommand,
+    DeclineFieldsAnswer,
+    InterruptView,
+    RejectOrEditProfileAnswer,
+    ResumeRunCommand,
     ResultReference,
     RunEvent,
     RunLifecycleError,
     RunReceipt,
     RunView,
+    StructuredProfileInput,
     SubmitRunCommand,
 )
+from app.run_lifecycle.profile import ProfileRuntime, build_profile_fields
+from app.run_lifecycle.profile_graph import build_profile_graph
 
 
 class RunLifecycle:
     """调用方与测试共同使用的唯一持久任务 seam。"""
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        auto_profile: bool = False,
+        _checkpoint_persisted: Callable[[UUID], None] | None = None,
+        _resume_accepted: Callable[[UUID], None] | None = None,
+    ) -> None:
         if not dsn:
             raise ValueError("RunLifecycle 需要 PostgreSQL DSN")
         self._dsn = dsn
+        self._auto_profile = auto_profile
+        self._checkpoint_persisted = _checkpoint_persisted
+        self._resume_accepted = _resume_accepted
+        self._saver_cm = None
+        self._saver: AsyncPostgresSaver | None = None
+        self._profile_graph = None
+        self._runtime_lock = asyncio.Lock()
+        self._profile = ProfileRuntime()
+
+    async def close(self) -> None:
+        if self._saver_cm is not None:
+            await self._saver_cm.__aexit__(None, None, None)
+            self._saver_cm = None
+            self._saver = None
+            self._profile_graph = None
 
     async def _connect(self, *, autocommit: bool = False) -> psycopg.AsyncConnection:
         return await psycopg.AsyncConnection.connect(
@@ -61,7 +95,11 @@ class RunLifecycle:
                 if replay is not None:
                     if replay["request_hash"] != request_hash:
                         raise RunLifecycleError("IDEMPOTENCY_CONFLICT")
-                    return self._receipt_from_response(replay["response"], replayed=True)
+                    receipt = self._receipt_from_response(replay["response"], replayed=True)
+                    if self._auto_profile:
+                        await self._ensure_profile_runtime()
+                        await self._process_profile_run(receipt.run_id)
+                    return receipt
 
                 release = await self._select_active_release(conn)
                 session_id = await self._resolve_session(conn, command)
@@ -116,7 +154,11 @@ class RunLifecycle:
                     receipt=receipt,
                     target_run_id=run_id,
                 )
-                return receipt
+                accepted_receipt = receipt
+            if self._auto_profile:
+                await self._ensure_profile_runtime()
+                await self._process_profile_run(run_id)
+            return accepted_receipt
         finally:
             await conn.close()
 
@@ -144,6 +186,31 @@ class RunLifecycle:
                     result_version=row["result_version"],
                     result_kind=row["result_kind"],
                 )
+            interrupt_row = await (
+                await conn.execute(
+                    """
+                    SELECT interrupt_id, kind, state, question_key,
+                           payload_version, payload, created_at, expires_at
+                    FROM run_interrupt
+                    WHERE run_id = %s AND state = 'OPEN'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (run_id,),
+                )
+            ).fetchone()
+            current_interrupt = None
+            if interrupt_row is not None:
+                current_interrupt = InterruptView(
+                    interrupt_id=interrupt_row["interrupt_id"],
+                    kind=interrupt_row["kind"],
+                    state=interrupt_row["state"],
+                    question_key=interrupt_row["question_key"],
+                    payload_version=interrupt_row["payload_version"],
+                    payload=interrupt_row["payload"],
+                    created_at=interrupt_row["created_at"],
+                    expires_at=interrupt_row["expires_at"],
+                )
             return RunView(
                 run_id=row["run_id"],
                 session_id=row["session_id"],
@@ -155,13 +222,756 @@ class RunLifecycle:
                 release_id=row["release_id"],
                 confirmed_profile_version=row["confirmed_profile_version"],
                 cancel_requested_at=row["cancel_requested_at"],
-                current_interrupt=None,
+                current_interrupt=current_interrupt,
                 result=result,
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
             )
         finally:
             await conn.close()
+
+    async def ResumeRun(self, command: ResumeRunCommand) -> RunReceipt:
+        answer_payload = self._resume_answer_payload(command)
+        request_hash = self._request_hash(
+            {
+                "run_id": str(command.run_id),
+                "interrupt_id": str(command.interrupt_id),
+                "expected_state_version": command.expected_state_version,
+                "profile_version": (
+                    str(command.profile_version) if command.profile_version else None
+                ),
+                "answer": answer_payload,
+            }
+        )
+        scope_key = f"run:{command.run_id}"
+        receipt_lock = (
+            f"{command.principal_id}:RESUME_RUN:{scope_key}:{command.idempotency_key}"
+        )
+
+        conn = await self._connect()
+        try:
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (receipt_lock,),
+                )
+                replay = await self._find_receipt(
+                    conn,
+                    principal_id=command.principal_id,
+                    operation="RESUME_RUN",
+                    scope_key=scope_key,
+                    idempotency_key=command.idempotency_key,
+                )
+                if replay is not None:
+                    if replay["request_hash"] != request_hash:
+                        raise RunLifecycleError("IDEMPOTENCY_CONFLICT")
+                    receipt = self._receipt_from_response(replay["response"], replayed=True)
+                    accepted_receipt = receipt
+                else:
+                    run = await (
+                        await conn.execute(
+                            """
+                            SELECT run_id, session_id, state, stage, state_version,
+                                   release_id, working_profile_version
+                            FROM run
+                            WHERE run_id = %s AND principal_id = %s
+                            FOR UPDATE
+                            """,
+                            (command.run_id, command.principal_id),
+                        )
+                    ).fetchone()
+                    if run is None:
+                        raise RunLifecycleError("RUN_NOT_FOUND")
+                    if run["state"] in {"EXPIRED", "SUCCEEDED", "FAILED", "CANCELLED"}:
+                        raise RunLifecycleError("RUN_ALREADY_TERMINAL")
+                    if run["state"] != "WAITING_HITL":
+                        existing_interrupt = await (
+                            await conn.execute(
+                                """
+                                SELECT state
+                                FROM run_interrupt
+                                WHERE interrupt_id = %s AND run_id = %s
+                                """,
+                                (command.interrupt_id, command.run_id),
+                            )
+                        ).fetchone()
+                        if (
+                            existing_interrupt is not None
+                            and existing_interrupt["state"] != "OPEN"
+                        ):
+                            raise RunLifecycleError("INTERRUPT_CONSUMED")
+                        raise RunLifecycleError("RUN_STATE_CONFLICT")
+                    if run["state_version"] != command.expected_state_version:
+                        raise RunLifecycleError("RUN_STATE_CONFLICT")
+
+                    interrupt = await (
+                        await conn.execute(
+                            """
+                            SELECT interrupt_id, kind, state, payload, expires_at
+                            FROM run_interrupt
+                            WHERE interrupt_id = %s AND run_id = %s
+                            FOR UPDATE
+                            """,
+                            (command.interrupt_id, command.run_id),
+                        )
+                    ).fetchone()
+                    if interrupt is None:
+                        raise RunLifecycleError("INTERRUPT_NOT_FOUND")
+                    if interrupt["state"] != "OPEN":
+                        raise RunLifecycleError("INTERRUPT_CONSUMED")
+                    if interrupt["expires_at"] <= datetime.now(timezone.utc):
+                        raise RunLifecycleError("INTERRUPT_EXPIRED")
+
+                    release = await (
+                        await conn.execute(
+                            """
+                            SELECT status, revoked_at
+                            FROM release
+                            WHERE release_id = %s
+                            """,
+                            (run["release_id"],),
+                        )
+                    ).fetchone()
+                    if (
+                        release is None
+                        or release["status"] == "REVOKED"
+                        or release["revoked_at"] is not None
+                    ):
+                        raise RunLifecycleError("RELEASE_REVOKED")
+
+                    interrupt_version = interrupt["payload"].get("profile_version")
+                    if interrupt["kind"] == "PROFILE_CONFIRM":
+                        if not isinstance(
+                            command.answer,
+                            (ConfirmProfileAnswer, RejectOrEditProfileAnswer),
+                        ):
+                            raise RunLifecycleError("RUN_STATE_CONFLICT")
+                        if (
+                            command.profile_version is None
+                            or str(command.profile_version) != interrupt_version
+                            or command.profile_version != run["working_profile_version"]
+                        ):
+                            raise RunLifecycleError("PROFILE_VERSION_CONFLICT")
+                    else:
+                        if (
+                            command.profile_version is None
+                            or command.profile_version != run["working_profile_version"]
+                        ):
+                            raise RunLifecycleError("PROFILE_VERSION_CONFLICT")
+
+                    command_id = uuid4()
+                    next_version = run["state_version"] + 1
+                    next_seq = await self._next_event_seq(conn, run["run_id"])
+                    await conn.execute(
+                        """
+                        UPDATE run_interrupt
+                        SET state = 'CONSUMED',
+                            consumed_by_command_id = %s,
+                            answer_payload = %s
+                        WHERE interrupt_id = %s
+                          AND state = 'OPEN'
+                        """,
+                        (command_id, Jsonb(answer_payload), command.interrupt_id),
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE run
+                        SET state = 'QUEUED',
+                            state_version = %s,
+                            updated_at = NOW()
+                        WHERE run_id = %s
+                          AND state = 'WAITING_HITL'
+                          AND state_version = %s
+                        """,
+                        (next_version, run["run_id"], run["state_version"]),
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO run_event (
+                            run_id, event_seq, event_type, stage, state_version,
+                            payload_version, payload
+                        )
+                        VALUES (%s, %s, 'STATE_CHANGED', %s, %s, 1, %s)
+                        """,
+                        (
+                            run["run_id"],
+                            next_seq,
+                            run["stage"],
+                            next_version,
+                            Jsonb(
+                                {
+                                    "from_state": "WAITING_HITL",
+                                    "to_state": "QUEUED",
+                                    "interrupt_id": str(command.interrupt_id),
+                                }
+                            ),
+                        ),
+                    )
+                    accepted_receipt = RunReceipt(
+                        accepted=True,
+                        reason=None,
+                        run_id=run["run_id"],
+                        session_id=run["session_id"],
+                        state="QUEUED",
+                        stage=run["stage"],
+                        state_version=next_version,
+                        first_event_seq=next_seq,
+                    )
+                    await self._save_receipt(
+                        conn,
+                        principal_id=command.principal_id,
+                        operation="RESUME_RUN",
+                        scope_key=scope_key,
+                        idempotency_key=command.idempotency_key,
+                        request_hash=request_hash,
+                        receipt=accepted_receipt,
+                        target_run_id=run["run_id"],
+                    )
+            if self._auto_profile:
+                if self._resume_accepted is not None and accepted_receipt.accepted:
+                    self._resume_accepted(command.run_id)
+                await self._process_profile_run(command.run_id)
+            return accepted_receipt
+        finally:
+            await conn.close()
+
+    async def _ensure_profile_runtime(self) -> None:
+        async with self._runtime_lock:
+            if self._saver is not None:
+                return
+            self._saver_cm = AsyncPostgresSaver.from_conn_string(self._dsn)
+            self._saver = await self._saver_cm.__aenter__()
+            await self._saver.setup()
+            self._profile_graph = build_profile_graph(self._saver)
+
+    async def _process_profile_run(self, run_id: UUID) -> None:
+        await self._ensure_profile_runtime()
+        conn = await self._connect(autocommit=True)
+        try:
+            await conn.execute(
+                "SELECT pg_advisory_lock(hashtextextended(%s, 0))",
+                (f"profile-run:{run_id}",),
+            )
+            row = await (
+                await conn.execute(
+                    """
+                    SELECT run_id, session_id, principal_id, task_input, state, stage,
+                           state_version, release_id, working_profile_version,
+                           confirmed_profile_version
+                    FROM run
+                    WHERE run_id = %s
+                    """,
+                    (run_id,),
+                )
+            ).fetchone()
+            if row is None or row["state"] != "QUEUED":
+                return
+            if row["confirmed_profile_version"] is not None:
+                return
+
+            if await self._apply_consumed_interrupt(conn, row):
+                return
+
+            if row["working_profile_version"] is None:
+                input_data = dict(row["task_input"])
+                input_data["subjects"] = tuple(input_data.get("subjects") or ())
+                profile_input = StructuredProfileInput(**input_data)
+                fields = build_profile_fields(profile_input)
+                async with conn.transaction():
+                    revision = await self._profile.CreateDraft(
+                        conn,
+                        session_id=row["session_id"],
+                        run_id=row["run_id"],
+                        fields=fields,
+                    )
+                    next_version = row["state_version"] + 1
+                    await conn.execute(
+                        """
+                        UPDATE run
+                        SET working_profile_version = %s,
+                            state_version = %s,
+                            updated_at = NOW()
+                        WHERE run_id = %s
+                          AND state = 'QUEUED'
+                          AND state_version = %s
+                        """,
+                        (
+                            revision["profile_version"],
+                            next_version,
+                            run_id,
+                            row["state_version"],
+                        ),
+                    )
+                    next_seq = await self._next_event_seq(conn, run_id)
+                    await conn.execute(
+                        """
+                        INSERT INTO run_event (
+                            run_id, event_seq, event_type, stage, state_version,
+                            payload_version, payload
+                        )
+                        VALUES (%s, %s, 'PROGRESS', %s, %s, 1, %s)
+                        """,
+                        (
+                            run_id,
+                            next_seq,
+                            "INTAKE",
+                            next_version,
+                            Jsonb(
+                                {
+                                    "profile_version": str(revision["profile_version"]),
+                                    "readiness": "VALIDATING",
+                                }
+                            ),
+                        ),
+                    )
+                row["state_version"] = next_version
+                row["working_profile_version"] = revision["profile_version"]
+                validation = await self._profile.Validate(
+                    conn,
+                    release_id=row["release_id"],
+                    fields=fields,
+                )
+            else:
+                revision_row = await (
+                    await conn.execute(
+                        """
+                        SELECT profile_version, fields, lifecycle
+                        FROM profile_revision
+                        WHERE profile_version = %s
+                        """,
+                        (row["working_profile_version"],),
+                    )
+                ).fetchone()
+                if revision_row is None:
+                    raise RunLifecycleError("INTERNAL_ERROR", "working profile revision 不存在")
+                validation = await self._profile.Validate(
+                    conn,
+                    release_id=row["release_id"],
+                    fields=revision_row["fields"],
+                )
+                revision = revision_row
+
+            kind = (
+                "PROFILE_CONFIRM"
+                if validation.readiness == "READY_FOR_CONFIRMATION"
+                else "INTAKE_ASK"
+            )
+            prompt = {
+                "kind": kind,
+                "question_key": (
+                    "profile.confirm"
+                    if kind == "PROFILE_CONFIRM"
+                    else "profile.input.required"
+                ),
+                "profile_version": str(revision["profile_version"]),
+                "fields": validation.fields,
+                "findings": list(validation.findings),
+            }
+            config = {"configurable": {"thread_id": str(run_id)}}
+            snapshot = await self._profile_graph.aget_state(config)
+            pending_interrupt = self._pending_interrupt(snapshot)
+            if pending_interrupt is None:
+                await self._profile_graph.ainvoke({"prompt": prompt}, config)
+                snapshot = await self._profile_graph.aget_state(config)
+                pending_interrupt = self._pending_interrupt(snapshot)
+            if pending_interrupt is None:
+                raise RunLifecycleError("INTERNAL_ERROR", "官方 saver 未产生 interrupt")
+
+            checkpoint = await self._saver.aget_tuple(config)
+            if checkpoint is None or checkpoint.checkpoint.get("id") is None:
+                raise RunLifecycleError("INTERNAL_ERROR", "interrupt 缺少 durable checkpoint")
+            checkpoint_id = checkpoint.checkpoint["id"]
+            if self._checkpoint_persisted is not None:
+                self._checkpoint_persisted(run_id)
+            interrupt_id = uuid4()
+            expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+            async with conn.transaction():
+                current = await (
+                    await conn.execute(
+                        """
+                        SELECT state, state_version
+                        FROM run
+                        WHERE run_id = %s
+                        FOR UPDATE
+                        """,
+                        (run_id,),
+                    )
+                ).fetchone()
+                if current is None or current["state"] != "QUEUED":
+                    return
+                await conn.execute(
+                    """
+                    INSERT INTO run_interrupt (
+                        interrupt_id, run_id, kind, state, question_key,
+                        payload_version, payload, answer_schema_version,
+                        checkpoint_id, expires_at
+                    )
+                    VALUES (%s, %s, %s, 'OPEN', %s, 1, %s, 1, %s, %s)
+                    """,
+                    (
+                        interrupt_id,
+                        run_id,
+                        kind,
+                        prompt["question_key"],
+                        Jsonb(prompt),
+                        checkpoint_id,
+                        expires_at,
+                    ),
+                )
+                next_version = current["state_version"] + 1
+                await conn.execute(
+                    """
+                    UPDATE run
+                    SET state = 'WAITING_HITL',
+                        stage = %s,
+                        state_version = %s,
+                        updated_at = NOW()
+                    WHERE run_id = %s
+                      AND state = 'QUEUED'
+                      AND state_version = %s
+                    """,
+                    (kind, next_version, run_id, current["state_version"]),
+                )
+                next_seq = await self._next_event_seq(conn, run_id)
+                await conn.execute(
+                    """
+                    INSERT INTO run_event (
+                        run_id, event_seq, event_type, stage, state_version,
+                        payload_version, payload
+                    )
+                    VALUES (%s, %s, 'STATE_CHANGED', %s, %s, 1, %s)
+                    """,
+                    (
+                        run_id,
+                        next_seq,
+                        kind,
+                        next_version,
+                        Jsonb({"from_state": "QUEUED", "to_state": "WAITING_HITL"}),
+                    ),
+                )
+                next_seq += 1
+                await conn.execute(
+                    """
+                    INSERT INTO run_event (
+                        run_id, event_seq, event_type, stage, state_version,
+                        payload_version, payload
+                    )
+                    VALUES (%s, %s, 'INTERRUPT', %s, %s, 1, %s)
+                    """,
+                    (
+                        run_id,
+                        next_seq,
+                        kind,
+                        next_version,
+                        Jsonb(
+                            {
+                                "interrupt_id": str(interrupt_id),
+                                "kind": kind,
+                                "state": "OPEN",
+                                "question_key": prompt["question_key"],
+                                "payload_version": 1,
+                                "payload": prompt,
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "expires_at": expires_at.isoformat(),
+                            }
+                        ),
+                    ),
+                )
+        finally:
+            try:
+                await conn.execute(
+                    "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                    (f"profile-run:{run_id}",),
+                )
+            finally:
+                await conn.close()
+
+    @staticmethod
+    def _pending_interrupt(snapshot):
+        for task in snapshot.tasks:
+            if task.interrupts:
+                return task.interrupts[0]
+        return None
+
+    async def _apply_consumed_interrupt(self, conn, run) -> bool:
+        interrupt = await (
+            await conn.execute(
+                """
+                SELECT interrupt_id, kind, payload, answer_payload
+                FROM run_interrupt
+                WHERE run_id = %s
+                  AND state = 'CONSUMED'
+                  AND applied_at IS NULL
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (run["run_id"],),
+            )
+        ).fetchone()
+        if interrupt is None:
+            return False
+
+        config = {"configurable": {"thread_id": str(run["run_id"])}}
+        snapshot = await self._profile_graph.aget_state(config)
+        pending = self._pending_interrupt(snapshot)
+        if pending is not None:
+            await self._profile_graph.ainvoke(
+                Command(resume=interrupt["answer_payload"]),
+                config,
+            )
+            snapshot = await self._profile_graph.aget_state(config)
+            if self._pending_interrupt(snapshot) is not None:
+                raise RunLifecycleError("INTERNAL_ERROR", "官方 saver 未消费 interrupt")
+
+        answer = interrupt["answer_payload"]
+        if answer.get("type") != "CONFIRM_PROFILE":
+            await self._apply_profile_answer_and_create_revision(
+                conn,
+                run=run,
+                interrupt=interrupt,
+                answer=answer,
+            )
+            return False
+        profile_version = UUID(answer["profile_version"])
+        async with conn.transaction():
+            run_row = await (
+                await conn.execute(
+                    """
+                    SELECT run_id, session_id, state, stage, state_version,
+                           release_id, working_profile_version
+                    FROM run
+                    WHERE run_id = %s
+                    FOR UPDATE
+                    """,
+                    (run["run_id"],),
+                )
+            ).fetchone()
+            if run_row is None or run_row["state"] != "QUEUED":
+                raise RunLifecycleError("RUN_STATE_CONFLICT")
+            if run_row["working_profile_version"] != profile_version:
+                raise RunLifecycleError("PROFILE_VERSION_CONFLICT")
+            release = await (
+                await conn.execute(
+                    """
+                    SELECT status, revoked_at
+                    FROM release
+                    WHERE release_id = %s
+                    """,
+                    (run_row["release_id"],),
+                )
+            ).fetchone()
+            if (
+                release is None
+                or release["status"] == "REVOKED"
+                or release["revoked_at"] is not None
+            ):
+                raise RunLifecycleError("RELEASE_REVOKED")
+            revision = await (
+                await conn.execute(
+                    """
+                    SELECT fields
+                    FROM profile_revision
+                    WHERE profile_version = %s AND lifecycle = 'DRAFT'
+                    FOR UPDATE
+                    """,
+                    (profile_version,),
+                )
+            ).fetchone()
+            if revision is None:
+                raise RunLifecycleError("PROFILE_VERSION_CONFLICT")
+            validation = await self._profile.Validate(
+                conn,
+                release_id=run_row["release_id"],
+                fields=revision["fields"],
+            )
+            if validation.readiness != "READY_FOR_CONFIRMATION":
+                raise RunLifecycleError("PROFILE_VERSION_CONFLICT")
+
+            await self._profile.Confirm(
+                conn,
+                profile_version=profile_version,
+                actor=run["principal_id"],
+                session_id=run_row["session_id"],
+            )
+            next_version = run_row["state_version"] + 1
+            await conn.execute(
+                """
+                UPDATE run
+                SET confirmed_profile_version = %s,
+                    stage = 'PROFILE_CONFIRMED',
+                    state_version = %s,
+                    updated_at = NOW()
+                WHERE run_id = %s
+                  AND state = 'QUEUED'
+                  AND state_version = %s
+                """,
+                (
+                    profile_version,
+                    next_version,
+                    run_row["run_id"],
+                    run_row["state_version"],
+                ),
+            )
+            next_seq = await self._next_event_seq(conn, run_row["run_id"])
+            await conn.execute(
+                """
+                INSERT INTO run_event (
+                    run_id, event_seq, event_type, stage, state_version,
+                    payload_version, payload
+                )
+                VALUES (%s, %s, 'PROGRESS', 'PROFILE_CONFIRMED', %s, 1, %s)
+                """,
+                (
+                    run_row["run_id"],
+                    next_seq,
+                    next_version,
+                    Jsonb({"profile_version": str(profile_version)}),
+                ),
+            )
+            await conn.execute(
+                """
+                UPDATE run_interrupt
+                SET applied_at = NOW()
+                WHERE interrupt_id = %s
+                """,
+                (interrupt["interrupt_id"],),
+            )
+        return True
+
+    @staticmethod
+    def _resume_answer_payload(command: ResumeRunCommand) -> dict[str, Any]:
+        answer = command.answer
+        if isinstance(answer, ConfirmProfileAnswer):
+            return {
+                "type": "CONFIRM_PROFILE",
+                "profile_version": (
+                    str(command.profile_version) if command.profile_version else None
+                ),
+            }
+        if isinstance(answer, AnswerFields):
+            return {"type": "ANSWER_FIELDS", "fields": answer.fields}
+        if isinstance(answer, RejectOrEditProfileAnswer):
+            return {"type": "REJECT_OR_EDIT_PROFILE", "patch": answer.patch}
+        if isinstance(answer, DeclineFieldsAnswer):
+            return {"type": "DECLINE_FIELDS", "field_keys": list(answer.field_keys)}
+        raise RunLifecycleError("RUN_STATE_CONFLICT")
+
+    async def _apply_profile_answer_and_create_revision(
+        self,
+        conn,
+        *,
+        run,
+        interrupt,
+        answer: dict[str, Any],
+    ) -> None:
+        base_version = run["working_profile_version"]
+        async with conn.transaction():
+            current = await (
+                await conn.execute(
+                    """
+                    SELECT run_id, session_id, working_profile_version, state_version
+                    FROM run
+                    WHERE run_id = %s
+                    FOR UPDATE
+                    """,
+                    (run["run_id"],),
+                )
+            ).fetchone()
+            if current is None or current["working_profile_version"] != base_version:
+                raise RunLifecycleError("PROFILE_VERSION_CONFLICT")
+            patch = {}
+            if answer["type"] in {"ANSWER_FIELDS", "REJECT_OR_EDIT_PROFILE"}:
+                patch = answer.get("fields") or answer.get("patch") or {}
+            elif answer["type"] == "DECLINE_FIELDS":
+                for key in answer["field_keys"]:
+                    patch[key] = {
+                        "state": "DECLINED",
+                        "source": "USER_FORM",
+                        "value": None,
+                    }
+            else:
+                raise RunLifecycleError("RUN_STATE_CONFLICT")
+            patch = self._normalize_user_profile_patch(patch)
+
+            new_revision = await self._profile.ApplyPatch(
+                conn,
+                session_id=current["session_id"],
+                run_id=current["run_id"],
+                base_profile_version=base_version,
+                patch=patch,
+                idempotency_key=answer.get("interrupt_id"),
+            )
+            next_version = current["state_version"] + 1
+            await conn.execute(
+                """
+                UPDATE run
+                SET working_profile_version = %s,
+                    stage = 'INTAKE',
+                    state_version = %s,
+                    updated_at = NOW()
+                WHERE run_id = %s
+                  AND state = 'QUEUED'
+                  AND state_version = %s
+                """,
+                (
+                    new_revision["profile_version"],
+                    next_version,
+                    current["run_id"],
+                    current["state_version"],
+                ),
+            )
+            next_seq = await self._next_event_seq(conn, current["run_id"])
+            await conn.execute(
+                """
+                INSERT INTO run_event (
+                    run_id, event_seq, event_type, stage, state_version,
+                    payload_version, payload
+                )
+                VALUES (%s, %s, 'PROGRESS', 'INTAKE', %s, 1, %s)
+                """,
+                (
+                    current["run_id"],
+                    next_seq,
+                    next_version,
+                    Jsonb(
+                        {
+                            "profile_version": str(new_revision["profile_version"]),
+                            "based_on": str(base_version),
+                        }
+                    ),
+                ),
+            )
+            await conn.execute(
+                "UPDATE run_interrupt SET applied_at = NOW() WHERE interrupt_id = %s",
+                (interrupt["interrupt_id"],),
+            )
+        run["working_profile_version"] = new_revision["profile_version"]
+        run["state_version"] = next_version
+        run["stage"] = "INTAKE"
+
+    @staticmethod
+    def _normalize_user_profile_patch(
+        patch: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        derived_fields = {"rank", "percentile", "batch_control_line"}
+        normalized: dict[str, dict[str, Any]] = {}
+        for key, field in patch.items():
+            if key in derived_fields:
+                raise RunLifecycleError("PROFILE_INVALID_VALUE")
+            state = field.get("state")
+            if state not in {"PROVIDED", "UNKNOWN", "DECLINED"}:
+                raise RunLifecycleError("PROFILE_INVALID_VALUE")
+            value = field.get("value")
+            if state in {"UNKNOWN", "DECLINED"}:
+                value = None
+            elif value is None:
+                raise RunLifecycleError("PROFILE_INVALID_VALUE")
+            normalized[key] = {
+                "state": state,
+                "source": "USER_FORM",
+                "value": value,
+            }
+        return normalized
 
     async def CancelRun(self, command: CancelRunCommand) -> RunReceipt:
         scope_key = f"run:{command.run_id}"

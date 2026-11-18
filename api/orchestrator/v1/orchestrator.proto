@@ -22,6 +22,9 @@ service Orchestrator {
   // 读取 run 当前状态；不推进图。
   rpc GetRun(GetRunRequest) returns (RunViewReply);
 
+  // 回答或确认具体 interrupt；成功后持久转回 QUEUED，不等待图完成。
+  rpc ResumeRun(ResumeRunRequest) returns (RunReceiptReply);
+
   // 从已持久化事件游标后补发并等待新事件；不推进图。
   rpc WatchRun(WatchRunRequest) returns (stream RunEvent);
 
@@ -115,6 +118,58 @@ message WatchRunRequest {
   int64 after_event_seq = 3;
 }
 
+message StringList {
+  repeated string values = 1;
+}
+
+message ProfileFieldView {
+  string state = 1;
+  string source = 2;
+
+  oneof value {
+    string string_value = 3;
+    int32 int_value = 4;
+    StringList string_list = 5;
+  }
+}
+
+message ProfileFinding {
+  string code = 1;
+  repeated string field_keys = 2;
+  bool blocking = 3;
+  string message_key = 4;
+}
+
+message AnswerFields {
+  map<string, ProfileFieldView> fields = 1;
+}
+
+message ConfirmProfileAnswer {}
+
+message RejectOrEditProfileAnswer {
+  map<string, ProfileFieldView> patch = 1;
+}
+
+message DeclineFieldsAnswer {
+  repeated string field_keys = 1;
+}
+
+message ResumeRunRequest {
+  common.v1.Trace trace = 1;
+  string run_id = 2;
+  string interrupt_id = 3;
+  int64 expected_state_version = 4;
+  string profile_version = 5;
+  string idempotency_key = 6;
+
+  oneof answer {
+    AnswerFields answer_fields = 7;
+    ConfirmProfileAnswer confirm_profile = 8;
+    RejectOrEditProfileAnswer reject_or_edit_profile = 9;
+    DeclineFieldsAnswer decline_fields = 10;
+  }
+}
+
 message CancelRunRequest {
   common.v1.Trace trace = 1;
   string run_id = 2;
@@ -129,6 +184,9 @@ message InterruptView {
   int32 payload_version = 5;
   google.protobuf.Timestamp created_at = 6;
   google.protobuf.Timestamp expires_at = 7;
+  string profile_version = 8;
+  map<string, ProfileFieldView> fields = 9;
+  repeated ProfileFinding findings = 10;
 }
 
 message ResultReference {
@@ -169,5 +227,6 @@ message RunEvent {
 
   oneof payload {
     StateChangedPayload state_changed = 8;
+    InterruptView interrupt = 9;
   }
 }

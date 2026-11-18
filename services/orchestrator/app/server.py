@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import AsyncIterator
 from uuid import UUID
 
@@ -16,12 +17,17 @@ import grpc
 from api.orchestrator.v1 import orchestrator_pb2, orchestrator_pb2_grpc
 
 from app.run_lifecycle import (
+    AnswerFields,
     CancelRunCommand,
+    ConfirmProfileAnswer,
+    DeclineFieldsAnswer,
     RunEvent,
     RunLifecycle,
     RunLifecycleError,
     RunReceipt,
     RunView,
+    RejectOrEditProfileAnswer,
+    ResumeRunCommand,
     StructuredProfileInput,
     SubmitRunCommand,
 )
@@ -95,6 +101,48 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             await self._abort_lifecycle(context, exc)
         return self._run_view_reply(view)
 
+    async def ResumeRun(self, request, context) -> "orchestrator_pb2.RunReceiptReply":
+        lifecycle = await self._require_lifecycle(context)
+        principal_id = await self._principal(context)
+        try:
+            run_id = UUID(request.run_id)
+            interrupt_id = UUID(request.interrupt_id)
+            profile_version = UUID(request.profile_version) if request.profile_version else None
+        except ValueError:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "INVALID_RESUME_ID")
+
+        answer_kind = request.WhichOneof("answer")
+        if answer_kind == "answer_fields":
+            answer = AnswerFields(fields=self._answer_fields(request.answer_fields))
+        elif answer_kind == "confirm_profile":
+            answer = ConfirmProfileAnswer()
+        elif answer_kind == "reject_or_edit_profile":
+            answer = RejectOrEditProfileAnswer(
+                patch=self._answer_fields(request.reject_or_edit_profile.patch),
+            )
+        elif answer_kind == "decline_fields":
+            answer = DeclineFieldsAnswer(
+                field_keys=tuple(request.decline_fields.field_keys),
+            )
+        else:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "ANSWER_REQUIRED")
+
+        try:
+            receipt = await lifecycle.ResumeRun(
+                ResumeRunCommand(
+                    principal_id=principal_id,
+                    run_id=run_id,
+                    interrupt_id=interrupt_id,
+                    expected_state_version=request.expected_state_version,
+                    profile_version=profile_version,
+                    answer=answer,
+                    idempotency_key=request.idempotency_key,
+                )
+            )
+        except RunLifecycleError as exc:
+            await self._abort_lifecycle(context, exc)
+        return self._receipt_reply(receipt)
+
     async def WatchRun(self, request, context) -> AsyncIterator["orchestrator_pb2.RunEvent"]:
         lifecycle = await self._require_lifecycle(context)
         principal_id = await self._principal(context)
@@ -167,6 +215,11 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             "RUN_ALREADY_TERMINAL": grpc.StatusCode.FAILED_PRECONDITION,
             "INTERRUPT_CONSUMED": grpc.StatusCode.ABORTED,
             "INTERRUPT_EXPIRED": grpc.StatusCode.FAILED_PRECONDITION,
+            "PROFILE_VERSION_CONFLICT": grpc.StatusCode.ABORTED,
+            "PROFILE_REQUIRED_MISSING": grpc.StatusCode.INVALID_ARGUMENT,
+            "PROFILE_INVALID_VALUE": grpc.StatusCode.INVALID_ARGUMENT,
+            "PROFILE_UNSUPPORTED_SCOPE": grpc.StatusCode.FAILED_PRECONDITION,
+            "PROFILE_UNSUPPORTED_INPUT": grpc.StatusCode.INVALID_ARGUMENT,
         }.get(exc.reason, grpc.StatusCode.INTERNAL)
         await context.abort(code, exc.reason)
 
@@ -208,6 +261,26 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             reply.current_interrupt.state = interrupt.state
             reply.current_interrupt.question_key = interrupt.question_key
             reply.current_interrupt.payload_version = interrupt.payload_version
+            reply.current_interrupt.profile_version = str(
+                interrupt.payload.get("profile_version") or ""
+            )
+            for key, value in (interrupt.payload.get("fields") or {}).items():
+                field = reply.current_interrupt.fields[key]
+                field.state = value.get("state") or ""
+                field.source = value.get("source") or ""
+                field_value = value.get("value")
+                if isinstance(field_value, list):
+                    field.string_list.values.extend(str(item) for item in field_value)
+                elif isinstance(field_value, int):
+                    field.int_value = field_value
+                elif field_value is not None:
+                    field.string_value = str(field_value)
+            for finding in interrupt.payload.get("findings") or []:
+                item = reply.current_interrupt.findings.add()
+                item.code = finding.get("code") or ""
+                item.field_keys.extend(finding.get("field_keys") or [])
+                item.blocking = bool(finding.get("blocking"))
+                item.message_key = finding.get("message_key") or ""
             reply.current_interrupt.created_at.FromDatetime(interrupt.created_at)
             reply.current_interrupt.expires_at.FromDatetime(interrupt.expires_at)
         if view.result is not None:
@@ -231,8 +304,60 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
         if event.type == "STATE_CHANGED":
             reply.state_changed.from_state = str(event.payload.get("from_state") or "")
             reply.state_changed.to_state = str(event.payload.get("to_state") or "")
+        elif event.type == "INTERRUPT":
+            interrupt = reply.interrupt
+            interrupt.interrupt_id = str(event.payload.get("interrupt_id") or "")
+            interrupt.kind = str(event.payload.get("kind") or "")
+            interrupt.state = str(event.payload.get("state") or "")
+            interrupt.question_key = str(event.payload.get("question_key") or "")
+            interrupt.payload_version = int(event.payload.get("payload_version") or 0)
+            profile_payload = event.payload.get("payload") or {}
+            interrupt.profile_version = str(profile_payload.get("profile_version") or "")
+            for key, value in (profile_payload.get("fields") or {}).items():
+                field = interrupt.fields[key]
+                field.state = value.get("state") or ""
+                field.source = value.get("source") or ""
+                field_value = value.get("value")
+                if isinstance(field_value, list):
+                    field.string_list.values.extend(str(item) for item in field_value)
+                elif isinstance(field_value, int):
+                    field.int_value = field_value
+                elif field_value is not None:
+                    field.string_value = str(field_value)
+            for finding in profile_payload.get("findings") or []:
+                item = interrupt.findings.add()
+                item.code = finding.get("code") or ""
+                item.field_keys.extend(finding.get("field_keys") or [])
+                item.blocking = bool(finding.get("blocking"))
+                item.message_key = finding.get("message_key") or ""
+            if event.payload.get("created_at"):
+                interrupt.created_at.FromDatetime(
+                    datetime.fromisoformat(event.payload["created_at"])
+                )
+            if event.payload.get("expires_at"):
+                interrupt.expires_at.FromDatetime(
+                    datetime.fromisoformat(event.payload["expires_at"])
+                )
         return reply
 
     @staticmethod
     def _state_enum(state: str) -> int:
         return orchestrator_pb2.RunState.Value(state)
+
+    @staticmethod
+    def _answer_fields(fields) -> dict[str, dict[str, object]]:
+        result: dict[str, dict[str, object]] = {}
+        for key, field in fields.items():
+            value_kind = field.WhichOneof("value")
+            if value_kind is None:
+                value = None
+            elif value_kind == "string_list":
+                value = list(field.string_list.values)
+            else:
+                value = getattr(field, value_kind)
+            result[key] = {
+                "state": field.state,
+                "source": field.source,
+                "value": value,
+            }
+        return result

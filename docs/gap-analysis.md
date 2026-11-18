@@ -39,12 +39,12 @@
 | FR | 现状 | 证据（文件:行） | 剩余工作 | 关联 | 里程碑 |
 | --- | --- | --- | --- | --- | --- |
 | FR-01 对话式画像采集（P0） | 🟡 | `graph/state.py:83` 确定性闸门 `check_completeness` 已实现；`graph/nodes/intake.py:12` 节点为 TODO 桩（无 LLM 解析、无 interrupt 追问） | 接 llmgw `role=profile` 解析 user_text→profile；缺项生成追问并 `interrupt()`；字段口径改 `category`（非 track）、主输入仅分数；TypedDict 换运行时校验（Pydantic） | P1-02, P1-14, §9.2 | M2/M3 |
-| FR-02 画像确认 HITL（P0） | ⛔ | `graph/nodes/profile_confirm.py:8` TODO；`internal/gateway/service.go:30` `ConfirmProfile` TODO | 实现画像卡片 interrupt + gateway 回执 → ResumeGraph；`chat_session` 增 `profile_version` 字段 | P1-03, P1-13, §9.1 | M2 |
+| FR-02 画像确认 HITL（P0） | 🟡 | `migrations/09_profile_run_lifecycle.sql`、`app/run_lifecycle` 已实现不可变画像 revision、确认卡 interrupt 与 ResumeRun；旧 gateway `ConfirmProfile` 仍未接新命令 | 接 gateway 适配器与前端画像卡；旧 `ResumeGraph` 收口到 RunLifecycle | P1-03, P1-13, §9.1 | M2 |
 | FR-03 条件必需按需补问（P0） | 🟡 有冲突 | `graph/nodes/check_conditional.py:15` 现实现为「问所有条件字段」，`:13` TODO 注明应由候选硬要求驱动 | 改为候选驱动（候选无体检限制则不问体检）；接 backfill interrupt；UNKNOWN 不放行 | P1-02 | M2 |
 | FR-04 多轮修正与协商探索（P1） | ⛔ | 无对应节点；`build.py:38` 标注 strategy/critic/... 全 TODO | REVISE_PLAN 新建 run；画像修正后派生数据失效一致性 | P1-13 | M6 |
 | FR-05 SSE 流式输出（P0） | 🟡 | `app/server.py:44` `_run` 把每个节点 chunk 转 `progress` 事件；`:43` TODO 未区分 interrupt/result；无 `event_seq`、无可断开订阅 | 事件分型（progress/interrupt/result）+ `event_seq` 单调序 + 断线重连订阅；gateway `CreatePlan` SSE 转推 | P1-08 | M2 |
-| FR-06 任务状态机与超时（P0） | ⛔ 旧模型 | `migrations/00_schema.sql:314` `chat_session.status` 仅 `active/completed/expired`；无 run/interrupt/QUEUED/RUNNING/WAITING_HITL/SUCCEEDED/CANCELLED | 引入 run/interrupt 模型（schema + 状态机）；恢复入口 `POST /v1/runs/{run_id}:resume` 携 `run_id+interrupt_id+expected_state_version+Idempotency-Key`；每次 resume 校验 release 时效；结果默认 30 天可删除 | P1-01(生命周期), P1-10, P2-01, §9.1 | M2 |
-| FR-07 幂等与断点续跑（P0） | 🟡 | `migrations/00_schema.sql:333` `plan_checkpoint` 表存在（session_id/node/state/seq）；`build.py:48` `compile()` **无 checkpointer** | 选定 LangGraph saver 并 `compile(checkpointer=)`（自定义表不能当官方 saver，§6.3-4）；run 级幂等键；租约 + fencing epoch 防并发双执行 | P1-09, P1-10, §6.3 | M2 |
+| FR-06 任务状态机与超时（P0） | 🟡 | `migrations/09_profile_run_lifecycle.sql` 与 `app/run_lifecycle` 已实现 QUEUED / RUNNING / WAITING_HITL、interrupt、ResumeRun 与状态版本；worker 租约和超时竞态未接 | 完成 worker claim/epoch、HITL 超时、执行时限与取消竞态 | P1-01(生命周期), P1-10, P2-01, §9.1 | M2 |
+| FR-07 幂等与断点续跑（P0） | 🟡 | `app/run_lifecycle` 已用官方 `langgraph-checkpoint-postgres` 保存画像确认 checkpoint，Resume receipt/回答可重入；旧通用图仍无 checkpointer，租约 fencing 未接 | 退役旧通用图恢复路径；接 worker 租约 + fencing epoch 防并发双执行 | P1-09, P1-10, §6.3 | M2 |
 
 ### 1.2 检索与知识（FR-08 ~ FR-11）
 

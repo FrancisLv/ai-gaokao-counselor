@@ -55,10 +55,31 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             if "test" not in database.lower():
                 self.fail(f"拒绝清理非测试数据库: {database}")
             await conn.execute(
-                "DROP TABLE IF EXISTS run_event, run_command_receipt, run, release, chat_session CASCADE"
+                """
+                DROP TABLE IF EXISTS
+                    run_interrupt,
+                    profile_confirmation,
+                    profile_revision,
+                    run_event,
+                    run_command_receipt,
+                    run,
+                    release_scope,
+                    release,
+                    chat_session,
+                    checkpoint_writes,
+                    checkpoint_blobs,
+                    checkpoints,
+                    checkpoint_migrations
+                CASCADE
+                """
             )
             await conn.execute(BASE_SESSION_DDL)
             migration = ROOT / "migrations" / "08_release_and_run_foundation.sql"
+            for statement in migration.read_text(encoding="utf-8").split(";"):
+                statement = statement.strip()
+                if statement:
+                    await conn.execute(statement)
+            migration = ROOT / "migrations" / "09_profile_run_lifecycle.sql"
             for statement in migration.read_text(encoding="utf-8").split(";"):
                 statement = statement.strip()
                 if statement:
@@ -85,6 +106,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
             await self._apply_sql_file(conn, "migrations/00_schema.sql")
             await self._apply_sql_file(conn, "migrations/08_release_and_run_foundation.sql")
+            await self._apply_sql_file(conn, "migrations/09_profile_run_lifecycle.sql")
         finally:
             await conn.close()
 
@@ -104,6 +126,17 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                 """,
                 (value, status, '{"components": {}}', "test-sha256", status),
             )
+            if status == "PUBLISHED":
+                await conn.execute(
+                    """
+                    INSERT INTO release_scope (
+                        release_id, province, application_year, category, batch
+                    )
+                    VALUES (%s, '湖南', 2025, '物理类', '本科批')
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (value,),
+                )
         finally:
             await conn.close()
         return value
@@ -118,6 +151,20 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                 WHERE run_id = %s
                 """,
                 (run_id,),
+            )
+        finally:
+            await conn.close()
+
+    async def revoke_release(self, release_id: str) -> None:
+        conn = await self._connect()
+        try:
+            await conn.execute(
+                """
+                UPDATE release
+                SET status = 'REVOKED', revoked_at = NOW()
+                WHERE release_id = %s
+                """,
+                (release_id,),
             )
         finally:
             await conn.close()
