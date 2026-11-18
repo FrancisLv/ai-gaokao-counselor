@@ -4,7 +4,7 @@
 | --- | --- |
 | 文档版本 | v1.0 |
 | 目的 | 把 `prd.md` 的 24 条 FR 逐条对照**真实代码**，给「现状 / 证据文件 / 剩余工作」，并合并 `agent-architecture-review.md` 的 19 项问题，作为拆票与 Codex 上下文的事实底座 |
-| 基准 | 现状以**仓库代码实测**为准；需求口径以 `prd.md` v1.1 为准；两者冲突处一律以 `agent-architecture-review.md` 为准（PRD §12.5） |
+| 基准 | 现状以**仓库代码实测**为准；目标态以 `prd.md` **v1.3** 为准（已修正矛盾与发布范围、为目标态唯一权威）；决策理由以 `docs/adr/` 为准；`agent-architecture-review.md` 已降级为历史存档 |
 | 方法 | 通读 gateway / orchestrator / algo / llmgw / rag / migrations 源码，grep 调用点与表名，不轻信任何登记文本（含审查报告本身） |
 | 生成时间 | 2026-11-18 |
 
@@ -50,7 +50,7 @@
 
 | FR | 现状 | 证据（文件:行） | 剩余工作 | 关联 | 里程碑 |
 | --- | --- | --- | --- | --- | --- |
-| FR-08 结构化/非结构化分流检索（P0） | 🟡 离线可用 | `rag/retrieve.py` `HybridRetriever` 向量(pgvector)+关键词(pg_trgm ILIKE/similarity)+RRF(k=60) 已实现且 SQL 全参数化；但在线节点 `graph/nodes/retrieve.py:14` 返回空(TODO) | ①在线节点接线 ②PRD 写「tsvector 一路」实际用 trgm（中文分词未解决，见 §6 决策1）③无 cross-encoder rerank ④meta 硬过滤仅 `school_name/year`（`retrieve.py:24`），缺 province/category | P1-04, P1-13, §9.2 | M1/M4 |
+| FR-08 结构化/非结构化分流检索（P0） | 🟡 离线可用 | `rag/retrieve.py` `HybridRetriever` 向量(pgvector)+关键词(pg_trgm ILIKE/similarity)+RRF(k=60) 已实现且 SQL 全参数化；PRD v1.3 已对齐 ADR-0001；在线节点 `graph/nodes/retrieve.py:14` 仍返回空(TODO) | ①在线节点接线 ②无 cross-encoder rerank ③meta 硬过滤仅 `school_name/year`（`retrieve.py:24`），缺 province/category；关键词路已知局限由向量路兜底 | P1-04, P1-13, §9.2 | M1/M4 |
 | FR-09 非结构化知识问答（P1） | ⛔ | `build.py:46` `check_conditional → END`，无 POLICY_QA 子图 | 子图路由（POLICY_QA/GENERATE_PLAN/EXPLAIN_RESULT/REVISE_PLAN）；依赖 FR-08 在线化 | P2-02 | M6 |
 | FR-10 离线数据采集与索引管线（P0） | 🟡 | `rag/etl.py`(376 行) + `scripts/ingest_charters.py` 存在；`docs/charters/2025/` 有 5700+ 院校 txt/json 原料 | 按 FR-10 验收核实管线完整度；**表名收口**：`00_schema.sql` 建 `charter_doc/charter_chunk`，`07_policy_chunk_trgm.sql` 建 `policy_doc/policy_chunk`，`retrieve.py:160,201` 查 `policy_chunk`——两套并存未统一 | P2-03 | M4 |
 | FR-11 ETL 四层质检防线（P0） | 🟡 | `scripts/qa_check.py` 存在 | 按 FR-11 四层（结构/语义/交叉/抽样）逐层核实；`etl_run_id` 回溯链 | P1-01 | M4 |
@@ -63,7 +63,7 @@
 | FR-13 硬约束校验（P0） | 🟡 仅选科 | `algo.go:76` `CheckConstraints` 已实现；`algo.proto:140` `RejectedCandidate.rule` 枚举列了 subject_req/single_score/physical/gender/batch，但**实现只做选科** | 单科/体检/性别/学费需「条款→规则→审核→生效→执行」发布链路（P1-01）；补 `PASS/FAIL/UNKNOWN` 三态；未完成前不声称这些维度透出率=0 | P1-01, P1-15 | M3/M4 |
 | FR-14 位次换算（P0） | ✅ 正向 | `algo.go:36` `RankConvert` score→rank；`algo.proto:146` 请求仅 score，`:153` 回 rank+percentile | 仅正向（符合 R7，rank-only 不反推）；**`RankConvertReply` 无控制线**，而 `score_rank_map.control_score` 在库（`00_schema.sql:223`）——可补透出 | §2(控制线未透出) | M3 |
 | FR-15 录取概率估计（P0） | ✅ | `algo.proto:84` `ProbEstimate` method=`weighted_hit`、clamp `[0.01,0.99]`；`OptimizationReport.slip_rate=Π(1−pᵢ)`(`:117`) | 无置信区间字段（符合 R5，降 P2）；slip_rate 须标注非录取保证 | P1-05, P1-15 | M3 已完成 |
-| FR-16 方案自我挑战 Critic（P1） | 🟡 有偏差 | `build.py:17-19` `MAX_ASK_ROUNDS=6`✅、`MAX_VERIFY_RETRIES=2`✅、但 `MAX_CRITIC_LOOPS=3`❌（PRD FR-16 与 §7.2 自相矛盾：FR-16 写「最多 2 次」、§7.2 写「Critic 3 轮」） | Critic 上限统一为 2（并修 PRD §7.2 口径）；`route_after_intake`(`build.py:26`) 到上限带缺失继续 = P1-02 冲突源，需改为触发降级/明确低置信而非静默放行 | P1-02, P1-03 | M2/M6 |
+| FR-16 方案自我挑战 Critic（P1） | 🟡 有偏差 | `build.py:17-19` `MAX_ASK_ROUNDS=6` ✅、`MAX_VERIFY_RETRIES=2` ✅、`MAX_CRITIC_LOOPS=2` 已与 PRD v1.3 对齐；Critic 节点仍未实现 | 实现已优化方案上的结构化审查、无进展检测与 P1 发布门禁；硬错误不得由 Critic 豁免 | P1-02, P1-03 | M2/M6 |
 | FR-17 志愿表优化（P0） | ✅ 算法侧 | `algo.go:86` `OptimizeWishlist`；`algo.proto:193` 消费候选不重跑 rank/prob；`OptimizationReport` 含配比/滑档率/期望满意度 | orchestrator 未接；(P2)投档模拟未做 | P1-14 | M3 |
 
 ### 1.4 生成、校验与治理（FR-18 ~ FR-24）
@@ -82,7 +82,9 @@
 
 ## 2. 审查 19 项问题 → 回填状态
 
-> 「PRD 回填」= 该问题结论是否已写进 PRD v1.1 正文（上一轮修订完成）；「代码收口」= 是否已在代码层解决。**全部 19 项代码层均未收口**（除 P1-14 算法接口已按新口径实现）。
+> 「PRD 回填」= 该问题结论是否已写进 PRD 正文（v1.1 逐条回填、v1.2 吸收审查全文、v1.3 修正矛盾与发布范围）；「代码收口」= 是否已在代码层解决。**全部 19 项代码层均未收口**（除 P1-14 算法接口已按新口径实现）。
+>
+> 编号兼容：本节沿用历史审查编号 `P1-xx / P2-xx`；PRD v1.3 为避免与功能优先级混淆，对外写作 `REVIEW-P1-xx / REVIEW-P2-xx`。
 
 | 编号 | 问题 | 关联 FR | PRD 回填 | 代码收口 |
 | --- | --- | --- | --- | --- |
@@ -140,7 +142,7 @@
 | --- | --- | --- | --- |
 | C1 | 字段口径 `track` vs `category` | `state.py:12` GLOBAL_REQUIRED 用 track；proto/DB 用 category | 画像→algo 入参对不上（§9.2） |
 | C2 | `score_or_rank` 接受 rank-only | `state.py:12,90`；但 FR-14/proto 仅支持 score→rank | 只给位次的请求会被闸门放行却无接口处理（P1-14/R7） |
-| C3 | Critic 上限 3 vs PRD 2 | `build.py:18` MAX_CRITIC_LOOPS=3；PRD FR-16=2、§7.2=3 | PRD 自相矛盾 + 代码偏差，须统一为 2 |
+| C3 | Critic 上限已对齐 | `build.py:18` `MAX_CRITIC_LOOPS=2`；PRD v1.3 §5.2 / FR-16 / §7.2 均为 2 | 规格口径已统一，不再是阻塞项 |
 | C4 | route_after_intake 到上限静默放行 | `build.py:26-27` | P1-02 冲突源：带缺失继续却标低置信，绕过门禁 |
 | C5 | 画像无运行时校验 | `state.py:29` TypedDict（仅类型提示） | 非法画像不会被拦截（P2-03） |
 
@@ -159,14 +161,14 @@
 
 | 阶段 | 里程碑 | 首批可开票（依赖 §6 决策已定） | 阻塞前置 |
 | --- | --- | --- | --- |
-| A 规格对齐 | M1 | 固化 run/interrupt/事件契约 proto 草案（新字段用新编号，§7.5）；本文档 §4 缺口逐条立 issue | 无（只读/草案，可立即启动） |
+| A 规格对齐 | M1 | 已建立 Profile / Run / Retrieval / Rules / Evidence / LLM Gateway / Eval-SLO / Security-Retention 八份 runtime 契约（后两份待确认）；下一步制定 proto/DB 变更计划并登记 issue | 无 |
 | B 任务底座 | M2 | schema 迁移（B1/B2/B4）；选定并接入 LangGraph saver（B3）；gateway 三入口 + SSE 事件分型；run 状态机 + 幂等恢复 | 决策 2（saver）、决策 4（release_id 形态） |
 | C 算法闭环 | M3 | orchestrator 接 algo 四 RPC（FR-12/14/15/17）；修 C1~C5 口径/护栏；受控 ALGORITHM_PREVIEW | 决策 1（分词，影响取数）、B5 表名收口 |
 | D 生产资格与证据 | M4 | ETL 四层质检 + 双路检索在线化 + rerank；当年规则发布链路（FR-13）；三类证据校验（FR-19）；golden set + CI 门禁（FR-23） | 决策 1（分词）、决策 5（golden set 标注归属） |
 | E 模型治理与表达 | M5 | llmgw 路由/缓存/原子预占结算（FR-20）；报告生成 + 失败模板（FR-18）；隐私脱敏（FR-22） | 决策 3（LLM 路径/模型/key） |
 | F 智能增强 | M6 | Strategy/Critic/政策问答/解释·修订子图（FR-04/09/16）；全链路 OTel（FR-24）；压测 | E 完成 |
 
-**立即可启动（零决策依赖）**：A 阶段的 proto 契约草案 + 把本文档 §4 的 B/C/D 缺口逐条登记为 GitHub Issue（用 `docs/agents/issue-tracker.md` 的 native blocking 依赖链接编码 A→F 顺序）。
+**当前可启动**：确认五份 runtime 契约后，建立 proto/DB 变更草案，并把本文档 §4 的 B/C/D 缺口逐条登记为 GitHub Issue（用 `docs/agents/issue-tracker.md` 的 native blocking 依赖链接编码 A→F 顺序）。
 
 ---
 
@@ -199,5 +201,5 @@
 - `services/orchestrator/rag/retrieve.py:6,24,160,201` — trgm 替代 tsvector / meta 过滤字段 / policy_chunk 查询
 - `migrations/00_schema.sql:223,272,306,314,333,353,385,409` — control_score / charter_chunk / chat_session / status / plan_checkpoint / llm_call_log / eval_run / data_version
 - `migrations/07_policy_chunk_trgm.sql:19,30` — policy_doc / policy_chunk
-- `docs/prd.md` v1.1（24 条 FR + §9 里程碑 + §10 风险 + §12 验收总则）
-- `docs/agent-architecture-review.md`（P1-01~P1-15 + P2-01~P2-04 + §6.3 + §9 + §10.1）
+- `docs/prd.md` **v1.3**（24 条 FR + §5.2 端到端 15 步 + §8 服务/契约/表映射/证据/旁路 + §9 里程碑 + §10 风险 + §12 验收总则 + §13 20 验收场景）
+- `docs/agent-architecture-review.md`（**历史存档**，结论已吸收进 PRD v1.3；P1-01~P1-15 + P2-01~P2-04 + §6.3 + §9 + §10.1）
