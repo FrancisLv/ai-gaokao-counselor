@@ -21,7 +21,9 @@ from psycopg.types.json import Jsonb
 from api.algo.v1 import algo_pb2
 from api.common.v1 import common_pb2
 from app.run_lifecycle.algo import AlgoClient
+from app.run_lifecycle.events import append_event
 from app.run_lifecycle.models import (
+    AlgorithmPreviewPayload,
     AnswerFields,
     ConfirmProfileAnswer,
     CancelRunCommand,
@@ -52,9 +54,6 @@ class RunLifecycle:
         worker_owner: str | None = None,
         lease_duration: timedelta = timedelta(seconds=30),
         clock: Callable[[], datetime] | None = None,
-        _after_claim: Callable[[UUID, int], Any] | None = None,
-        _checkpoint_persisted: Callable[[UUID], None] | None = None,
-        _resume_accepted: Callable[[UUID], None] | None = None,
         algo_client: AlgoClient | None = None,
     ) -> None:
         if not dsn:
@@ -64,15 +63,21 @@ class RunLifecycle:
         self._worker_owner = worker_owner or f"orchestrator-{uuid4()}"
         self._lease_duration = lease_duration
         self._clock = clock or (lambda: datetime.now(timezone.utc))
-        self._after_claim = _after_claim
-        self._checkpoint_persisted = _checkpoint_persisted
-        self._resume_accepted = _resume_accepted
         self._algo_client = algo_client
         self._saver_cm = None
         self._saver: AsyncPostgresSaver | None = None
         self._profile_graph = None
         self._runtime_lock = asyncio.Lock()
         self._profile = ProfileRuntime()
+
+    async def _after_claim_hook(self, run_id: UUID, lease_epoch: int) -> None:
+        """测试 adapter 可覆写的执行点；生产默认无副作用。"""
+
+    def _checkpoint_persisted_hook(self, run_id: UUID) -> None:
+        """测试 adapter 可覆写的崩溃注入点。"""
+
+    async def _resume_accepted_hook(self, run_id: UUID) -> None:
+        """测试 adapter 可覆写的提交后崩溃注入点。"""
 
     async def close(self) -> None:
         if self._saver_cm is not None:
@@ -190,7 +195,7 @@ class RunLifecycle:
                            r.active_execution_remaining_ms, r.cancel_requested_at,
                            r.result_version, r.result_kind,
                            rr.payload AS result_payload,
-                           r.created_at, r.updated_at
+                           r.created_at, r.updated_at, r.expires_at
                     FROM run r
                     LEFT JOIN run_result rr ON rr.result_version = r.result_version
                     WHERE r.run_id = %s AND r.principal_id = %s
@@ -248,6 +253,7 @@ class RunLifecycle:
                 result_payload=row["result_payload"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
+                expires_at=row["expires_at"],
             )
         finally:
             await conn.close()
@@ -389,6 +395,10 @@ class RunLifecycle:
                 principal_id=row["principal_id"],
                 run_id=row["run_id"],
             )
+
+    async def run_due_work_once(self) -> None:
+        """内部 worker scheduler 的公开协作方法；仍由 RunLifecycle 掌握状态机。"""
+        await self._run_due_work_once()
 
     async def ResumeRun(self, command: ResumeRunCommand) -> RunReceipt:
         if await self._expire_due_hitl(
@@ -593,8 +603,8 @@ class RunLifecycle:
                         target_run_id=run["run_id"],
                     )
             if self._auto_profile:
-                if self._resume_accepted is not None and accepted_receipt.accepted:
-                    self._resume_accepted(command.run_id)
+                if accepted_receipt.accepted:
+                    await self._resume_accepted_hook(command.run_id)
                 await self._process_profile_run(command.run_id)
             return accepted_receipt
         finally:
@@ -607,7 +617,10 @@ class RunLifecycle:
             self._saver_cm = AsyncPostgresSaver.from_conn_string(self._dsn)
             self._saver = await self._saver_cm.__aenter__()
             await self._saver.setup()
-            self._profile_graph = build_profile_graph(self._saver)
+            self._profile_graph = build_profile_graph(
+                self._saver,
+                self._algorithm_preview_for_graph,
+            )
 
     async def _claim_run(self, conn, run_id: UUID) -> dict[str, Any] | None:
         """取得执行权；租约未过期的其他 owner 不会被抢占。"""
@@ -829,29 +842,21 @@ class RunLifecycle:
         ).fetchone()
         if parked is None:
             raise RunLifecycleError("RUN_STATE_CONFLICT")
-        next_seq = await self._next_event_seq(conn, row["run_id"])
-        await conn.execute(
-            """
-            INSERT INTO run_event (
-                run_id, event_seq, event_type, stage, state_version,
-                payload_version, payload
-            )
-            VALUES (%s, %s, %s, %s, %s, 1, %s)
-            """,
-            (
-                row["run_id"],
-                next_seq,
-                "ERROR" if target_state in {"FAILED", "EXPIRED"} else "STATE_CHANGED",
-                stage,
-                next_version,
-                Jsonb(
-                    {
-                        "from_state": "RUNNING",
-                        "to_state": target_state,
-                        "terminal_reason": terminal_reason,
-                    }
-                ),
+        await append_event(
+            conn,
+            run_id=row["run_id"],
+            event_type=(
+                "ERROR"
+                if target_state in {"FAILED", "EXPIRED"}
+                else "STATE_CHANGED"
             ),
+            stage=stage,
+            state_version=next_version,
+            payload={
+                "from_state": "RUNNING",
+                "to_state": target_state,
+                "terminal_reason": terminal_reason,
+            },
         )
         return dict(parked)
 
@@ -901,22 +906,17 @@ class RunLifecycle:
                 ).fetchone()
                 if failed is None:
                     return None
-                next_seq = await self._next_event_seq(conn, row["run_id"])
-                await conn.execute(
-                    """
-                    INSERT INTO run_event (
-                        run_id, event_seq, event_type, stage, state_version,
-                        payload_version, payload
-                    )
-                    VALUES (%s, %s, 'ERROR', %s, %s, 1, %s)
-                    """,
-                    (
-                        row["run_id"],
-                        next_seq,
-                        row["stage"],
-                        next_version,
-                        Jsonb({"terminal_reason": "EXECUTION_TIMEOUT"}),
-                    ),
+                await append_event(
+                    conn,
+                    run_id=row["run_id"],
+                    event_type="ERROR",
+                    stage=row["stage"],
+                    state_version=next_version,
+                    payload={
+                        "code": "EXECUTION_TIMEOUT",
+                        "message": "主动执行额度已耗尽",
+                        "retryable": False,
+                    },
                 )
             return None
 
@@ -1003,32 +1003,79 @@ class RunLifecycle:
             ).fetchone()
             if stopped is None:
                 return False
-            next_seq = await self._next_event_seq(conn, row["run_id"])
-            await conn.execute(
-                """
-                INSERT INTO run_event (
-                    run_id, event_seq, event_type, stage, state_version,
-                    payload_version, payload
-                )
-                VALUES (%s, %s, 'STATE_CHANGED', %s, %s, 1, %s)
-                """,
-                (
-                    row["run_id"],
-                    next_seq,
-                    row["stage"],
-                    next_version,
-                    Jsonb(
-                        {
-                            "from_state": "RUNNING",
-                            "to_state": "CANCELLED",
-                            "terminal_reason": "CANCELLED_BY_USER",
-                        }
-                    ),
-                ),
+            await append_event(
+                conn,
+                run_id=row["run_id"],
+                event_type="STATE_CHANGED",
+                stage=row["stage"],
+                state_version=next_version,
+                payload={
+                    "from_state": "RUNNING",
+                    "to_state": "CANCELLED",
+                    "terminal_reason": "CANCELLED_BY_USER",
+                },
             )
         return True
 
     async def _process_algorithm_preview(self, conn, row: dict[str, Any]) -> None:
+        config = {"configurable": {"thread_id": str(row["run_id"])}}
+        snapshot = await self._profile_graph.aget_state(config)
+        pending = self._pending_interrupt(snapshot)
+        pending_value = getattr(pending, "value", None) if pending is not None else None
+        if (
+            isinstance(pending_value, dict)
+            and pending_value.get("kind") == "INTERNAL_ALGORITHM_PREVIEW"
+        ):
+            await self._profile_graph.ainvoke(
+                Command(
+                    resume={
+                        "type": "START_ALGORITHM_PREVIEW",
+                        "run_id": str(row["run_id"]),
+                    }
+                ),
+                config,
+            )
+            snapshot = await self._profile_graph.aget_state(config)
+        preview = snapshot.values.get("preview")
+        if preview is None:
+            preview = await self._build_algorithm_preview(conn, row)
+        await self._publish_algorithm_preview(
+            conn,
+            row=row,
+            preview=preview,
+        )
+
+    async def _algorithm_preview_for_graph(
+        self,
+        run_id: str,
+    ) -> AlgorithmPreviewPayload:
+        conn = await self._connect(autocommit=True)
+        try:
+            row = await (
+                await conn.execute(
+                    """
+                    SELECT run_id, session_id, principal_id, task_input, state, stage,
+                           state_version, release_id, working_profile_version,
+                           confirmed_profile_version, lease_owner, lease_epoch,
+                           lease_expires_at, active_execution_remaining_ms,
+                           active_execution_started_at
+                    FROM run
+                    WHERE run_id = %s
+                    """,
+                    (UUID(run_id),),
+                )
+            ).fetchone()
+            if row is None or row["state"] != "RUNNING":
+                raise RunLifecycleError("RUN_STATE_CONFLICT")
+            return await self._build_algorithm_preview(conn, row)
+        finally:
+            await conn.close()
+
+    async def _build_algorithm_preview(
+        self,
+        conn,
+        row: dict[str, Any],
+    ) -> AlgorithmPreviewPayload:
         profile_version = row["confirmed_profile_version"]
         revision = await (
             await conn.execute(
@@ -1192,11 +1239,7 @@ class RunLifecycle:
             checked=checked,
             optimized=optimized,
         )
-        await self._publish_algorithm_preview(
-            conn,
-            row=row,
-            preview=preview,
-        )
+        return preview
 
     @staticmethod
     def _candidate_identity(candidate) -> tuple[str, str]:
@@ -1458,42 +1501,26 @@ class RunLifecycle:
             ).fetchone()
             if updated is None:
                 raise RunLifecycleError("RUN_STATE_CONFLICT")
-            next_seq = await self._next_event_seq(conn, row["run_id"])
-            await conn.execute(
-                """
-                INSERT INTO run_event (
-                    run_id, event_seq, event_type, stage, state_version,
-                    payload_version, payload
-                )
-                VALUES (%s, %s, 'STATE_CHANGED', 'PREVIEW_READY', %s, 1, %s)
-                """,
-                (
-                    row["run_id"],
-                    next_seq,
-                    next_version,
-                    Jsonb({"from_state": "RUNNING", "to_state": "SUCCEEDED"}),
-                ),
+            await append_event(
+                conn,
+                run_id=row["run_id"],
+                event_type="STATE_CHANGED",
+                stage="PREVIEW_READY",
+                state_version=next_version,
+                payload={"from_state": "RUNNING", "to_state": "SUCCEEDED"},
             )
-            await conn.execute(
-                """
-                INSERT INTO run_event (
-                    run_id, event_seq, event_type, stage, state_version,
-                    payload_version, payload
-                )
-                VALUES (%s, %s, 'RESULT', 'PREVIEW_READY', %s, 2, %s)
-                """,
-                (
-                    row["run_id"],
-                    next_seq + 1,
-                    next_version,
-                    Jsonb(
-                        {
-                            "result_version": str(result_version),
-                            "result_kind": "ALGORITHM_PREVIEW",
-                            "preview": preview,
-                        }
-                    ),
-                ),
+            await append_event(
+                conn,
+                run_id=row["run_id"],
+                event_type="RESULT",
+                stage="PREVIEW_READY",
+                state_version=next_version,
+                payload={
+                    "result_version": str(result_version),
+                    "result_kind": "ALGORITHM_PREVIEW",
+                    "preview": preview,
+                },
+                payload_version=2,
             )
 
     async def _process_profile_run(self, run_id: UUID) -> None:
@@ -1503,8 +1530,7 @@ class RunLifecycle:
             row = await self._claim_run(conn, run_id)
             if row is None:
                 return
-            if self._after_claim is not None:
-                await self._after_claim(run_id, row["lease_epoch"])
+            await self._after_claim_hook(run_id, row["lease_epoch"])
             if await self._stop_if_cancelled(conn, row):
                 return
             row = await self._consume_active_budget(conn, row)
@@ -1646,7 +1672,10 @@ class RunLifecycle:
             snapshot = await self._profile_graph.aget_state(config)
             pending_interrupt = self._pending_interrupt(snapshot)
             if pending_interrupt is None:
-                await self._profile_graph.ainvoke({"prompt": prompt}, config)
+                await self._profile_graph.ainvoke(
+                    {"run_id": str(run_id), "prompt": prompt},
+                    config,
+                )
                 snapshot = await self._profile_graph.aget_state(config)
                 pending_interrupt = self._pending_interrupt(snapshot)
             if pending_interrupt is None:
@@ -1656,8 +1685,7 @@ class RunLifecycle:
             if checkpoint is None or checkpoint.checkpoint.get("id") is None:
                 raise RunLifecycleError("INTERNAL_ERROR", "interrupt 缺少 durable checkpoint")
             checkpoint_id = checkpoint.checkpoint["id"]
-            if self._checkpoint_persisted is not None:
-                self._checkpoint_persisted(run_id)
+            self._checkpoint_persisted_hook(run_id)
             interrupt_id = uuid4()
             prompt_time = self._clock()
             expires_at = prompt_time + timedelta(minutes=30)
@@ -1824,7 +1852,15 @@ class RunLifecycle:
                 config,
             )
             snapshot = await self._profile_graph.aget_state(config)
-            if self._pending_interrupt(snapshot) is not None:
+            pending = self._pending_interrupt(snapshot)
+            pending_value = getattr(pending, "value", None) if pending is not None else None
+            if (
+                pending is not None
+                and not (
+                    isinstance(pending_value, dict)
+                    and pending_value.get("kind") == "INTERNAL_ALGORITHM_PREVIEW"
+                )
+            ):
                 raise RunLifecycleError("INTERNAL_ERROR", "官方 saver 未消费 interrupt")
 
         answer = interrupt["answer_payload"]

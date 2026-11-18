@@ -20,17 +20,20 @@ FROM major_admission ma
 JOIN (
     SELECT year, MAX(cumulative_count) AS total_count
     FROM score_rank_map
-    WHERE province = $1::text AND category = $2::text
+    WHERE release_id = $1::text
+      AND province = $2::text AND category = $3::text
     GROUP BY year
 ) srm ON ma.year = srm.year
-WHERE ma.province = $1::text AND ma.category = $2::text AND ma.batch = $3::text
-  AND ma.year >= $4::int AND ma.year <= $5::int
+WHERE ma.release_id = $1::text
+  AND ma.province = $2::text AND ma.category = $3::text AND ma.batch = $4::text
+  AND ma.year >= $5::int AND ma.year <= $6::int
   AND ma.min_rank IS NOT NULL
 GROUP BY ma.university_code, ma.major_group, ma.year, srm.total_count
 ORDER BY ma.university_code, ma.major_group, ma.year DESC
 `
 
 type ListGroupHistoryParams struct {
+	ReleaseID string
 	Province  string
 	Category  string
 	Batch     string
@@ -50,6 +53,7 @@ type ListGroupHistoryRow struct {
 // 总人数来自完整一分一段表，子查询不能按本科批过滤。
 func (q *Queries) ListGroupHistory(ctx context.Context, arg ListGroupHistoryParams) ([]ListGroupHistoryRow, error) {
 	rows, err := q.db.Query(ctx, listGroupHistory,
+		arg.ReleaseID,
 		arg.Province,
 		arg.Category,
 		arg.Batch,

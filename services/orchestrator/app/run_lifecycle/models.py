@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, NotRequired, TypedDict
 from uuid import UUID
 
 
@@ -24,6 +24,89 @@ class RunLifecycleError(Exception):
     def __init__(self, reason: str, message: str | None = None) -> None:
         self.reason = reason
         super().__init__(message or reason)
+
+
+class ProfileFieldPayload(TypedDict):
+    state: str
+    source: str
+    value: str | int | list[str] | None
+
+
+class ProfileFindingPayload(TypedDict):
+    code: str
+    field_keys: list[str]
+    blocking: bool
+    message_key: str
+
+
+ProfileFields = dict[str, ProfileFieldPayload]
+
+
+class ProgressPayload(TypedDict, total=False):
+    message: str
+    readiness: str
+    message_key: str
+    profile_version: str
+
+
+class ErrorPayload(TypedDict, total=False):
+    code: str
+    message: str
+    retryable: bool
+    terminal_reason: str
+
+
+class ResultPayload(TypedDict):
+    result_version: str
+    result_kind: str
+    preview: "AlgorithmPreviewPayload"
+
+
+class AlgorithmVerificationCheckPayload(TypedDict):
+    key: str
+    status: str
+    detail: str
+
+
+class UnverifiedConditionPayload(TypedDict):
+    code: str
+    message: str
+
+
+class AlgorithmPreviewPayload(TypedDict, total=False):
+    result_version: str
+    run_id: str
+    release_id: str
+    confirmed_profile_version: str
+    rank: int
+    percentile: float
+    rush_candidates: list[dict[str, Any]]
+    stable_candidates: list[dict[str, Any]]
+    safe_candidates: list[dict[str, Any]]
+    rush_total: int
+    stable_total: int
+    safe_total: int
+    audit_basis: dict[str, Any]
+    kept_candidates: list[dict[str, Any]]
+    rejected_candidates: list[dict[str, Any]]
+    wishlist: dict[str, Any]
+    algorithm_method: str
+    algorithm_config_version: str
+    verification_summary: list[AlgorithmVerificationCheckPayload]
+    unverified_conditions: list[UnverifiedConditionPayload]
+    risk_notice: str
+    disclaimer: str
+    formal_recommendation: bool
+    internal_controlled_only: bool
+    result_kind: str
+
+
+RunEventPayload = (
+    dict[str, Any]
+    | ProgressPayload
+    | ErrorPayload
+    | ResultPayload
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +131,7 @@ class SubmitRunCommand:
 
 @dataclass(frozen=True, slots=True)
 class AnswerFields:
-    fields: dict[str, dict[str, Any]]
+    fields: ProfileFields
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +141,7 @@ class ConfirmProfileAnswer:
 
 @dataclass(frozen=True, slots=True)
 class RejectOrEditProfileAnswer:
-    patch: dict[str, dict[str, Any]]
+    patch: ProfileFields
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,9 +221,10 @@ class RunView:
     cancel_requested_at: datetime | None
     current_interrupt: InterruptView | None
     result: ResultReference | None
-    result_payload: dict[str, Any] | None
+    result_payload: AlgorithmPreviewPayload | None
     created_at: datetime
     updated_at: datetime
+    expires_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,5 +236,5 @@ class RunEvent:
     state_version: int
     occurred_at: datetime
     payload_version: int
-    payload: dict[str, Any]
+    payload: RunEventPayload
 

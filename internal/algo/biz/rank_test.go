@@ -117,7 +117,7 @@ type fakeRankRepo struct {
 	err     error
 }
 
-func (f *fakeRankRepo) LoadScoreRankMap(ctx context.Context, province, category string, year int) ([]ScoreRankEntry, int, error) {
+func (f *fakeRankRepo) LoadScoreRankMap(ctx context.Context, releaseID, province, category string, year int) ([]ScoreRankEntry, int, error) {
 	if f.err != nil {
 		return nil, 0, f.err
 	}

@@ -19,11 +19,13 @@ SELECT
     batch,
     COALESCE(control_score, 0)::int AS control_score
 FROM score_rank_map
-WHERE province = $1::text AND category = $2::text AND year = $3::int
+WHERE release_id = $1::text
+  AND province = $2::text AND category = $3::text AND year = $4::int
 ORDER BY score DESC
 `
 
 type ListScoreRanksParams struct {
+	ReleaseID  string
 	Province   string
 	Category   string
 	ReportYear int32
@@ -42,7 +44,12 @@ type ListScoreRanksRow struct {
 // 读取报考年完整一分一段表，不能按批次过滤，否则全省人数分母会偏小。
 // 本科线由 Go 从本科批记录中提取；分数/位次区间仍按原规则解析。
 func (q *Queries) ListScoreRanks(ctx context.Context, arg ListScoreRanksParams) ([]ListScoreRanksRow, error) {
-	rows, err := q.db.Query(ctx, listScoreRanks, arg.Province, arg.Category, arg.ReportYear)
+	rows, err := q.db.Query(ctx, listScoreRanks,
+		arg.ReleaseID,
+		arg.Province,
+		arg.Category,
+		arg.ReportYear,
+	)
 	if err != nil {
 		return nil, err
 	}

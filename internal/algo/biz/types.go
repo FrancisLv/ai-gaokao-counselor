@@ -8,12 +8,13 @@ package biz
 
 // UserQuery 用户查询（全局唯一定义，rank/prob 共用）。
 type UserQuery struct {
-	Province string   // 省份：湖南
-	Year     int      // 报考年份（请求传入，如演示 2025）；窗口/计划/候选池均由此推导，见 §3.0
-	Category string   // 科类：物理类/历史类（对应 DB category 字段，非 track）
-	Batch    string   // 批次：本科批
-	Score    float64  // 高考分数
-	Subjects []string // 选科组合，如 ["物理", "化学", "生物"]
+	ReleaseID string   // 不可变数据发布清单；所有公开数据查询必须按此过滤
+	Province  string   // 省份：湖南
+	Year      int      // 报考年份（请求传入，如演示 2025）；窗口/计划/候选池均由此推导，见 §3.0
+	Category  string   // 科类：物理类/历史类（对应 DB category 字段，非 track）
+	Batch     string   // 批次：本科批
+	Score     float64  // 高考分数
+	Subjects  []string // 选科组合，如 ["物理", "化学", "生物"]
 	// 以下由 rank 模块计算后回填
 	Rank       int     // 位次
 	Percentile float64 // 百分位
@@ -22,10 +23,11 @@ type UserQuery struct {
 // RankQuery 位次转换入参（RankConvert RPC / RankUsecase.Convert 专用；H2/Q32）。
 // 只带换算必需的四项，比复用带 Rank/Percentile 回填字段的 UserQuery 更干净。
 type RankQuery struct {
-	Province string  // 省份：湖南
-	Category string  // 科类：物理类/历史类
-	Year     int     // 报考年（如 2025）：决定载入哪年 score_rank_map
-	Score    float64 // 高考分数
+	ReleaseID string  // 不可变数据发布清单；决定读取哪一组一分一段数据
+	Province  string  // 省份：湖南
+	Category  string  // 科类：物理类/历史类
+	Year      int     // 报考年（如 2025）：决定载入哪年 score_rank_map
+	Score     float64 // 高考分数
 }
 
 // UserProfile 用户画像（用于效用打分）。

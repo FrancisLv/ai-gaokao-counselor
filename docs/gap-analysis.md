@@ -42,9 +42,9 @@
 | FR-02 画像确认 HITL（P0） | 🟡 | `migrations/09_profile_run_lifecycle.sql`、`app/run_lifecycle` 已实现不可变画像 revision、确认卡 interrupt 与 ResumeRun；旧 gateway `ConfirmProfile` 仍未接新命令 | 接 gateway 适配器与前端画像卡；旧 `ResumeGraph` 收口到 RunLifecycle | P1-03, P1-13, §9.1 | M2 |
 | FR-03 条件必需按需补问（P0） | 🟡 有冲突 | `graph/nodes/check_conditional.py:15` 现实现为「问所有条件字段」，`:13` TODO 注明应由候选硬要求驱动 | 改为候选驱动（候选无体检限制则不问体检）；接 backfill interrupt；UNKNOWN 不放行 | P1-02 | M2 |
 | FR-04 多轮修正与协商探索（P1） | ⛔ | 无对应节点；`build.py:38` 标注 strategy/critic/... 全 TODO | REVISE_PLAN 新建 run；画像修正后派生数据失效一致性 | P1-13 | M6 |
-| FR-05 SSE 流式输出（P0） | 🟡 | `app/server.py:44` `_run` 把每个节点 chunk 转 `progress` 事件；`:43` TODO 未区分 interrupt/result；无 `event_seq`、无可断开订阅 | 事件分型（progress/interrupt/result）+ `event_seq` 单调序 + 断线重连订阅；gateway `CreatePlan` SSE 转推 | P1-08 | M2 |
-| FR-06 任务状态机与超时（P0） | 🟡 | `migrations/09_profile_run_lifecycle.sql` 与 `app/run_lifecycle` 已实现 QUEUED / RUNNING / WAITING_HITL、interrupt、ResumeRun 与状态版本；worker 租约和超时竞态未接 | 完成 worker claim/epoch、HITL 超时、执行时限与取消竞态 | P1-01(生命周期), P1-10, P2-01, §9.1 | M2 |
-| FR-07 幂等与断点续跑（P0） | 🟡 | `app/run_lifecycle` 已用官方 `langgraph-checkpoint-postgres` 保存画像确认 checkpoint，Resume receipt/回答可重入；旧通用图仍无 checkpointer，租约 fencing 未接 | 退役旧通用图恢复路径；接 worker 租约 + fencing epoch 防并发双执行 | P1-09, P1-10, §6.3 | M2 |
+| FR-05 SSE 流式输出（P0） | ✅ RunLifecycle 侧 | `WatchRun` 提供持久 `event_seq`、typed progress/interrupt/result/error、游标补发和断线重订；gateway 已接 RunLifecycle 命令 | HTTP SSE 具体响应适配与前端重连仍属后续接线 | P1-08 | M2 已接 |
+| FR-06 任务状态机与超时（P0） | ✅ RunLifecycle 侧 | `app/run_lifecycle` 实现 QUEUED / RUNNING / WAITING_HITL / 终态、interrupt、租约 epoch、执行/HITL 时限与取消竞态；gateway 旧入口转同一命令 | 生产容量与外部队列扩展不在 M2 最小底座 | P1-01(生命周期), P1-10, P2-01, §9.1 | M2 已接 |
+| FR-07 幂等与断点续跑（P0） | ✅ RunLifecycle 侧 | 官方 `langgraph-checkpoint-postgres` 承载画像→算法预览业务图与内部执行闸门；receipt/interrupt 原子恢复，租约 fencing 防旧 worker 写入 | 更大吞吐调度后续演进 | P1-09, P1-10, §6.3 | M2 已接 |
 
 ### 1.2 检索与知识（FR-08 ~ FR-11）
 
@@ -94,9 +94,9 @@
 | P1-04 | 检索不足时放宽硬过滤会改变问题本身 | FR-08/FR-22 | ✅ | ⛔ |
 | P1-05 | 「每条结论溯源原文」无法验证派生数值 | FR-19 | ✅ R8(三类证据) | ⛔ |
 | P1-06 | 隐私目标与健康画像/永久保存冲突 | FR-22/§7.4 | ✅ R9 | ⛔ |
-| P1-07 | 图控制权在 gateway 与 LangGraph 间分裂 | §8/FR-09 | ✅ R13 | ⛔ |
-| P1-08 | SSE 连接承担了任务生命周期 | FR-05/FR-06 | ✅ R3 | ⛔ |
-| P1-09 | 有检查点≠有并发安全执行权 | FR-07 | ✅(租约/fencing) | ⛔ |
+| P1-07 | 图控制权在 gateway 与 LangGraph 间分裂 | §8/FR-09 | ✅ R13 | 🟡 gateway 旧入口已转同一 RunLifecycle；策略子图仍属 M6 |
+| P1-08 | SSE 连接承担了任务生命周期 | FR-05/FR-06 | ✅ R3 | ✅ RunLifecycle 事件游标与持久状态不依赖订阅连接 |
+| P1-09 | 有检查点≠有并发安全执行权 | FR-07 | ✅(租约/fencing) | ✅ worker 租约 + epoch fencing 已接 |
 | P1-10 | 按 session 去重吞掉合法第二次回答 | FR-06/FR-07 | ✅ R3(run/interrupt) | ⛔ |
 | P1-11 | 缓存 data_version 非跨服务一致快照 | FR-20 | ✅ R10(release_id) | ⛔ schema 仍 data_version |
 | P1-12 | 硬预算缺原子预占及重试账本 | FR-20 | ✅ R4 | ⛔ |
@@ -130,9 +130,9 @@
 
 | # | 缺口 | 证据 | 影响 |
 | --- | --- | --- | --- |
-| B1 | **会话模型 vs run/interrupt 模型** | `00_schema.sql:306` `chat_session` 无 run/interrupt/state_version；PRD FR-06 已改 run 模型 | M2 任务底座无法照 PRD 实现，须先定 schema 迁移 |
-| B2 | **缓存键 data_version（可变）vs release_id（不可变）** | `00_schema.sql:409` `data_version` 为 SERIAL int；PRD FR-20/R10 要 release_id | 跨服务一致快照无法保证（P1-11） |
-| B3 | **LangGraph saver 未定** | `build.py:48` `compile()` 无 checkpointer；`plan_checkpoint` 是自定义表非官方 saver | FR-07 断点续跑地基缺失（§6.3-4） |
+| B1 | **会话模型 vs run/interrupt 模型** | `run / interrupt / profile_revision / receipt / event / result` 迁移与 RunLifecycle 已落地 | 已收口 |
+| B2 | **缓存键 data_version（可变）vs release_id（不可变）** | `release`、`release_component` 与公开数据结构化表 `release_id` 已落地，algo 查询实际按 release 过滤 | 已收口；后续 ETL 需显式生成 release |
+| B3 | **LangGraph saver 未定** | 官方 `langgraph-checkpoint-postgres` 已接，业务图包含画像、内部执行闸门和算法预览节点 | 已收口 |
 | B4 | **profile_version 字段缺失** | `chat_session` 无该列 | 画像修正→派生失效一致性（P1-13）无锚点 |
 | B5 | **表名 charter_* / policy_* 双轨** | `00_schema.sql:272` charter_chunk vs `07_policy_chunk_trgm.sql:30` policy_chunk；`retrieve.py` 查 policy_chunk | fresh 环境检索可能查空表；须收口为一套 |
 

@@ -251,11 +251,24 @@ message RunViewReply {
   google.protobuf.Timestamp updated_at = 14;
   int64 active_execution_remaining_ms = 15;
   AlgorithmPreview result_preview = 16;
+  google.protobuf.Timestamp expires_at = 17;
 }
 
 message StateChangedPayload {
   string from_state = 1;
   string to_state = 2;
+}
+
+message ProgressPayload {
+  string stage = 1;
+  string message = 2;
+  map<string, string> metadata = 3;
+}
+
+message ErrorPayload {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
 }
 
 message RunEvent {
@@ -270,6 +283,8 @@ message RunEvent {
   oneof payload {
     StateChangedPayload state_changed = 8;
     InterruptView interrupt = 9;
+    ProgressPayload progress = 10;
+    ErrorPayload error = 11;
     AlgorithmPreview result = 12;
   }
 }

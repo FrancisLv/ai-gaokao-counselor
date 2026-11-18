@@ -41,6 +41,8 @@ import (
 	errs "github.com/choucisan/ai-gaokao-counselor/internal/pkg/errors"
 )
 
+const integrationRelease = "rel_legacy_v1"
+
 // setupService 用真实 data 层 Repo 组装 Service（等价 wire_gen.go 的依赖图）。
 func setupService(t testing.TB) *Service {
 	t.Helper()
@@ -64,7 +66,7 @@ func setupService(t testing.TB) *Service {
 
 type errorRankRepo struct{ err error }
 
-func (r errorRankRepo) LoadScoreRankMap(context.Context, string, string, int) ([]biz.ScoreRankEntry, int, error) {
+func (r errorRankRepo) LoadScoreRankMap(context.Context, string, string, string, int) ([]biz.ScoreRankEntry, int, error) {
 	return nil, 0, r.err
 }
 
@@ -81,7 +83,7 @@ func TestIntegration_Bufconn_ExtendedErrors(t *testing.T) {
 		{errors.New("私有错误"), codes.Internal, "INTERNAL"},
 	} {
 		client := setupBufconnClient(t, NewAlgo(biz.NewRankUsecase(errorRankRepo{tc.err}), nil, nil))
-		_, err := client.RankConvert(context.Background(), &algov1.RankConvertRequest{Province: "湖南", Category: "物理类", Year: "2025", Score: 600})
+		_, err := client.RankConvert(context.Background(), &algov1.RankConvertRequest{ReleaseId: integrationRelease, Province: "湖南", Category: "物理类", Year: "2025", Score: 600})
 		assertBufconnError(t, err, tc.code, tc.reason)
 	}
 	client := setupBufconnClient(t, NewAlgo(nil, biz.NewRecommendUsecase(nil, nil, nil), biz.NewOptimizeUsecase(nil)))
@@ -99,7 +101,7 @@ func TestIntegration_ConcurrentClients(t *testing.T) {
 	for i := range clients {
 		clients[i] = setupBufconnClient(t, svc)
 	}
-	req := &algov1.EstimateProbRequest{Province: "湖南", Category: "物理类", Year: "2025", Score: 600, Subjects: []string{"物理", "化学", "生物"}}
+	req := &algov1.EstimateProbRequest{ReleaseId: integrationRelease, Province: "湖南", Category: "物理类", Year: "2025", Score: 600, Subjects: []string{"物理", "化学", "生物"}}
 	baseline, err := clients[0].EstimateProb(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -143,7 +145,7 @@ func TestIntegration_HistoryCategoryAudit(t *testing.T) {
 	}{
 		{"物理类", []string{"物理", "化学", "生物"}}, {"历史类", []string{"历史", "政治", "地理"}},
 	} {
-		r, err := s.EstimateProb(context.Background(), &algov1.EstimateProbRequest{Province: "湖南", Category: item.category, Year: "2025", Score: 600, Subjects: item.subjects})
+		r, err := s.EstimateProb(context.Background(), &algov1.EstimateProbRequest{ReleaseId: integrationRelease, Province: "湖南", Category: item.category, Year: "2025", Score: 600, Subjects: item.subjects})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -167,7 +169,7 @@ func TestIntegration_HistoryCategoryAudit(t *testing.T) {
 
 func BenchmarkIntegration_EstimateProb(b *testing.B) {
 	s := setupService(b)
-	req := &algov1.EstimateProbRequest{Province: "湖南", Year: "2025", Category: "物理类", Batch: "本科批", Score: 600, Subjects: []string{"物理", "化学", "生物"}}
+	req := &algov1.EstimateProbRequest{ReleaseId: integrationRelease, Province: "湖南", Year: "2025", Category: "物理类", Batch: "本科批", Score: 600, Subjects: []string{"物理", "化学", "生物"}}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -184,7 +186,7 @@ func TestIntegration_Service_FourRPCs(t *testing.T) {
 
 	// ① RankConvert：分数 → 位次
 	rcReply, err := s.RankConvert(ctx, &algov1.RankConvertRequest{
-		Province: "湖南", Year: "2025", Category: "物理类", Score: 600,
+		ReleaseId: integrationRelease, Province: "湖南", Year: "2025", Category: "物理类", Score: 600,
 	})
 	if err != nil {
 		t.Fatalf("RankConvert: %v", err)
@@ -196,7 +198,7 @@ func TestIntegration_Service_FourRPCs(t *testing.T) {
 
 	// ② EstimateProb：分数 → 分档候选池 + basis
 	epReply, err := s.EstimateProb(ctx, &algov1.EstimateProbRequest{
-		Province: "湖南", Year: "2025", Category: "物理类", Batch: "本科批", Score: 600,
+		ReleaseId: integrationRelease, Province: "湖南", Year: "2025", Category: "物理类", Batch: "本科批", Score: 600,
 		Subjects: []string{"物理", "化学", "生物"},
 		Profile:  &algov1.UserProfile{RiskAppetite: "balanced", PriorityDims: []string{"tier"}},
 	})
@@ -405,7 +407,7 @@ func TestIntegration_Service_EstimateProb_Reproducible(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	req := &algov1.EstimateProbRequest{
-		Province: "湖南", Year: "2025", Category: "物理类", Batch: "本科批", Score: 600,
+		ReleaseId: integrationRelease, Province: "湖南", Year: "2025", Category: "物理类", Batch: "本科批", Score: 600,
 		Subjects: []string{"物理", "化学", "生物"},
 	}
 	first, err := svc.EstimateProb(ctx, req)
@@ -432,13 +434,13 @@ func TestIntegration_Bufconn_FourRPCs(t *testing.T) {
 		RiskAppetite: "balanced", PriorityDims: []string{"tier"}, PreferredTiers: []string{"985", "211"},
 	}
 	rank := assertBufconnReply(t, "RankConvert", &algov1.RankConvertRequest{
-		Province: "湖南", Year: "2025", Category: "物理类", Score: 600,
+		ReleaseId: integrationRelease, Province: "湖南", Year: "2025", Category: "物理类", Score: 600,
 	}, svc.RankConvert, client.RankConvert)
 	if rank.GetRank() <= 0 || rank.GetPercentile() <= 0 || rank.GetPercentile() > 1 {
 		t.Fatalf("位次/百分位非法: %v", rank)
 	}
 	estimate := assertBufconnReply(t, "EstimateProb", &algov1.EstimateProbRequest{
-		Province: "湖南", Year: "2025", Category: "物理类", Batch: "本科批", Score: 600,
+		ReleaseId: integrationRelease, Province: "湖南", Year: "2025", Category: "物理类", Batch: "本科批", Score: 600,
 		Subjects: subjects, Profile: profile,
 	}, svc.EstimateProb, client.EstimateProb)
 	wantBasis := &algov1.AuditBasis{
@@ -508,7 +510,7 @@ func TestIntegration_Bufconn_ErrorMapping(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			_, err := client.RankConvert(ctx, &algov1.RankConvertRequest{
-				Province: "湖南", Year: tc.year, Category: "物理类", Score: tc.score,
+				ReleaseId: integrationRelease, Province: "湖南", Year: tc.year, Category: "物理类", Score: tc.score,
 			})
 			assertBufconnError(t, err, tc.code, tc.reason)
 		})
@@ -516,7 +518,7 @@ func TestIntegration_Bufconn_ErrorMapping(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			_, err := client.EstimateProb(ctx, &algov1.EstimateProbRequest{
-				Province: "湖南", Year: tc.year, Category: "物理类", Batch: "本科批", Score: tc.score,
+				ReleaseId: integrationRelease, Province: "湖南", Year: tc.year, Category: "物理类", Batch: "本科批", Score: tc.score,
 				Subjects: []string{"物理", "化学", "生物"},
 			})
 			assertBufconnError(t, err, tc.code, tc.reason)

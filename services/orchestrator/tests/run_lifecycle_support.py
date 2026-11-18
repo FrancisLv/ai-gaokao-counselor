@@ -95,6 +95,44 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                 statement = statement.strip()
                 if statement:
                     await conn.execute(statement)
+            migration = ROOT / "migrations" / "12_run_view_fields.sql"
+            for statement in migration.read_text(encoding="utf-8").split(";"):
+                statement = statement.strip()
+                if statement:
+                    await conn.execute(statement)
+            has_release_dimension = await (
+                await conn.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'university'
+                          AND column_name = 'release_id'
+                    ) AS present
+                    """
+                )
+            ).fetchone()
+            if has_release_dimension and has_release_dimension["present"]:
+                pass
+            else:
+                migration = ROOT / "migrations" / "13_release_data_dimensions.sql"
+                for statement in migration.read_text(encoding="utf-8").split(";"):
+                    statement = statement.strip()
+                    if statement:
+                        await conn.execute(statement)
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS release_component (
+                    release_id TEXT NOT NULL REFERENCES release(release_id),
+                    component_type TEXT NOT NULL,
+                    dataset_key TEXT NOT NULL,
+                    component_version TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    PRIMARY KEY (release_id, component_type, dataset_key)
+                )
+                """
+            )
         finally:
             await conn.close()
 
@@ -120,6 +158,8 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await self._apply_sql_file(conn, "migrations/09_profile_run_lifecycle.sql")
             await self._apply_sql_file(conn, "migrations/10_run_leases.sql")
             await self._apply_sql_file(conn, "migrations/11_algorithm_preview_results.sql")
+            await self._apply_sql_file(conn, "migrations/12_run_view_fields.sql")
+            await self._apply_sql_file(conn, "migrations/13_release_data_dimensions.sql")
         finally:
             await conn.close()
 
@@ -129,13 +169,18 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
         status: str = "PUBLISHED",
         release_id: str | None = None,
     ) -> str:
-        value = release_id or f"rel-{uuid4().hex}"
+        value = release_id or (
+            "rel_legacy_v1" if status == "PUBLISHED" else f"rel-{uuid4().hex}"
+        )
         conn = await self._connect()
         try:
             await conn.execute(
                 """
                 INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
                 VALUES (%s, %s, %s::jsonb, %s, CASE WHEN %s = 'PUBLISHED' THEN NOW() ELSE NULL END)
+                ON CONFLICT (release_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    published_at = COALESCE(EXCLUDED.published_at, release.published_at)
                 """,
                 (value, status, '{"components": {}}', "test-sha256", status),
             )

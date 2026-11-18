@@ -885,3 +885,28 @@ sqlc 的 `:many` 先收集类型化结果 slice，再映射领域对象，相较
 
 - 本票只加固 `ALGORITHM_PREVIEW` 的内部安全出口，不实现在线 RAG、完整资格规则、真实 LLM Gateway、Strategy、Critic 或正式报告。
 - 预览成功仍不代表当年资格已完整核验，也不得转换为正式志愿方案。
+
+## 27. Code review 收口：RunLifecycle 端到端与 release 数据维度
+
+**日期与范围**：2026-11-18。按 `code-review` 的 Standards / Spec 双轴结果收口 integration branch，不扩大 M2/M3 业务范围。
+
+### 实现要点
+
+- gateway 三个旧入口不再 TODO：CreatePlan 的 JSON 结构化输入转 `SubmitRun`，ConfirmProfile / BackfillProfile 转同一 `ResumeRun`；可信 principal 通过 gRPC metadata 向下游传播。StartGraph / ResumeGraph 也改为 RunLifecycle 兼容适配器。
+- LangGraph 不再只是单节点 pause：图包含画像准备、人工 interrupt、内部执行闸门和算法预览节点；确认写回业务库后由 worker 恢复内部闸门，算法结果写入 checkpoint 后再发布。
+- 新增 `13_release_data_dimensions.sql`：`release_component`、公开数据表 `release_id`、backfill/默认 legacy release、含 release 的唯一键和查询索引。RankConvert / EstimateProb / CheckConstraints / OptimizeWishlist 均携带 release，结构化数据 SQL 实际按 release 过滤。
+- RunEvent additive 增加 typed Progress / Error payload；RunView additive 增加 expires_at；interrupt/profile field wire mapping 集中复用。
+- 已确认画像不再允许原 run 生成新 draft；画像修改必须创建新 run。
+- worker 通过 RunLifecycle 的公开内部调度方法工作；事件插入集中到 event adapter；构造器测试专用崩溃回调移除，改为测试子类覆写受保护钩子。
+
+### 测试
+
+- gateway：结构化 CreatePlan → SubmitRun、ConfirmProfile → ResumeRun、principal metadata 传播均通过。
+- RunLifecycle PostgreSQL/gRPC：62 项通过，1 项真实算法测试按未设置地址跳过；fresh schema 推进到 `00 → 13`。
+- 真实 svc-algo：以新二进制和只读数据副本运行，四 RPC + ALGORITHM_PREVIEW 闭环通过。
+- `make py-check py-test`、`make build check test`、`git diff --check` 通过。
+
+### 边界
+
+- release 数据维度迁移不重新发布业务数据；legacy 数据回填到 `rel_legacy_v1`，后续 ETL 仍需为正式 release 显式写版本。
+- 在线 RAG、完整资格规则、真实 LLM Gateway、Strategy/Critic 与正式报告继续保持 out of scope。

@@ -34,15 +34,19 @@ func NewAlgo(rank *biz.RankUsecase, recommend *biz.RecommendUsecase, optimize *b
 
 // RankConvert 分数 → 位次（year=报考年，见 §3.0）。
 func (s *Service) RankConvert(ctx context.Context, req *algov1.RankConvertRequest) (*algov1.RankConvertReply, error) {
+	if req.GetReleaseId() == "" {
+		return nil, kerrors.BadRequest("RELEASE_REQUIRED", "release_id 不能为空")
+	}
 	year, err := parseYear(req.GetYear())
 	if err != nil {
 		return nil, err
 	}
 	res, err := s.rank.Convert(ctx, biz.RankQuery{
-		Province: req.GetProvince(),
-		Category: req.GetCategory(),
-		Year:     year,
-		Score:    float64(req.GetScore()),
+		ReleaseID: req.GetReleaseId(),
+		Province:  req.GetProvince(),
+		Category:  req.GetCategory(),
+		Year:      year,
+		Score:     float64(req.GetScore()),
 	})
 	if err != nil {
 		return nil, toKratosErr(err)
@@ -52,6 +56,9 @@ func (s *Service) RankConvert(ctx context.Context, req *algov1.RankConvertReques
 
 // EstimateProb 录取概率 = 候选池推荐（service 薄：解析 year/profile → usecase 编排 → biz→pb 映射，§4.2②）。
 func (s *Service) EstimateProb(ctx context.Context, req *algov1.EstimateProbRequest) (*algov1.EstimateProbReply, error) {
+	if req.GetReleaseId() == "" {
+		return nil, kerrors.BadRequest("RELEASE_REQUIRED", "release_id 不能为空")
+	}
 	year, err := parseYear(req.GetYear())
 	if err != nil {
 		return nil, err
@@ -59,12 +66,13 @@ func (s *Service) EstimateProb(ctx context.Context, req *algov1.EstimateProbRequ
 	// 注（Q1）：req.per_category_limit MVP 不消费——usecase 用 conf 默认 PerCategoryLimit=0（全量、后端不截断），
 	// 薄 service 不合并参数（Q20/DR3）。
 	res, err := s.recommend.EstimateProb(ctx, biz.UserQuery{
-		Province: req.GetProvince(),
-		Year:     year,
-		Category: req.GetCategory(),
-		Batch:    req.GetBatch(),
-		Score:    float64(req.GetScore()),
-		Subjects: req.GetSubjects(),
+		ReleaseID: req.GetReleaseId(),
+		Province:  req.GetProvince(),
+		Year:      year,
+		Category:  req.GetCategory(),
+		Batch:     req.GetBatch(),
+		Score:     float64(req.GetScore()),
+		Subjects:  req.GetSubjects(),
 	}, fromPbUserProfile(req.GetProfile()))
 	if err != nil {
 		return nil, toKratosErr(err)

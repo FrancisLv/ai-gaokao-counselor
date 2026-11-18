@@ -19,6 +19,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+const integrationRelease = "rel_legacy_v1"
+
 // 仅启动并清理本测试构建的子进程，不碰现有服务或数据库内容。
 func TestIntegration_TCP(t *testing.T) {
 	dsn := os.Getenv("ALGO_TEST_DSN")
@@ -78,12 +80,12 @@ func TestIntegration_TCP(t *testing.T) {
 	client := algov1.NewAlgoClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	rank, err := client.RankConvert(ctx, &algov1.RankConvertRequest{Province: "湖南", Category: "物理类", Year: "2025", Score: 600}, grpc.WaitForReady(true))
+	rank, err := client.RankConvert(ctx, &algov1.RankConvertRequest{ReleaseId: integrationRelease, Province: "湖南", Category: "物理类", Year: "2025", Score: 600}, grpc.WaitForReady(true))
 	if err != nil || rank.GetRank() != 15860 {
 		t.Fatalf("TCP RankConvert: %v %v", rank, err)
 	}
 	started := time.Now()
-	estimated, err := client.EstimateProb(ctx, &algov1.EstimateProbRequest{Province: "湖南", Category: "物理类", Year: "2025", Score: 600, Subjects: []string{"物理", "化学", "生物"}})
+	estimated, err := client.EstimateProb(ctx, &algov1.EstimateProbRequest{ReleaseId: integrationRelease, Province: "湖南", Category: "物理类", Year: "2025", Score: 600, Subjects: []string{"物理", "化学", "生物"}})
 	if err != nil {
 		t.Fatal(err)
 	}

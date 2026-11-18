@@ -2,7 +2,10 @@ version: "2"
 sql:
   - engine: postgresql
     # 仅离线解析结构，不连接数据库、不执行初始化或数据导入。
-    schema: migrations/00_schema.sql
+    schema:
+      - migrations/00_schema.sql
+      - migrations/08_release_and_run_foundation.sql
+      - migrations/13_release_data_dimensions.sql
     queries: internal/algo/data/queries
     gen:
       go:

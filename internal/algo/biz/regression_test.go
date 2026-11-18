@@ -244,7 +244,7 @@ func TestSystem_WishlistInvariants(t *testing.T) {
 
 func TestRegression_InvalidConfig(t *testing.T) {
 	uc := NewRecommendUsecase(&fakeAdmissionRepo{}, NewRankUsecase(&fakeRankRepo{table: fakeTable(), control: fakeControl}), &conf.Bootstrap{Algo: &conf.Algo{DecayFactor: -1}})
-	_, err := uc.EstimateProb(context.Background(), UserQuery{Province: "湖南", Category: "物理类", Year: 2025, Score: 450, Subjects: []string{"物理", "化学", "生物"}}, UserProfile{})
+	_, err := uc.EstimateProb(context.Background(), UserQuery{ReleaseID: "rel-test", Province: "湖南", Category: "物理类", Year: 2025, Score: 450, Subjects: []string{"物理", "化学", "生物"}}, UserProfile{})
 	if err == nil {
 		t.Fatal("非法衰减配置未拒绝")
 	}

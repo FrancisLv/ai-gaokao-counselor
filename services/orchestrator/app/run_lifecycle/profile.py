@@ -7,18 +7,22 @@ from uuid import uuid4
 import psycopg
 from psycopg.types.json import Jsonb
 
-from app.run_lifecycle.models import RunLifecycleError, StructuredProfileInput
+from app.run_lifecycle.models import (
+    ProfileFields,
+    RunLifecycleError,
+    StructuredProfileInput,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class ProfileValidation:
     readiness: str
-    fields: dict[str, dict[str, Any]]
+    fields: ProfileFields
     findings: tuple[dict[str, Any], ...]
 
 
-def build_profile_fields(profile: StructuredProfileInput) -> dict[str, dict[str, Any]]:
-    fields: dict[str, dict[str, Any]] = {}
+def build_profile_fields(profile: StructuredProfileInput) -> ProfileFields:
+    fields: ProfileFields = {}
     if profile.province:
         fields["province"] = {"state": "PROVIDED", "source": "USER_FORM", "value": profile.province}
     if profile.application_year not in (None, 0):
@@ -50,7 +54,7 @@ async def validate_profile(
     conn: psycopg.AsyncConnection,
     *,
     release_id: str,
-    fields: dict[str, dict[str, Any]],
+    fields: ProfileFields,
 ) -> ProfileValidation:
     findings: list[dict[str, Any]] = []
     required = ("province", "application_year", "category", "batch", "score", "subjects")
@@ -179,7 +183,7 @@ async def create_profile_revision(
     *,
     session_id,
     run_id,
-    fields: dict[str, dict[str, Any]],
+    fields: ProfileFields,
     based_on=None,
 ) -> dict[str, Any]:
     await conn.execute(
@@ -261,7 +265,7 @@ class ProfileRuntime:
                 FROM profile_revision
                 WHERE profile_version = %s
                   AND session_id = %s
-                  AND lifecycle IN ('DRAFT', 'CONFIRMED')
+                  AND lifecycle = 'DRAFT'
                 FOR UPDATE
                 """,
                 (base_profile_version, session_id),

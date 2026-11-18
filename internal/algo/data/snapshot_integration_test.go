@@ -23,19 +23,19 @@ func TestIntegration_RepositorySnapshot(t *testing.T) {
 		t.Run(category, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			candidates, err := repo.LoadCandidates(ctx, itProvince, category, itBatch, itYear)
+			candidates, err := repo.LoadCandidates(ctx, itRelease, itProvince, category, itBatch, itYear)
 			if err != nil {
 				t.Fatal(err)
 			}
-			table, control, err := rank.LoadScoreRankMap(ctx, itProvince, category, itYear)
+			table, control, err := rank.LoadScoreRankMap(ctx, itRelease, itProvince, category, itYear)
 			if err != nil {
 				t.Fatal(err)
 			}
-			history, err := repo.BatchGroupHistory(ctx, itProvince, category, itBatch, itYear, itWindow)
+			history, err := repo.BatchGroupHistory(ctx, itRelease, itProvince, category, itBatch, itYear, itWindow)
 			if err != nil {
 				t.Fatal(err)
 			}
-			plans, err := repo.BatchGroupPlan(ctx, itProvince, category, itYear, itYear-1)
+			plans, err := repo.BatchGroupPlan(ctx, itRelease, itProvince, category, itYear, itYear-1)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -85,21 +85,21 @@ func TestIntegration_RepositorySnapshot(t *testing.T) {
 func TestIntegration_RepositoryEmptyAndCanceled(t *testing.T) {
 	repo := setupRepo(t)
 	ctx := context.Background()
-	_, _, err := NewRankRepo(repo.d).LoadScoreRankMap(ctx, itProvince, itCategory, 9999)
+	_, _, err := NewRankRepo(repo.d).LoadScoreRankMap(ctx, itRelease, itProvince, itCategory, 9999)
 	if !errors.Is(err, errs.ErrMissingScoreRankMap) {
 		t.Fatalf("缺表错误: %v", err)
 	}
-	history, err := repo.BatchGroupHistory(ctx, itProvince, itCategory, itBatch, 9999, 3)
+	history, err := repo.BatchGroupHistory(ctx, itRelease, itProvince, itCategory, itBatch, 9999, 3)
 	if err != nil || len(history) != 0 {
 		t.Fatalf("空历史: %v %v", history, err)
 	}
-	plans, err := repo.BatchGroupPlan(ctx, itProvince, itCategory, 9999, 9998)
+	plans, err := repo.BatchGroupPlan(ctx, itRelease, itProvince, itCategory, 9999, 9998)
 	if err != nil || len(plans) != 0 {
 		t.Fatalf("空计划: %v %v", plans, err)
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	_, err = repo.LoadCandidates(canceled, itProvince, itCategory, itBatch, itYear)
+	_, err = repo.LoadCandidates(canceled, itRelease, itProvince, itCategory, itBatch, itYear)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("取消未透传: %v", err)
 	}

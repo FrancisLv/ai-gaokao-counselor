@@ -36,7 +36,7 @@ class RunLifecycleWorker:
     async def _run(self) -> None:
         while not self._stopping.is_set():
             try:
-                await self._lifecycle._run_due_work_once()
+                await self._lifecycle.run_due_work_once()
             except asyncio.CancelledError:
                 raise
             except Exception:

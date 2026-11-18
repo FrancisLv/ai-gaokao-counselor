@@ -414,12 +414,15 @@ class ProfileLifecycleTests(RunLifecyclePostgresTest):
             crashed_run_ids.append(run_id)
             raise SimulatedCrash()
 
-        crashing = RunLifecycle(
+        class CrashingLifecycle(RunLifecycle):
+            def _checkpoint_persisted_hook(self, run_id):
+                crash_after_checkpoint(run_id)
+
+        crashing = CrashingLifecycle(
             self.dsn,
             auto_profile=True,
             worker_owner="worker-a",
             clock=lambda: now,
-            _checkpoint_persisted=crash_after_checkpoint,
         )
         self.addAsyncCleanup(crashing.close)
         with self.assertRaises(SimulatedCrash):
@@ -487,10 +490,13 @@ class ProfileLifecycleTests(RunLifecyclePostgresTest):
         class SimulatedCrash(RuntimeError):
             pass
 
-        crashing = RunLifecycle(
+        class CrashingLifecycle(RunLifecycle):
+            async def _resume_accepted_hook(self, _run_id):
+                raise SimulatedCrash()
+
+        crashing = CrashingLifecycle(
             self.dsn,
             auto_profile=True,
-            _resume_accepted=lambda _run_id: (_ for _ in ()).throw(SimulatedCrash()),
         )
         self.addAsyncCleanup(crashing.close)
         with self.assertRaises(SimulatedCrash):

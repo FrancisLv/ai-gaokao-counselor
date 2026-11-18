@@ -23,9 +23,9 @@ func NewRankRepo(d *Data) biz.RankRepo {
 }
 
 // LoadScoreRankMap 读取完整一分一段表并提取本科线；缺报考年数据时明确报错，不回退年份。
-func (r *rankRepo) LoadScoreRankMap(ctx context.Context, province, category string, year int) ([]biz.ScoreRankEntry, int, error) {
+func (r *rankRepo) LoadScoreRankMap(ctx context.Context, releaseID, province, category string, year int) ([]biz.ScoreRankEntry, int, error) {
 	rows, err := r.d.queries.ListScoreRanks(ctx, dbgen.ListScoreRanksParams{
-		Province: province, Category: category, ReportYear: int32(year),
+		ReleaseID: releaseID, Province: province, Category: category, ReportYear: int32(year),
 	})
 	if err != nil {
 		return nil, 0, err

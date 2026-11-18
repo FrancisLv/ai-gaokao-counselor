@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
 from typing import AsyncIterator
 from uuid import UUID
 
@@ -32,6 +31,12 @@ from app.run_lifecycle import (
     StructuredProfileInput,
     SubmitRunCommand,
 )
+from app.run_lifecycle.wire import (
+    populate_error,
+    populate_interrupt,
+    populate_interrupt_from_event,
+    populate_progress,
+)
 from graph.build import build_graph
 from graph.state import new_state
 
@@ -44,19 +49,121 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
         self._graph = graph or build_graph()
 
     async def StartGraph(self, request, context) -> AsyncIterator["orchestrator_pb2.GraphEvent"]:
-        state = new_state(
-            session_id=request.trace.session_id,
-            trace_id=request.trace.trace_id,
-            user_text=request.user_text,
+        lifecycle = await self._require_lifecycle(context)
+        principal_id = await self._principal(context)
+        try:
+            payload = json.loads(request.user_text)
+            session_id = (
+                UUID(payload.get("session_id") or request.trace.session_id)
+                if payload.get("session_id") or request.trace.session_id
+                else None
+            )
+            command = SubmitRunCommand(
+                principal_id=principal_id,
+                session_id=session_id,
+                task_kind="GENERATE_PLAN",
+                input=StructuredProfileInput(
+                    province=payload.get("province", ""),
+                    application_year=payload.get("application_year"),
+                    category=payload.get("category", ""),
+                    batch=payload.get("batch"),
+                    score=payload.get("score"),
+                    subjects=tuple(payload.get("subjects") or ()),
+                    rank=payload.get("rank"),
+                ),
+                idempotency_key=(
+                    payload.get("idempotency_key")
+                    or request.trace.trace_id
+                ),
+            )
+            if not command.idempotency_key:
+                raise ValueError("idempotency_key required")
+            receipt = await lifecycle.SubmitRun(command)
+        except (ValueError, TypeError, json.JSONDecodeError):
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "STRUCTURED_PROFILE_AND_IDEMPOTENCY_REQUIRED",
+            )
+        except RunLifecycleError as exc:
+            await self._abort_lifecycle(context, exc)
+        yield orchestrator_pb2.GraphEvent(
+            node="ACCEPTED",
+            type="progress",
+            payload_json=json.dumps(
+                {
+                    "run_id": str(receipt.run_id),
+                    "session_id": str(receipt.session_id),
+                    "state": receipt.state,
+                    "stage": receipt.stage,
+                    "state_version": receipt.state_version,
+                },
+                ensure_ascii=False,
+            ),
         )
-        async for ev in self._run(state):
-            yield ev
 
     async def ResumeGraph(self, request, context) -> AsyncIterator["orchestrator_pb2.GraphEvent"]:
-        # TODO(M3): 从 LangGraph Postgres saver 恢复检查点，合并用户回复后继续。
+        lifecycle = await self._require_lifecycle(context)
+        principal_id = await self._principal(context)
+        try:
+            payload = json.loads(request.user_reply_json)
+            run_id = UUID(payload["run_id"])
+            interrupt_id = UUID(payload["interrupt_id"])
+            profile_version = (
+                UUID(payload["profile_version"])
+                if payload.get("profile_version")
+                else None
+            )
+            answer_type = str(payload.get("answer_type") or "CONFIRM_PROFILE")
+            if answer_type == "CONFIRM_PROFILE":
+                answer = ConfirmProfileAnswer()
+            elif answer_type == "REJECT_OR_EDIT_PROFILE":
+                answer = RejectOrEditProfileAnswer(
+                    patch=payload.get("patch") or {},
+                )
+            elif answer_type == "ANSWER_FIELDS":
+                answer = AnswerFields(fields=payload.get("fields") or {})
+            elif answer_type == "DECLINE_FIELDS":
+                answer = DeclineFieldsAnswer(
+                    field_keys=tuple(payload.get("field_keys") or ()),
+                )
+            else:
+                raise ValueError("unsupported answer type")
+            receipt = await lifecycle.ResumeRun(
+                ResumeRunCommand(
+                    principal_id=principal_id,
+                    run_id=run_id,
+                    interrupt_id=interrupt_id,
+                    expected_state_version=int(
+                        payload["expected_state_version"]
+                    ),
+                    profile_version=profile_version,
+                    answer=answer,
+                    idempotency_key=payload.get("idempotency_key")
+                    or request.trace.trace_id,
+                )
+            )
+            if not payload.get("idempotency_key") and not request.trace.trace_id:
+                raise ValueError("idempotency_key required")
+        except (KeyError, ValueError, TypeError, json.JSONDecodeError):
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "RESUME_COMMAND_AND_IDEMPOTENCY_REQUIRED",
+            )
+        except RunLifecycleError as exc:
+            await self._abort_lifecycle(context, exc)
         yield orchestrator_pb2.GraphEvent(
-            node="RESUME", type="progress",
-            payload_json=json.dumps({"session_id": request.session_id}, ensure_ascii=False),
+            node="ACCEPTED",
+            type="progress",
+            payload_json=json.dumps(
+                {
+                    "run_id": str(receipt.run_id),
+                    "session_id": str(receipt.session_id),
+                    "state": receipt.state,
+                    "stage": receipt.stage,
+                    "state_version": receipt.state_version,
+                },
+                ensure_ascii=False,
+            ),
         )
 
     async def SubmitRun(self, request, context) -> "orchestrator_pb2.RunReceiptReply":
@@ -261,33 +368,17 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             reply.cancel_requested_at.FromDatetime(view.cancel_requested_at)
         if view.current_interrupt is not None:
             interrupt = view.current_interrupt
-            reply.current_interrupt.interrupt_id = str(interrupt.interrupt_id)
-            reply.current_interrupt.kind = interrupt.kind
-            reply.current_interrupt.state = interrupt.state
-            reply.current_interrupt.question_key = interrupt.question_key
-            reply.current_interrupt.payload_version = interrupt.payload_version
-            reply.current_interrupt.profile_version = str(
-                interrupt.payload.get("profile_version") or ""
+            populate_interrupt(
+                reply.current_interrupt,
+                interrupt_id=str(interrupt.interrupt_id),
+                kind=interrupt.kind,
+                state=interrupt.state,
+                question_key=interrupt.question_key,
+                payload_version=interrupt.payload_version,
+                payload=interrupt.payload,
+                created_at=interrupt.created_at,
+                expires_at=interrupt.expires_at,
             )
-            for key, value in (interrupt.payload.get("fields") or {}).items():
-                field = reply.current_interrupt.fields[key]
-                field.state = value.get("state") or ""
-                field.source = value.get("source") or ""
-                field_value = value.get("value")
-                if isinstance(field_value, list):
-                    field.string_list.values.extend(str(item) for item in field_value)
-                elif isinstance(field_value, int):
-                    field.int_value = field_value
-                elif field_value is not None:
-                    field.string_value = str(field_value)
-            for finding in interrupt.payload.get("findings") or []:
-                item = reply.current_interrupt.findings.add()
-                item.code = finding.get("code") or ""
-                item.field_keys.extend(finding.get("field_keys") or [])
-                item.blocking = bool(finding.get("blocking"))
-                item.message_key = finding.get("message_key") or ""
-            reply.current_interrupt.created_at.FromDatetime(interrupt.created_at)
-            reply.current_interrupt.expires_at.FromDatetime(interrupt.expires_at)
         if view.result is not None:
             reply.result.result_version = str(view.result.result_version)
             reply.result.result_kind = view.result.result_kind
@@ -299,6 +390,7 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             )
         reply.created_at.FromDatetime(view.created_at)
         reply.updated_at.FromDatetime(view.updated_at)
+        reply.expires_at.FromDatetime(view.expires_at)
         return reply
 
     @staticmethod
@@ -316,39 +408,15 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             reply.state_changed.from_state = str(event.payload.get("from_state") or "")
             reply.state_changed.to_state = str(event.payload.get("to_state") or "")
         elif event.type == "INTERRUPT":
-            interrupt = reply.interrupt
-            interrupt.interrupt_id = str(event.payload.get("interrupt_id") or "")
-            interrupt.kind = str(event.payload.get("kind") or "")
-            interrupt.state = str(event.payload.get("state") or "")
-            interrupt.question_key = str(event.payload.get("question_key") or "")
-            interrupt.payload_version = int(event.payload.get("payload_version") or 0)
-            profile_payload = event.payload.get("payload") or {}
-            interrupt.profile_version = str(profile_payload.get("profile_version") or "")
-            for key, value in (profile_payload.get("fields") or {}).items():
-                field = interrupt.fields[key]
-                field.state = value.get("state") or ""
-                field.source = value.get("source") or ""
-                field_value = value.get("value")
-                if isinstance(field_value, list):
-                    field.string_list.values.extend(str(item) for item in field_value)
-                elif isinstance(field_value, int):
-                    field.int_value = field_value
-                elif field_value is not None:
-                    field.string_value = str(field_value)
-            for finding in profile_payload.get("findings") or []:
-                item = interrupt.findings.add()
-                item.code = finding.get("code") or ""
-                item.field_keys.extend(finding.get("field_keys") or [])
-                item.blocking = bool(finding.get("blocking"))
-                item.message_key = finding.get("message_key") or ""
-            if event.payload.get("created_at"):
-                interrupt.created_at.FromDatetime(
-                    datetime.fromisoformat(event.payload["created_at"])
-                )
-            if event.payload.get("expires_at"):
-                interrupt.expires_at.FromDatetime(
-                    datetime.fromisoformat(event.payload["expires_at"])
-                )
+            populate_interrupt_from_event(reply.interrupt, event.payload)
+        elif event.type == "PROGRESS":
+            populate_progress(
+                reply.progress,
+                stage=event.stage,
+                payload=event.payload,
+            )
+        elif event.type == "ERROR":
+            populate_error(reply.error, event.payload)
         elif event.type == "RESULT":
             preview = event.payload.get("preview") or {}
             reply.result.CopyFrom(

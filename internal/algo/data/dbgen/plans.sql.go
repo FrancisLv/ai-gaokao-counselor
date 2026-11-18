@@ -12,12 +12,14 @@ import (
 const hasEnrollmentPlan = `-- name: HasEnrollmentPlan :one
 SELECT EXISTS (
     SELECT 1 FROM enrollment_plan
-    WHERE province = $1::text AND category = $2::text
-      AND batch = $3::text AND year = $4::int
+    WHERE release_id = $1::text
+      AND province = $2::text AND category = $3::text
+      AND batch = $4::text AND year = $5::int
 )
 `
 
 type HasEnrollmentPlanParams struct {
+	ReleaseID  string
 	Province   string
 	Category   string
 	Batch      string
@@ -27,6 +29,7 @@ type HasEnrollmentPlanParams struct {
 // 区分“整批招生计划未导入”与“有计划但没有可用候选”，只检查存在性。
 func (q *Queries) HasEnrollmentPlan(ctx context.Context, arg HasEnrollmentPlanParams) (bool, error) {
 	row := q.db.QueryRow(ctx, hasEnrollmentPlan,
+		arg.ReleaseID,
 		arg.Province,
 		arg.Category,
 		arg.Batch,
@@ -44,12 +47,14 @@ SELECT
     year::int AS year,
     SUM(plan_count)::int AS plan_count
 FROM enrollment_plan
-WHERE province = $1::text AND category = $2::text
-  AND year IN ($3::int, $4::int)
+WHERE release_id = $1::text
+  AND province = $2::text AND category = $3::text
+  AND year IN ($4::int, $5::int)
 GROUP BY university_code, major_group, year
 `
 
 type ListGroupPlansParams struct {
+	ReleaseID    string
 	Province     string
 	Category     string
 	ReportYear   int32
@@ -67,6 +72,7 @@ type ListGroupPlansRow struct {
 // 保持现有契约：此查询不按 batch 过滤。
 func (q *Queries) ListGroupPlans(ctx context.Context, arg ListGroupPlansParams) ([]ListGroupPlansRow, error) {
 	rows, err := q.db.Query(ctx, listGroupPlans,
+		arg.ReleaseID,
 		arg.Province,
 		arg.Category,
 		arg.ReportYear,

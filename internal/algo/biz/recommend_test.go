@@ -22,7 +22,7 @@ type fakeAdmissionRepo struct {
 	gotYear  int
 }
 
-func (f *fakeAdmissionRepo) LoadCandidates(ctx context.Context, province, category, batch string, year int) ([]Candidate, error) {
+func (f *fakeAdmissionRepo) LoadCandidates(ctx context.Context, releaseID, province, category, batch string, year int) ([]Candidate, error) {
 	f.gotBatch = batch
 	f.gotYear = year
 	if f.loadErr != nil {
@@ -31,14 +31,14 @@ func (f *fakeAdmissionRepo) LoadCandidates(ctx context.Context, province, catego
 	return f.candidates, nil
 }
 
-func (f *fakeAdmissionRepo) BatchGroupHistory(ctx context.Context, province, category, batch string, year, windowYears int) (map[GroupKey][]AdmissionRecord, error) {
+func (f *fakeAdmissionRepo) BatchGroupHistory(ctx context.Context, releaseID, province, category, batch string, year, windowYears int) (map[GroupKey][]AdmissionRecord, error) {
 	if f.historyErr != nil {
 		return nil, f.historyErr
 	}
 	return f.historyMap, nil
 }
 
-func (f *fakeAdmissionRepo) BatchGroupPlan(ctx context.Context, province, category string, year, prevYear int) (map[GroupKey]PlanChange, error) {
+func (f *fakeAdmissionRepo) BatchGroupPlan(ctx context.Context, releaseID, province, category string, year, prevYear int) (map[GroupKey]PlanChange, error) {
 	if f.planErr != nil {
 		return nil, f.planErr
 	}
@@ -74,7 +74,8 @@ func TestRecommendUsecase_EstimateProb_HappyPath(t *testing.T) {
 	uc := NewRecommendUsecase(admission, rank, &conf.Bootstrap{})
 
 	res, err := uc.EstimateProb(context.Background(), UserQuery{
-		Province: "湖南", Category: "物理类", Year: 2025, Score: 450, Subjects: []string{"物理", "化学", "生物"}, // Batch 留空 → 默认本科批
+		ReleaseID: "rel-test",
+		Province:  "湖南", Category: "物理类", Year: 2025, Score: 450, Subjects: []string{"物理", "化学", "生物"}, // Batch 留空 → 默认本科批
 	}, UserProfile{})
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -111,7 +112,8 @@ func TestRecommendUsecase_EstimateProb_BelowControlLine(t *testing.T) {
 	uc := NewRecommendUsecase(&fakeAdmissionRepo{}, rank, &conf.Bootstrap{})
 
 	_, err := uc.EstimateProb(context.Background(), UserQuery{
-		Province: "湖南", Category: "物理类", Year: 2025, Score: 404, Subjects: []string{"物理", "化学", "生物"}, // < 本科线 405
+		ReleaseID: "rel-test",
+		Province:  "湖南", Category: "物理类", Year: 2025, Score: 404, Subjects: []string{"物理", "化学", "生物"}, // < 本科线 405
 	}, UserProfile{})
 	if !errors.Is(err, errs.ErrBelowControlLine) {
 		t.Errorf("err = %v, want ErrBelowControlLine", err)
@@ -125,7 +127,8 @@ func TestRecommendUsecase_EstimateProb_LoadError(t *testing.T) {
 	uc := NewRecommendUsecase(admission, rank, &conf.Bootstrap{})
 
 	_, err := uc.EstimateProb(context.Background(), UserQuery{
-		Province: "湖南", Category: "物理类", Year: 2025, Score: 450, Subjects: []string{"物理", "化学", "生物"},
+		ReleaseID: "rel-test",
+		Province:  "湖南", Category: "物理类", Year: 2025, Score: 450, Subjects: []string{"物理", "化学", "生物"},
 	}, UserProfile{})
 	if err == nil || err.Error() != "db down" {
 		t.Errorf("err = %v, want 'db down' 透传", err)
@@ -142,7 +145,8 @@ func TestRecommendUsecase_EstimateProb_NoHistory(t *testing.T) {
 	uc := NewRecommendUsecase(admission, rank, &conf.Bootstrap{})
 
 	res, err := uc.EstimateProb(context.Background(), UserQuery{
-		Province: "湖南", Category: "物理类", Year: 2025, Score: 450, Subjects: []string{"物理", "化学", "生物"},
+		ReleaseID: "rel-test",
+		Province:  "湖南", Category: "物理类", Year: 2025, Score: 450, Subjects: []string{"物理", "化学", "生物"},
 	}, UserProfile{})
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -170,7 +174,8 @@ func TestRecommendUsecase_EstimateProb_SubjectFilter(t *testing.T) {
 	uc := NewRecommendUsecase(admission, rank, &conf.Bootstrap{})
 
 	res, err := uc.EstimateProb(context.Background(), UserQuery{
-		Province: "湖南", Category: "物理类", Year: 2025, Score: 450,
+		ReleaseID: "rel-test",
+		Province:  "湖南", Category: "物理类", Year: 2025, Score: 450,
 		Subjects: []string{"物理", "化学", "地理"}, // 不含思想政治 → NOMATCH 被过滤
 	}, UserProfile{})
 	if err != nil {

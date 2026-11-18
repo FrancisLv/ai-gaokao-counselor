@@ -11,10 +11,12 @@ FROM major_admission ma
 JOIN (
     SELECT year, MAX(cumulative_count) AS total_count
     FROM score_rank_map
-    WHERE province = @province::text AND category = @category::text
+    WHERE release_id = @release_id::text
+      AND province = @province::text AND category = @category::text
     GROUP BY year
 ) srm ON ma.year = srm.year
-WHERE ma.province = @province::text AND ma.category = @category::text AND ma.batch = @batch::text
+WHERE ma.release_id = @release_id::text
+  AND ma.province = @province::text AND ma.category = @category::text AND ma.batch = @batch::text
   AND ma.year >= @lower_year::int AND ma.year <= @upper_year::int
   AND ma.min_rank IS NOT NULL
 GROUP BY ma.university_code, ma.major_group, ma.year, srm.total_count

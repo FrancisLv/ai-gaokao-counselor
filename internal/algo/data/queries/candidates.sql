@@ -4,7 +4,8 @@
 WITH reliable_groups AS (
     SELECT university_code, major_group
     FROM major_admission
-    WHERE province = @province::text AND category = @category::text
+    WHERE release_id = @release_id::text
+      AND province = @province::text AND category = @category::text
       AND batch = @batch::text AND year = @history_year::int
       AND NULLIF(BTRIM(university_code), '') IS NOT NULL
       AND NULLIF(BTRIM(major_group), '') IS NOT NULL
@@ -29,12 +30,14 @@ SELECT
 FROM major_admission ma
 JOIN reliable_groups rg USING (university_code, major_group)
 JOIN university u ON ma.university_id = u.id
-WHERE ma.province = @province::text AND ma.category = @category::text AND ma.batch = @batch::text
+WHERE ma.release_id = @release_id::text
+  AND ma.province = @province::text AND ma.category = @category::text AND ma.batch = @batch::text
   AND ma.year = @history_year::int
   AND ma.min_rank IS NOT NULL
   AND EXISTS (
       SELECT 1 FROM enrollment_plan ep
       WHERE ep.university_code = ma.university_code AND ep.major_group = ma.major_group
+        AND ep.release_id = @release_id::text
         AND ep.province = @province::text AND ep.category = @category::text
         AND ep.batch = @batch::text AND ep.year = @report_year::int
   )
@@ -60,11 +63,13 @@ SELECT
     COALESCE(m.tuition, 0)::float8 AS tuition
 FROM major_admission ma
 LEFT JOIN major m ON ma.major_id = m.id
-WHERE ma.province = @province::text AND ma.category = @category::text AND ma.batch = @batch::text
+WHERE ma.release_id = @release_id::text
+  AND ma.province = @province::text AND ma.category = @category::text AND ma.batch = @batch::text
   AND ma.year = @history_year::int
   AND EXISTS (
       SELECT 1 FROM enrollment_plan ep
       WHERE ep.university_code = ma.university_code AND ep.major_group = ma.major_group
+        AND ep.release_id = @release_id::text
         AND ep.province = @province::text AND ep.category = @category::text
         AND ep.batch = @batch::text AND ep.year = @report_year::int
   )

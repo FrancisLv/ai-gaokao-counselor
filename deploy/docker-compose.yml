@@ -11,7 +11,11 @@ services:
         GO_RUNTIME_IMAGE: ${GO_RUNTIME_IMAGE:-gcr.io/distroless/static-debian12}
         GOPROXY: ${BUILD_GOPROXY:-https://proxy.golang.org,direct}
     ports: ["8000:8000"]
-    depends_on: [orchestrator]
+    environment:
+      - ORCHESTRATOR_ENDPOINT=orchestrator:9100
+    depends_on:
+      orchestrator:
+        condition: service_started
 
   llm-gateway:
     build:

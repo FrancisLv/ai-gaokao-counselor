@@ -3,7 +3,17 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from app.run_lifecycle import RunLifecycle
 from run_lifecycle_support import RunLifecyclePostgresTest
+
+
+class ClaimHookLifecycle(RunLifecycle):
+    def __init__(self, *args, after_claim, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._after_claim_test_hook = after_claim
+
+    async def _after_claim_hook(self, run_id, lease_epoch):
+        await self._after_claim_test_hook(run_id, lease_epoch)
 
 
 class LeaseLifecycleTests(RunLifecyclePostgresTest):
@@ -105,13 +115,13 @@ class LeaseLifecycleTests(RunLifecyclePostgresTest):
             ),
             idempotency_key="lease-takeover-submit",
         )
-        old_worker = RunLifecycle(
+        old_worker = ClaimHookLifecycle(
             self.dsn,
             auto_profile=True,
             worker_owner="worker-a",
             lease_duration=timedelta(seconds=30),
             clock=lambda: now[0],
-            _after_claim=pause_after_first_claim,
+            after_claim=pause_after_first_claim,
         )
         self.addAsyncCleanup(old_worker.close)
         old_task = asyncio.create_task(old_worker.SubmitRun(command))
@@ -197,13 +207,13 @@ class LeaseLifecycleTests(RunLifecyclePostgresTest):
             claimed.set()
             await continue_worker.wait()
 
-        lifecycle = RunLifecycle(
+        lifecycle = ClaimHookLifecycle(
             self.dsn,
             auto_profile=True,
             worker_owner="worker-a",
             lease_duration=timedelta(minutes=20),
             clock=lambda: now[0],
-            _after_claim=hold_after_claim,
+            after_claim=hold_after_claim,
         )
         self.addAsyncCleanup(lifecycle.close)
         task = asyncio.create_task(
@@ -348,11 +358,11 @@ class LeaseLifecycleTests(RunLifecyclePostgresTest):
             claimed.set()
             await continue_worker.wait()
 
-        lifecycle = RunLifecycle(
+        lifecycle = ClaimHookLifecycle(
             self.dsn,
             auto_profile=True,
             worker_owner="worker-a",
-            _after_claim=hold_after_claim,
+            after_claim=hold_after_claim,
         )
         self.addAsyncCleanup(lifecycle.close)
         task = asyncio.create_task(

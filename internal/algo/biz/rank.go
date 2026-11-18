@@ -129,7 +129,7 @@ func (u *RankUsecase) Convert(ctx context.Context, q RankQuery) (RankResult, err
 	if err := validateQuery(q.Province, q.Category, q.Year); err != nil {
 		return RankResult{}, err
 	}
-	table, controlScore, err := u.repo.LoadScoreRankMap(ctx, q.Province, q.Category, q.Year)
+	table, controlScore, err := u.repo.LoadScoreRankMap(ctx, q.ReleaseID, q.Province, q.Category, q.Year)
 	if err != nil {
 		return RankResult{}, err
 	}

@@ -15,8 +15,9 @@ const listCandidateGroups = `-- name: ListCandidateGroups :many
 WITH reliable_groups AS (
     SELECT university_code, major_group
     FROM major_admission
-    WHERE province = $1::text AND category = $2::text
-      AND batch = $3::text AND year = $4::int
+    WHERE release_id = $1::text
+      AND province = $2::text AND category = $3::text
+      AND batch = $4::text AND year = $5::int
       AND NULLIF(BTRIM(university_code), '') IS NOT NULL
       AND NULLIF(BTRIM(major_group), '') IS NOT NULL
     GROUP BY university_code, major_group
@@ -40,14 +41,16 @@ SELECT
 FROM major_admission ma
 JOIN reliable_groups rg USING (university_code, major_group)
 JOIN university u ON ma.university_id = u.id
-WHERE ma.province = $1::text AND ma.category = $2::text AND ma.batch = $3::text
-  AND ma.year = $4::int
+WHERE ma.release_id = $1::text
+  AND ma.province = $2::text AND ma.category = $3::text AND ma.batch = $4::text
+  AND ma.year = $5::int
   AND ma.min_rank IS NOT NULL
   AND EXISTS (
       SELECT 1 FROM enrollment_plan ep
       WHERE ep.university_code = ma.university_code AND ep.major_group = ma.major_group
-        AND ep.province = $1::text AND ep.category = $2::text
-        AND ep.batch = $3::text AND ep.year = $5::int
+        AND ep.release_id = $1::text
+        AND ep.province = $2::text AND ep.category = $3::text
+        AND ep.batch = $4::text AND ep.year = $6::int
   )
 GROUP BY ma.university_id, ma.university_code, ma.university_name, ma.major_group,
          u.is_985, u.is_211, u.is_dual_class, u.city, u.province,
@@ -56,6 +59,7 @@ ORDER BY ma.university_code, ma.major_group
 `
 
 type ListCandidateGroupsParams struct {
+	ReleaseID   string
 	Province    string
 	Category    string
 	Batch       string
@@ -83,6 +87,7 @@ type ListCandidateGroupsRow struct {
 // 同一组的院校 ID/名称必须一致，且组键非空；不任取冲突记录。
 func (q *Queries) ListCandidateGroups(ctx context.Context, arg ListCandidateGroupsParams) ([]ListCandidateGroupsRow, error) {
 	rows, err := q.db.Query(ctx, listCandidateGroups,
+		arg.ReleaseID,
 		arg.Province,
 		arg.Category,
 		arg.Batch,
@@ -136,18 +141,21 @@ SELECT
     COALESCE(m.tuition, 0)::float8 AS tuition
 FROM major_admission ma
 LEFT JOIN major m ON ma.major_id = m.id
-WHERE ma.province = $1::text AND ma.category = $2::text AND ma.batch = $3::text
-  AND ma.year = $4::int
+WHERE ma.release_id = $1::text
+  AND ma.province = $2::text AND ma.category = $3::text AND ma.batch = $4::text
+  AND ma.year = $5::int
   AND EXISTS (
       SELECT 1 FROM enrollment_plan ep
       WHERE ep.university_code = ma.university_code AND ep.major_group = ma.major_group
-        AND ep.province = $1::text AND ep.category = $2::text
-        AND ep.batch = $3::text AND ep.year = $5::int
+        AND ep.release_id = $1::text
+        AND ep.province = $2::text AND ep.category = $3::text
+        AND ep.batch = $4::text AND ep.year = $6::int
   )
 ORDER BY ma.university_code, ma.major_group, ma.min_rank, ma.major_code, ma.id
 `
 
 type ListCandidateMajorsParams struct {
+	ReleaseID   string
 	Province    string
 	Category    string
 	Batch       string
@@ -173,6 +181,7 @@ type ListCandidateMajorsRow struct {
 // 最后按专业代码、主键打破同位次并列，保持专业及选科列表顺序稳定。
 func (q *Queries) ListCandidateMajors(ctx context.Context, arg ListCandidateMajorsParams) ([]ListCandidateMajorsRow, error) {
 	rows, err := q.db.Query(ctx, listCandidateMajors,
+		arg.ReleaseID,
 		arg.Province,
 		arg.Category,
 		arg.Batch,

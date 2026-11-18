@@ -68,6 +68,20 @@ func TestService_CheckConstraints(t *testing.T) {
 	}
 }
 
+func TestService_RankAndEstimateRequireRelease(t *testing.T) {
+	s := NewAlgo(nil, nil, nil)
+	if _, err := s.RankConvert(context.Background(), &algov1.RankConvertRequest{
+		Province: "湖南", Year: "2025", Category: "物理类", Score: 600,
+	}); kerrors.Reason(err) != "RELEASE_REQUIRED" {
+		t.Fatalf("RankConvert reason = %q", kerrors.Reason(err))
+	}
+	if _, err := s.EstimateProb(context.Background(), &algov1.EstimateProbRequest{
+		Province: "湖南", Year: "2025", Category: "物理类", Score: 600,
+	}); kerrors.Reason(err) != "RELEASE_REQUIRED" {
+		t.Fatalf("EstimateProb reason = %q", kerrors.Reason(err))
+	}
+}
+
 func TestService_OptimizeWishlist(t *testing.T) {
 	opt := biz.NewOptimizeUsecase(&conf.Bootstrap{})
 	s := NewAlgo(nil, nil, opt)

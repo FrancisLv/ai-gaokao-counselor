@@ -10,5 +10,6 @@ SELECT
     batch,
     COALESCE(control_score, 0)::int AS control_score
 FROM score_rank_map
-WHERE province = @province::text AND category = @category::text AND year = @report_year::int
+WHERE release_id = @release_id::text
+  AND province = @province::text AND category = @category::text AND year = @report_year::int
 ORDER BY score DESC;

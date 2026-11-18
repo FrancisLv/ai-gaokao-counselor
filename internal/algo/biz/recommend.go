@@ -42,6 +42,9 @@ func (u *RecommendUsecase) EstimateProb(ctx context.Context, q UserQuery, profil
 	if err := ctx.Err(); err != nil {
 		return RecommendResult{}, err
 	}
+	if q.ReleaseID == "" {
+		return RecommendResult{}, errs.ErrInvalidQuery
+	}
 	if u.configErr != nil {
 		return RecommendResult{}, u.configErr
 	}
@@ -59,7 +62,8 @@ func (u *RecommendUsecase) EstimateProb(ctx context.Context, q UserQuery, profil
 
 	// a. 分数 → 位次/百分位（复用 RankUsecase，同一百分位口径，保证用户侧与候选侧可比）
 	rankRes, err := u.rank.Convert(ctx, RankQuery{
-		Province: q.Province, Category: q.Category, Year: q.Year, Score: q.Score,
+		ReleaseID: q.ReleaseID,
+		Province:  q.Province, Category: q.Category, Year: q.Year, Score: q.Score,
 	})
 	if err != nil {
 		return RecommendResult{}, err // ErrMissingScoreRankMap / ErrBelowControlLine / ErrScoreAboveMax 透传
@@ -67,7 +71,7 @@ func (u *RecommendUsecase) EstimateProb(ctx context.Context, q UserQuery, profil
 	userPercentile := rankRes.Percentile
 
 	// b. 候选池（报考年 enrollment_plan 覆盖的组，统计取报考年-1）
-	candidates, err := u.admission.LoadCandidates(ctx, q.Province, q.Category, batch, q.Year)
+	candidates, err := u.admission.LoadCandidates(ctx, q.ReleaseID, q.Province, q.Category, batch, q.Year)
 	if err != nil {
 		return RecommendResult{}, err
 	}
@@ -80,11 +84,11 @@ func (u *RecommendUsecase) EstimateProb(ctx context.Context, q UserQuery, profil
 	}
 
 	// d. 批量取历史 + 计划（各一条批量 SQL，避免 N+1），注入纯函数算概率 + 分档
-	historyMap, err := u.admission.BatchGroupHistory(ctx, q.Province, q.Category, batch, q.Year, cfg.WindowYears)
+	historyMap, err := u.admission.BatchGroupHistory(ctx, q.ReleaseID, q.Province, q.Category, batch, q.Year, cfg.WindowYears)
 	if err != nil {
 		return RecommendResult{}, err
 	}
-	planMap, err := u.admission.BatchGroupPlan(ctx, q.Province, q.Category, q.Year, q.Year-1)
+	planMap, err := u.admission.BatchGroupPlan(ctx, q.ReleaseID, q.Province, q.Category, q.Year, q.Year-1)
 	if err != nil {
 		return RecommendResult{}, err
 	}

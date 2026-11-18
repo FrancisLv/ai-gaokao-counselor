@@ -30,6 +30,7 @@ const (
 	itProvince = "湖南"
 	itCategory = "物理类"
 	itBatch    = "本科批"
+	itRelease  = "rel_legacy_v1"
 	itYear     = 2025 // 报考年（演示）；概率窗口=[2022,2024]，绝不含 2025
 	itWindow   = 3
 )
@@ -55,7 +56,7 @@ func BenchmarkIntegration_LoadCandidates(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := repo.LoadCandidates(context.Background(), itProvince, itCategory, itBatch, itYear); err != nil {
+		if _, err := repo.LoadCandidates(context.Background(), itRelease, itProvince, itCategory, itBatch, itYear); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -66,7 +67,7 @@ func BenchmarkIntegration_BatchGroupHistory(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := repo.BatchGroupHistory(context.Background(), itProvince, itCategory, itBatch, itYear, itWindow); err != nil {
+		if _, err := repo.BatchGroupHistory(context.Background(), itRelease, itProvince, itCategory, itBatch, itYear, itWindow); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -74,7 +75,7 @@ func BenchmarkIntegration_BatchGroupHistory(b *testing.B) {
 
 func TestIntegration_MissingEnrollmentPlan(t *testing.T) {
 	repo := setupRepo(t)
-	_, err := repo.LoadCandidates(context.Background(), itProvince, itCategory, itBatch, 9999)
+	_, err := repo.LoadCandidates(context.Background(), itRelease, itProvince, itCategory, itBatch, 9999)
 	if !errors.Is(err, errs.ErrMissingEnrollmentPlan) {
 		t.Fatalf("缺报考年计划必须报错，got %v", err)
 	}
@@ -82,7 +83,7 @@ func TestIntegration_MissingEnrollmentPlan(t *testing.T) {
 
 func TestIntegration_LoadCandidates(t *testing.T) {
 	repo := setupRepo(t)
-	cands, err := repo.LoadCandidates(context.Background(), itProvince, itCategory, itBatch, itYear)
+	cands, err := repo.LoadCandidates(context.Background(), itRelease, itProvince, itCategory, itBatch, itYear)
 	if err != nil {
 		t.Fatalf("LoadCandidates: %v", err)
 	}
@@ -145,7 +146,7 @@ func TestIntegration_LoadCandidates_Reproducible(t *testing.T) {
 	repo := setupRepo(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	first, err := repo.LoadCandidates(ctx, itProvince, itCategory, itBatch, itYear)
+	first, err := repo.LoadCandidates(ctx, itRelease, itProvince, itCategory, itBatch, itYear)
 	if err != nil {
 		t.Fatalf("LoadCandidates: %v", err)
 	}
@@ -164,7 +165,7 @@ func TestIntegration_LoadCandidates_Reproducible(t *testing.T) {
 		t.Fatalf("1120/（104）同位次专业次序 = %v, want [21 24]", tiedCodes)
 	}
 	for i := 0; i < 3; i++ {
-		next, err := repo.LoadCandidates(ctx, itProvince, itCategory, itBatch, itYear)
+		next, err := repo.LoadCandidates(ctx, itRelease, itProvince, itCategory, itBatch, itYear)
 		if err != nil {
 			t.Fatalf("LoadCandidates 重复查询: %v", err)
 		}
@@ -177,7 +178,7 @@ func TestIntegration_LoadCandidates_Reproducible(t *testing.T) {
 
 func TestIntegration_BatchGroupHistory_NoHoldoutLeak(t *testing.T) {
 	repo := setupRepo(t)
-	hm, err := repo.BatchGroupHistory(context.Background(), itProvince, itCategory, itBatch, itYear, itWindow)
+	hm, err := repo.BatchGroupHistory(context.Background(), itRelease, itProvince, itCategory, itBatch, itYear, itWindow)
 	if err != nil {
 		t.Fatalf("BatchGroupHistory: %v", err)
 	}
@@ -227,7 +228,7 @@ func TestIntegration_BatchGroupHistory_NoHoldoutLeak(t *testing.T) {
 
 func TestIntegration_BatchGroupPlan(t *testing.T) {
 	repo := setupRepo(t)
-	pm, err := repo.BatchGroupPlan(context.Background(), itProvince, itCategory, itYear, itYear-1)
+	pm, err := repo.BatchGroupPlan(context.Background(), itRelease, itProvince, itCategory, itYear, itYear-1)
 	if err != nil {
 		t.Fatalf("BatchGroupPlan: %v", err)
 	}
@@ -253,15 +254,15 @@ func TestIntegration_EndToEnd_Recommend(t *testing.T) {
 	repo := setupRepo(t)
 	ctx := context.Background()
 
-	cands, err := repo.LoadCandidates(ctx, itProvince, itCategory, itBatch, itYear)
+	cands, err := repo.LoadCandidates(ctx, itRelease, itProvince, itCategory, itBatch, itYear)
 	if err != nil {
 		t.Fatalf("LoadCandidates: %v", err)
 	}
-	hm, err := repo.BatchGroupHistory(ctx, itProvince, itCategory, itBatch, itYear, itWindow)
+	hm, err := repo.BatchGroupHistory(ctx, itRelease, itProvince, itCategory, itBatch, itYear, itWindow)
 	if err != nil {
 		t.Fatalf("BatchGroupHistory: %v", err)
 	}
-	pm, err := repo.BatchGroupPlan(ctx, itProvince, itCategory, itYear, itYear-1)
+	pm, err := repo.BatchGroupPlan(ctx, itRelease, itProvince, itCategory, itYear, itYear-1)
 	if err != nil {
 		t.Fatalf("BatchGroupPlan: %v", err)
 	}
@@ -287,7 +288,7 @@ func TestIntegration_EndToEnd_Recommend(t *testing.T) {
 // 且一个真实选科组合能正常分出 kept/rejected（kept+rejected==total、拒绝均为 subject_req 规则）。
 func TestIntegration_CheckConstraints_RealSubjectReq(t *testing.T) {
 	repo := setupRepo(t)
-	cands, err := repo.LoadCandidates(context.Background(), itProvince, itCategory, itBatch, itYear)
+	cands, err := repo.LoadCandidates(context.Background(), itRelease, itProvince, itCategory, itBatch, itYear)
 	if err != nil {
 		t.Fatalf("LoadCandidates: %v", err)
 	}
@@ -344,15 +345,15 @@ func TestIntegration_EndToEnd_Optimize(t *testing.T) {
 	repo := setupRepo(t)
 	ctx := context.Background()
 
-	cands, err := repo.LoadCandidates(ctx, itProvince, itCategory, itBatch, itYear)
+	cands, err := repo.LoadCandidates(ctx, itRelease, itProvince, itCategory, itBatch, itYear)
 	if err != nil {
 		t.Fatalf("LoadCandidates: %v", err)
 	}
-	hm, err := repo.BatchGroupHistory(ctx, itProvince, itCategory, itBatch, itYear, itWindow)
+	hm, err := repo.BatchGroupHistory(ctx, itRelease, itProvince, itCategory, itBatch, itYear, itWindow)
 	if err != nil {
 		t.Fatalf("BatchGroupHistory: %v", err)
 	}
-	pm, err := repo.BatchGroupPlan(ctx, itProvince, itCategory, itYear, itYear-1)
+	pm, err := repo.BatchGroupPlan(ctx, itRelease, itProvince, itCategory, itYear, itYear-1)
 	if err != nil {
 		t.Fatalf("BatchGroupPlan: %v", err)
 	}

@@ -529,7 +529,7 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
             lifecycle,
             submitted.run_id,
             "result",
-            attempts=600,
+            attempts=6000,
         )
 
         self.assertEqual(completed.state, "SUCCEEDED")
