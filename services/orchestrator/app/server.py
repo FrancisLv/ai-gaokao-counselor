@@ -11,7 +11,7 @@ import json
 import logging
 from typing import AsyncIterator
 
-from pb import orchestrator_pb2, orchestrator_pb2_grpc
+from api.orchestrator.v1 import orchestrator_pb2, orchestrator_pb2_grpc
 
 from graph.build import build_graph
 from graph.state import new_state

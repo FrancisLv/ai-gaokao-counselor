@@ -9,6 +9,7 @@ api/**/*.pb.go
 api/**/*_grpc.pb.go
 api/**/*.pb.gw.go
 api/**/*.swagger.json
+conf/*.pb.go
 
 # --- Python ---
 __pycache__/
@@ -17,14 +18,26 @@ __pycache__/
 venv/
 .pytest_cache/
 .mypy_cache/
-services/orchestrator/pb/*_pb2.py
-services/orchestrator/pb/*_pb2_grpc.py
+services/orchestrator/pb/**/*_pb2.py
+services/orchestrator/pb/**/*_pb2_grpc.py
+*.egg-info/
+services/orchestrator/build/
 
 # --- 环境 / 密钥 ---
 .env
 .env.*
 !.env.example
 *.local
+*.pem
+*.key
+*.p12
+credentials*.json
+
+# --- 爬取语料（版权归原作者/院校所有，不入库；用 scripts/ingest_charters.py 自行复现）---
+docs/charters/
+
+# --- 日志 ---
+*.log
 
 # --- 数据（大文件不入库，仅保留 golden 集）---
 data/**/*.csv

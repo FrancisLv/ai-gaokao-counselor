@@ -1,0 +1,166 @@
+{
+  "_readme": {
+    "用途": "algo 服务四 RPC 的 APIfox 手工自测请求集（gRPC，proto 反射加载 algo.v1.Algo）",
+    "连接地址": {
+      "docker_run_19002": "localhost:19002（容器只读连本机 PG，见 docs/dev-log.md §19）",
+      "make_run_algo": "localhost:9002（configs/algo.yaml 默认端口，启动前确认端口空闲）"
+    },
+    "数据前提": "本机 PostgreSQL ai_gaokao_counselor 已含 2025 年一分一段/招生计划/录取历史；MVP 仅湖南、物理类/历史类、本科批",
+    "真实流程": "请求1~2 使用真实库数据；请求3~4 为虚构候选，仅验证规则与排序逻辑。完整流程 = 把请求2返回的 rush/stable/safe 三档合并后原样放入请求4的 candidates（OptimizeWishlist 不重算概率）"
+  },
+
+  "1_RankConvert_正常": {
+    "method": "algo.v1.Algo/RankConvert",
+    "request": {
+      "province": "湖南",
+      "year": "2025",
+      "category": "物理类",
+      "score": 600
+    },
+    "expected": {
+      "rank": 15860,
+      "note": "percentile = rank/total_count，是位次占比而非录取概率；数据更新后数值可能变化"
+    }
+  },
+
+  "2_EstimateProb_正常": {
+    "method": "algo.v1.Algo/EstimateProb",
+    "request": {
+      "province": "湖南",
+      "year": "2025",
+      "category": "物理类",
+      "batch": "本科批",
+      "score": 600,
+      "subjects": ["物理", "化学", "生物"]
+    },
+    "expected": {
+      "basis.userRank": 15860,
+      "basis.sampleYears": [2022, 2023, 2024],
+      "basis.method": "weighted_hit",
+      "note": "三档合计约 1915 个候选（最近一次验证值，随数据变化）；每项含 candidate+prob 两层；响应约 1.3MB 属正常。可改 category=历史类、subjects=[历史,思想政治,地理] 测另一路径"
+    }
+  },
+
+  "3_CheckConstraints_虚构候选": {
+    "method": "algo.v1.Algo/CheckConstraints",
+    "request": {
+      "category": "物理类",
+      "subjects": ["物理", "化学", "生物"],
+      "candidates": [
+        {
+          "candidate": {
+            "universityCode": "TEST001",
+            "universityName": "测试大学甲",
+            "majorGroup": "101",
+            "subjectReq": ["首选物理，再选化学"]
+          }
+        },
+        {
+          "candidate": {
+            "universityCode": "TEST002",
+            "universityName": "测试大学乙",
+            "majorGroup": "102",
+            "subjectReq": ["首选物理，再选思想政治"]
+          }
+        },
+        {
+          "candidate": {
+            "universityCode": "TEST003",
+            "universityName": "测试大学丙",
+            "majorGroup": "103",
+            "subjectReq": ["首选历史，再选不限"]
+          }
+        }
+      ]
+    },
+    "expected": {
+      "kept": ["TEST001"],
+      "rejected": ["TEST002", "TEST003"],
+      "note": "rejected 项 rule=subject_req，reason 说明原因；候选为虚构，不代表真实院校招生要求；当前仅实现选科约束，体检/单科/性别/批次为 TODO"
+    }
+  },
+
+  "4_OptimizeWishlist_虚构候选": {
+    "method": "algo.v1.Algo/OptimizeWishlist",
+    "request": {
+      "profile": {
+        "riskAppetite": "balanced",
+        "priorityDims": ["location"],
+        "preferredCities": ["长沙"]
+      },
+      "candidates": [
+        {
+          "candidate": {
+            "universityCode": "TEST001",
+            "universityName": "测试大学甲",
+            "majorGroup": "101",
+            "schoolTier": "211",
+            "location": "长沙",
+            "province": "湖南"
+          },
+          "prob": { "probability": 0.4, "category": "冲" }
+        },
+        {
+          "candidate": {
+            "universityCode": "TEST002",
+            "universityName": "测试大学乙",
+            "majorGroup": "102",
+            "schoolTier": "普通",
+            "location": "武汉",
+            "province": "湖北"
+          },
+          "prob": { "probability": 0.7, "category": "稳" }
+        },
+        {
+          "candidate": {
+            "universityCode": "TEST003",
+            "universityName": "测试大学丙",
+            "majorGroup": "103",
+            "schoolTier": "普通",
+            "location": "长沙",
+            "province": "湖南"
+          },
+          "prob": { "probability": 0.95, "category": "保" }
+        }
+      ]
+    },
+    "expected": {
+      "wishlist.candidates": "3 项（不会补成 45），finalRank 连续 1/2/3，每项含 utility.score/breakdown/weights",
+      "report": "safeCount=1、safeGuardOk=false（默认 min_safe_count=9，保底不足是成功响应内的告警，不是 RPC 错误）；slipRate≈0.009=Π(1−pᵢ)，为独立性假设下的简化估算",
+      "note": "概率与候选均为手工虚构；部分客户端会省略值为 false 的 protobuf 字段"
+    }
+  },
+
+  "5_错误用例": {
+    "5a_低于本科线": {
+      "method": "algo.v1.Algo/RankConvert",
+      "base": "请求1",
+      "mutation": "score 改为 404",
+      "expected": { "grpcCode": "FAILED_PRECONDITION", "reason": "SCORE_BELOW_CONTROL_LINE" }
+    },
+    "5b_分数超上限": {
+      "method": "algo.v1.Algo/RankConvert",
+      "base": "请求1",
+      "mutation": "score 改为 751",
+      "expected": { "grpcCode": "INVALID_ARGUMENT", "reason": "SCORE_ABOVE_MAX" }
+    },
+    "5c_选科与科类不符": {
+      "method": "algo.v1.Algo/EstimateProb",
+      "base": "请求2",
+      "mutation": "category 保持物理类，subjects 改为 [\"历史\", \"思想政治\", \"地理\"]",
+      "expected": { "grpcCode": "INVALID_ARGUMENT", "reason": "INVALID_SUBJECTS" }
+    },
+    "5d_候选缺概率": {
+      "method": "algo.v1.Algo/OptimizeWishlist",
+      "base": "请求4",
+      "mutation": "删除第一个候选的 prob 字段",
+      "expected": { "grpcCode": "FAILED_PRECONDITION", "reason": "CANDIDATE_WITHOUT_PROB" }
+    },
+    "5e_候选重复": {
+      "method": "algo.v1.Algo/OptimizeWishlist",
+      "base": "请求4",
+      "mutation": "将第一个候选（TEST001/101）完整复制后追加到 candidates 末尾",
+      "expected": { "grpcCode": "INVALID_ARGUMENT", "reason": "DUPLICATE_CANDIDATE" }
+    }
+  }
+}

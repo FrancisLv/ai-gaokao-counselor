@@ -17,4 +17,17 @@ graph/nodes/intake.py
 graph/nodes/profile_confirm.py
 graph/nodes/retrieve.py
 pb/__init__.py
+pb/api/algo/v1/algo_pb2.py
+pb/api/algo/v1/algo_pb2_grpc.py
+pb/api/common/v1/common_pb2.py
+pb/api/common/v1/common_pb2_grpc.py
+pb/api/gateway/v1/gateway_pb2.py
+pb/api/gateway/v1/gateway_pb2_grpc.py
+pb/api/llmgw/v1/llmgw_pb2.py
+pb/api/llmgw/v1/llmgw_pb2_grpc.py
+pb/api/orchestrator/v1/orchestrator_pb2.py
+pb/api/orchestrator/v1/orchestrator_pb2_grpc.py
 rag/__init__.py
+rag/embedder.py
+rag/etl.py
+tests/test_offline.py

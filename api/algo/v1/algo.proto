@@ -8,60 +8,193 @@ import "api/common/v1/common.proto";
 
 // svc-algo（Go）实现；svc-orchestrator 调用。
 // 纯确定性计算：可复现、可审计、可独立单测。与 LLM 边界清晰（数值由算法给，解释由 LLM 写）。
+// 候选维度：院校专业组（湖南新高考 3+1+2 的投档基本单位），组内专业作为展示明细。
+//
+// 契约约定（Q15）：跨服务载荷一律用下方类型化 message（不使用 opaque *_json 字符串）。
+// 这些 message 是 wire DTO；svc-algo 内部 biz 领域 struct（task2 §2，Go 嵌入扁平化）与之分离，
+// 由 service 层做 biz↔pb 映射（见 task2 §4.3）。改本文件后跑 `make api` 重生成 Go+Python，
+// 勿手改生成的 *.pb.go（已 gitignore）。
 service Algo {
-  // 分数 ↔ 位次 换算（不一问用户，由分数推算）。
+  // 分数 ↔ 位次 换算（不问用户，由分数推算）。
   rpc RankConvert(RankConvertRequest) returns (RankConvertReply);
 
-  // 某院校专业的录取概率估计（历史位次分布 → 分位数 / 核密度）。
+  // 录取概率估计 = 候选池推荐：由分数生成分档候选池（冲/稳/保），
+  // 每个院校专业组带进档概率与审计依据。到分档为止；成品志愿表由 OptimizeWishlist 生成。
   rpc EstimateProb(EstimateProbRequest) returns (EstimateProbReply);
 
   // 硬规则裁决：选科 / 单科 / 体检 / 批次 / 性别 → 剔除并记录原因。
   rpc CheckConstraints(CheckConstraintsRequest) returns (CheckConstraintsReply);
 
-  // 志愿表排序与配比（约束满足 + 启发式搜索）。
+  // 志愿表排序与配比（约束满足 + 启发式搜索）：从候选池生成成品志愿表，含解析式滑档率验证 Π(1−pᵢ)。
   rpc OptimizeWishlist(OptimizeWishlistRequest) returns (OptimizeWishlistReply);
 }
 
+// ======== 领域 DTO（Go biz struct 的 wire 镜像；service 层负责 biz↔pb 映射）========
+
+// UserProfile 用户画像（用于效用打分）。orchestrator 从对话/LLM 提取后构造。
+message UserProfile {
+  string risk_appetite = 1;             // 风险偏好：conservative/balanced/aggressive
+  repeated string priority_dims = 2;    // 优先维度：tier/major/location/strength（与 utility 维度 key 统一）
+  repeated string interests = 3;        // 兴趣专业方向（LLM 从对话提取）
+  repeated string preferred_cities = 4; // 偏好城市
+  repeated string preferred_tiers = 5;  // 偏好学校层次：985/211/双一流
+}
+
+// MajorDetail 组内专业详情（major_admission JOIN major）。
+message MajorDetail {
+  string major_code = 1;  // 专业代码
+  string major_name = 2;  // 专业名称
+  string subject_req = 3; // 选科要求，如“首选物理，再选不限”
+  string duration = 4;    // 学制，如“四年”
+  double tuition = 5;     // 学费（元/年）
+  string major_note = 6;  // 备注，如“（卓越班）”、中外合作
+  int32 min_score = 7;    // 该专业历史最低分（专业级参考）
+  int32 min_rank = 8;     // 该专业历史最低位次（仅展示，不用于概率计算）
+  int32 admit_count = 9;  // 录取人数
+}
+
+// AdmissionRecord 某年录取记录（专业组维度）。
+message AdmissionRecord {
+  int32 year = 1;
+  int32 group_min_rank = 2;  // 组投档线位次（组内最低位次）
+  int32 total_count = 3;     // 该省该年总人数（用于算百分位）
+  double min_percentile = 4; // 组投档线百分位 = group_min_rank / total_count
+  int32 enroll_count = 5;    // 招生人数
+}
+
+// Candidate 候选（院校专业组）。
+message Candidate {
+  int32 university_id = 1;
+  string university_code = 2;
+  string university_name = 3;
+  string major_group = 4;           // 专业组代号，如“（109）”
+  int32 group_min_rank = 5;         // 组投档线位次（组内 MIN(min_rank)）
+  repeated MajorDetail majors = 6;  // 组内专业详情（展示用）
+  string school_tier = 7;           // 985/211/双一流/普通
+  string location = 8;              // 城市
+  string province = 9;              // 省份（utility 地域“同省”判断用）
+  repeated string subject_req = 10; // 选科要求
+  int32 num_master = 11;            // 硕士点数量
+  int32 num_doctor = 12;            // 博士点数量
+  int32 ruanke_rank = 13;           // 软科排名
+  repeated AdmissionRecord history_data = 14; // 历史录取数据（service 层填充）
+}
+
+// ProbEstimate 概率估计结果。
+message ProbEstimate {
+  double probability = 1; // 录取概率，范围 [0.01, 0.99]
+  string method = 2;      // weighted_hit（加权命中率法）
+  int32 data_years = 3;   // 有效数据年数
+  string category = 4;    // 冲/稳/保
+}
+
+// CandidateWithProb 带概率的候选（prob 模块输出）。ND2：嵌套组合。
+message CandidateWithProb {
+  Candidate candidate = 1;
+  ProbEstimate prob = 2;
+}
+
+// UtilityScore 效用打分。
+message UtilityScore {
+  double score = 1;                  // 总分 0~1
+  map<string, double> breakdown = 2; // 各维度得分
+  map<string, double> weights = 3;   // 各维度权重
+}
+
+// CandidateWithScore 带分数的候选（optimize 模块输入）= 候选+概率+效用。
+message CandidateWithScore {
+  CandidateWithProb cwp = 1;
+  UtilityScore utility = 2;
+  int32 final_rank = 3; // 在志愿表中的位置
+}
+
+// OptimizationReport 优化报告。
+message OptimizationReport {
+  int32 rush_count = 1;   // 冲的数量
+  int32 stable_count = 2; // 稳的数量
+  int32 safe_count = 3;   // 稳拿保底数（p≥SafeGuardThreshold=0.9，非分档“保”数）
+  bool safe_guard_ok = 4; // 保底是否达标（safe_count ≥ MinSafeCount）
+  double slip_rate = 5;   // 解析式估算滑档率 = Π(1−pᵢ)（有保底时≈0）
+  double expected_satisfaction = 6; // 期望满意度 = 志愿表效用分均值
+}
+
+// WishlistResult 志愿表优化结果。
+message WishlistResult {
+  repeated CandidateWithScore candidates = 1; // 排序后的志愿表
+  OptimizationReport report = 2;              // 优化报告
+}
+
+// AuditBasis 全局审计依据（可复现/可审计）。
+message AuditBasis {
+  int32 user_rank = 1;             // 用户位次
+  double user_percentile = 2;      // 用户百分位
+  repeated int32 sample_years = 3; // 概率窗口样本年份=[报考年-W, 报考年-1]，如报考年2025→[2022,2023,2024]（不含报考年）
+  string method = 4;               // weighted_hit
+  string province = 5;
+  string category = 6;
+}
+
+// RejectedCandidate 被硬规则剔除的候选 + 原因。
+message RejectedCandidate {
+  CandidateWithProb candidate = 1;
+  string rule = 2;   // 触发规则 key：subject_req/single_score/physical/gender/batch
+  string reason = 3; // 人话原因（供前端/LLM 解释）
+}
+
+// ======== RPC 载荷 ========
+
 message RankConvertRequest {
   common.v1.Trace trace    = 1;
-  string          province = 2;
-  string          year     = 3;
-  string          track    = 4;
+  string          province = 2; // 湖南
+  string          year     = 3; // 报考年（如 2025）；决定载入哪年 score_rank_map（缺失→明确报错，不回退）
+  string          category = 4; // 物理类/历史类（对应 DB score_rank_map.category 字段，非 track）
   int32           score    = 5;
 }
 message RankConvertReply {
-  int32 rank = 1;
+  int32  rank       = 1; // 位次
+  double percentile = 2; // 百分位 = rank / total_count（供概率计算复用，口径与候选侧一致）
 }
 
+// 候选池推荐请求（重构后：由分数生成候选池，而非「已知目标院校专业再算概率」）。
 message EstimateProbRequest {
-  common.v1.Trace trace      = 1;
-  string          college_id = 2;
-  string          major_code = 3;
-  string          province   = 4;
-  string          year       = 5;
-  string          track      = 6;
-  int32           user_rank  = 7;
+  common.v1.Trace trace              = 1;
+  string          province           = 2; // 湖南
+  string          year               = 3; // 报考年（如 2025）；窗口=[year-window_years, year-1]、score_rank/plan/候选池均按此年推导
+  string          category           = 4; // 物理类/历史类
+  string          batch              = 5; // 本科批
+  int32           score              = 6; // 高考分数（service 内部经 RankConvert 得位次/百分位）
+  repeated string subjects           = 7; // 选科组合，如 ["物理","化学","生物"]，用于选科硬过滤
+  UserProfile     profile            = 8; // 风险偏好/兴趣/偏好城市等，用于效用排序
+  int32           per_category_limit = 9; // 每档最多返回数量（默认 0=全量，后端不截断；Q1）
 }
 message EstimateProbReply {
-  double prob       = 1;
-  string basis_json = 2; // 概率依据（样本年份 / 分位数），供解释与审计
+  // 分档候选池（院校专业组），每组含进档概率、冲稳保分类、组内专业明细。
+  repeated CandidateWithProb rush_candidates   = 1; // 冲档候选
+  repeated CandidateWithProb stable_candidates = 2; // 稳档候选
+  repeated CandidateWithProb safe_candidates   = 3; // 保档候选
+  int32      rush_total       = 4; // 冲档总数（截断前，用于分页/「还有 N 个」）
+  int32      stable_total     = 5;
+  int32      safe_total       = 6;
+  AuditBasis basis            = 7; // 全局审计依据：用户位次/百分位、样本年份、method=weighted_hit
 }
 
 message CheckConstraintsRequest {
-  common.v1.Trace trace          = 1;
-  string          profile_json   = 2;
-  string          candidates_json = 3;
+  common.v1.Trace          trace      = 1;
+  UserProfile              profile    = 2;
+  repeated CandidateWithProb candidates = 3; // 待校验候选（约束过滤只读静态 Candidate 字段，忽略 prob）
+  repeated string          subjects   = 4; // 用户选科组合（选科硬约束必需，同 EstimateProbRequest.subjects；UserProfile 不含选科，故独立传入）
+  string                   category   = 5; // 科类：物理类/历史类（首选匹配冗余保险，与候选 SQL 过滤口径一致）
 }
 message CheckConstraintsReply {
-  string kept_json     = 1; // 通过校验的候选
-  string rejected_json = 2; // 被剔除的候选 + 原因
+  repeated CandidateWithProb kept     = 1; // 通过校验的候选
+  repeated RejectedCandidate rejected = 2; // 被剔除的候选 + 原因
 }
 
 message OptimizeWishlistRequest {
-  common.v1.Trace trace           = 1;
-  string          candidates_json = 2;
-  string          profile_json    = 3;
+  common.v1.Trace          trace      = 1;
+  repeated CandidateWithProb candidates = 2; // 候选池：EstimateProbReply 三档合并（每项自带 prob.category），或上层增删改后回传；本 RPC 不重跑 rank/prob
+  UserProfile              profile    = 3; // 含 risk_appetite → 冲稳保配比
 }
 message OptimizeWishlistReply {
-  string wishlist_json = 1; // 冲/稳/保配比与梯度平滑后的志愿表
+  WishlistResult wishlist = 1; // 冲/稳/保配比与梯度平滑后的成品志愿表（含解析式滑档率 Π(1−pᵢ)）
 }

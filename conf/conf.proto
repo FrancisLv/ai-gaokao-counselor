@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package algo.conf;
+
+option go_package = "github.com/choucisan/ai-gaokao-counselor/conf;conf";
+
+// Bootstrap svc-algo 配置根（Kratos config.Scan 目标；对应 configs/algo.yaml）。
+// 三段：Server（gRPC 监听）/ Data（数据库）/ Algo（算法参数，A1 外部化，可不重编译调参）。
+message Bootstrap {
+  Server server = 1;
+  Data   data   = 2;
+  Algo   algo   = 3;
+}
+
+// Server 段（对齐 configs/algo.yaml 的 server.grpc.{addr,timeout}）。
+message Server {
+  message GRPC {
+    string addr    = 1; // 如 "0.0.0.0:9002"
+    string timeout = 2; // 如 "30s"
+  }
+  GRPC grpc = 1;
+}
+
+// Data 段（数据库连接）。
+message Data {
+  message Database {
+    string dsn = 1; // postgres://user:pass@host:port/db?sslmode=disable
+  }
+  Database database = 1;
+}
+
+// Algo 段：全部算法常量（window/衰减/阈值/配比/utility 权重）。缺失字段由各 usecase 构造时兜底默认。
+message Algo {
+  int32  window_years         = 1;  // 默认 3
+  double decay_factor         = 2;  // 默认 0.7
+  double plan_adjust          = 3;  // 默认 0.5
+  double rush_threshold       = 4;  // 默认 0.2
+  double stable_threshold     = 5;  // 默认 0.5
+  double safe_threshold       = 6;  // 默认 0.8
+  double safe_guard_threshold = 7;  // 默认 0.9（计入稳拿保底的最低录取概率）
+  int32  max_wishlist_size    = 8;  // 默认 45（湖南本科批 L）
+  int32  min_safe_count       = 9;  // 默认 9 = max(3, ⌈max_wishlist_size×20%⌉) 的推导值（Q22/DF1-A：存绝对值、显式可审计）
+  message Ratio {
+    double rush   = 1;
+    double stable = 2;
+    double safe   = 3;
+  }
+  Ratio  target_ratio         = 10; // 默认 0.3/0.4/0.3
+  int32  per_category_limit   = 11; // 默认 0=全量（Q1）
+  message UtilityWeights {
+    double tier     = 1;
+    double major    = 2;
+    double location = 3;
+    double strength = 4;
+  }
+  UtilityWeights utility_weights = 12; // 默认各 0.25（Q19：缺失维兜底 0.25，不强制 Σ=1）
+}

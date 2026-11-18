@@ -1,0 +1,12 @@
+version: "2"
+sql:
+  - engine: postgresql
+    # 仅离线解析结构，不连接数据库、不执行初始化或数据导入。
+    schema: migrations/00_schema.sql
+    queries: internal/algo/data/queries
+    gen:
+      go:
+        package: dbgen
+        out: internal/algo/data/dbgen
+        sql_package: pgx/v5
+        omit_unused_structs: true

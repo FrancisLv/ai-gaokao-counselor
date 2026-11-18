@@ -5,4 +5,21 @@ server:
     timeout: 30s
 data:
   database:
-    dsn: postgres://app:app@postgres:5432/gaokao?sslmode=disable
+    # 本地开发直连本机 PostgreSQL（项目约定：本地开发复用本机 PG、不走 Docker，见 dev-log #6）。
+    # docker-compose 部署时由容器侧覆盖为 app:app@postgres:5432/gaokao（compose 服务名）。
+    dsn: postgres://francis@localhost:5432/ai_gaokao_counselor?sslmode=disable
+
+# 算法参数（A1 外部化：可不重编译调参；对应 conf.Bootstrap.Algo）
+algo:
+  window_years: 3
+  decay_factor: 0.7
+  plan_adjust: 0.5
+  rush_threshold: 0.2
+  stable_threshold: 0.5
+  safe_threshold: 0.8
+  safe_guard_threshold: 0.9
+  max_wishlist_size: 45
+  min_safe_count: 9          # = max(3, ⌈max_wishlist_size×20%⌉)；改 max_wishlist_size 需同步（Q22）
+  target_ratio: { rush: 0.3, stable: 0.4, safe: 0.3 }
+  per_category_limit: 0      # 0=全量（Q1）
+  utility_weights: { tier: 0.25, major: 0.25, location: 0.25, strength: 0.25 }  # Q19：四维默认权重（缺失兜底 0.25，不强制 Σ=1）

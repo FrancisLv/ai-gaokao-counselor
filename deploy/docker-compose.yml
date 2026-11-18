@@ -4,16 +4,24 @@ services:
   gateway:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.go
-      args: { SERVICE: gateway }
+      dockerfile: deploy/go.Dockerfile
+      args:
+        SERVICE: gateway
+        GO_IMAGE: ${GO_IMAGE:-golang:1.25}
+        GO_RUNTIME_IMAGE: ${GO_RUNTIME_IMAGE:-gcr.io/distroless/static-debian12}
+        GOPROXY: ${BUILD_GOPROXY:-https://proxy.golang.org,direct}
     ports: ["8000:8000"]
     depends_on: [orchestrator]
 
   llm-gateway:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.go
-      args: { SERVICE: llm-gateway }
+      dockerfile: deploy/go.Dockerfile
+      args:
+        SERVICE: llm-gateway
+        GO_IMAGE: ${GO_IMAGE:-golang:1.25}
+        GO_RUNTIME_IMAGE: ${GO_RUNTIME_IMAGE:-gcr.io/distroless/static-debian12}
+        GOPROXY: ${BUILD_GOPROXY:-https://proxy.golang.org,direct}
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY:?set OPENAI_API_KEY in .env}
     depends_on: [redis]
@@ -21,14 +29,31 @@ services:
   algo:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.go
-      args: { SERVICE: algo }
-    depends_on: [postgres]
+      dockerfile: deploy/go.Dockerfile
+      args:
+        SERVICE: algo
+        GO_IMAGE: ${GO_IMAGE:-golang:1.25}
+        GO_RUNTIME_IMAGE: ${GO_RUNTIME_IMAGE:-gcr.io/distroless/static-debian12}
+        GOPROXY: ${BUILD_GOPROXY:-https://proxy.golang.org,direct}
+    # distroless 运行时镜像不含 configs，挂载到 /configs；working_dir=/ 使代码里的相对路径
+    # configs/algo.yaml 解析为 /configs/algo.yaml。dsn 由 ALGO_DATA_DSN 覆盖为 compose 网络内的 postgres 服务名。
+    working_dir: /
+    volumes:
+      - ../configs:/configs:ro
+    environment:
+      - ALGO_DATA_DSN=postgres://app:app@postgres:5432/gaokao?sslmode=disable
+    ports: ["9002:9002"]
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   orchestrator:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.python
+      dockerfile: deploy/python.Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim}
+        TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
     ports: ["9100:9100"]
     depends_on: [postgres, redis]
 
@@ -38,10 +63,16 @@ services:
       POSTGRES_DB: gaokao
       POSTGRES_USER: app
       POSTGRES_PASSWORD: app
-    ports: ["5432:5432"]
+    # 宿主机映射用 5433，避免与本机已装的 PostgreSQL（5432）冲突；容器间仍走内部网络 postgres:5432。
+    ports: ["5433:5432"]
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d gaokao"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7

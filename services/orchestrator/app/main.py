@@ -1,6 +1,6 @@
 """svc-orchestrator 入口：启动 grpc.aio 服务。
 
-本地开发： cd services/orchestrator && python -m app.main
+本地开发：从仓库根目录运行 make run-orchestrator PY=/path/to/env/bin/python3。
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ async def _serve() -> None:
     import grpc
 
     from app.server import OrchestratorServicer
-    from pb import orchestrator_pb2_grpc
+    from api.orchestrator.v1 import orchestrator_pb2_grpc
 
     addr = os.getenv("ORCHESTRATOR_ADDR", "[::]:9100")
     server = grpc.aio.server()

@@ -15,7 +15,7 @@ from graph.state import GraphState
 
 # 循环护栏（超限即裁决，防止死循环与 token 爆炸）
 MAX_ASK_ROUNDS = 6
-MAX_CRITIC_LOOPS = 3
+MAX_CRITIC_LOOPS = 2
 MAX_VERIFY_RETRIES = 2
 
 

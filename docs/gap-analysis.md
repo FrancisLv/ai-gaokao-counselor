@@ -1,0 +1,203 @@
+# Gap Analysis：PRD 需求 × 代码现状
+
+| 项 | 值 |
+| --- | --- |
+| 文档版本 | v1.0 |
+| 目的 | 把 `prd.md` 的 24 条 FR 逐条对照**真实代码**，给「现状 / 证据文件 / 剩余工作」，并合并 `agent-architecture-review.md` 的 19 项问题，作为拆票与 Codex 上下文的事实底座 |
+| 基准 | 现状以**仓库代码实测**为准；需求口径以 `prd.md` v1.1 为准；两者冲突处一律以 `agent-architecture-review.md` 为准（PRD §12.5） |
+| 方法 | 通读 gateway / orchestrator / algo / llmgw / rag / migrations 源码，grep 调用点与表名，不轻信任何登记文本（含审查报告本身） |
+| 生成时间 | 2026-11-18 |
+
+> 本文档只做**只读分析**。原 6 项开放决策已于 2026-11-18 全部拍板，集中在 §6，正式记录见 `docs/adr/0001`~`0006`。
+
+---
+
+## 0. 图例
+
+| 标记 | 含义 |
+| --- | --- |
+| ✅ 已实现 | 代码已落地且可独立验证（多为 svc-algo 与离线 RAG） |
+| 🟡 部分 | 有骨架 / 离线可用 / 契约已定，但未接线或未覆盖全部口径 |
+| ⛔ 缺失 | 仅有 TODO 桩或完全没有 |
+| 🔵 设计目标 | PRD 已按审查回填为需求，代码尚未实现（默认态，不得对外声称为已具备能力） |
+
+四服务一句话快照：
+
+- **svc-algo（Go）**：✅ 四 RPC 全部实现（`RankConvert / EstimateProb / CheckConstraints / OptimizeWishlist`），薄 service + biz usecase 分层，是当前**唯一成体系的已实现能力**。
+- **svc-orchestrator（Python/LangGraph）**：🟡 图骨架 4 节点 + 确定性完整性闸门 + 离线混合检索器可用；但**所有业务节点是 TODO 桩**，无 checkpointer、无 interrupt、未调用 algo / llmgw。
+- **svc-gateway（Go）**：⛔ 三个入口方法（`CreatePlan / ConfirmProfile / BackfillProfile`）全部 `return errors.New("TODO")`。
+- **svc-llm-gateway（Go）**：⛔ `Chat / StreamChat` 全部 TODO；仅有 `llm_call_log` 记账表 schema，无路由 / 缓存 / 预占结算。
+
+---
+
+## 1. FR × 现状矩阵
+
+> 「证据」列给出实测文件与行号；「关联」列指向审查报告问题编号（见 §2）。
+
+### 1.1 交互与任务底座（FR-01 ~ FR-07）
+
+| FR | 现状 | 证据（文件:行） | 剩余工作 | 关联 | 里程碑 |
+| --- | --- | --- | --- | --- | --- |
+| FR-01 对话式画像采集（P0） | 🟡 | `graph/state.py:83` 确定性闸门 `check_completeness` 已实现；`graph/nodes/intake.py:12` 节点为 TODO 桩（无 LLM 解析、无 interrupt 追问） | 接 llmgw `role=profile` 解析 user_text→profile；缺项生成追问并 `interrupt()`；字段口径改 `category`（非 track）、主输入仅分数；TypedDict 换运行时校验（Pydantic） | P1-02, P1-14, §9.2 | M2/M3 |
+| FR-02 画像确认 HITL（P0） | ⛔ | `graph/nodes/profile_confirm.py:8` TODO；`internal/gateway/service.go:30` `ConfirmProfile` TODO | 实现画像卡片 interrupt + gateway 回执 → ResumeGraph；`chat_session` 增 `profile_version` 字段 | P1-03, P1-13, §9.1 | M2 |
+| FR-03 条件必需按需补问（P0） | 🟡 有冲突 | `graph/nodes/check_conditional.py:15` 现实现为「问所有条件字段」，`:13` TODO 注明应由候选硬要求驱动 | 改为候选驱动（候选无体检限制则不问体检）；接 backfill interrupt；UNKNOWN 不放行 | P1-02 | M2 |
+| FR-04 多轮修正与协商探索（P1） | ⛔ | 无对应节点；`build.py:38` 标注 strategy/critic/... 全 TODO | REVISE_PLAN 新建 run；画像修正后派生数据失效一致性 | P1-13 | M6 |
+| FR-05 SSE 流式输出（P0） | 🟡 | `app/server.py:44` `_run` 把每个节点 chunk 转 `progress` 事件；`:43` TODO 未区分 interrupt/result；无 `event_seq`、无可断开订阅 | 事件分型（progress/interrupt/result）+ `event_seq` 单调序 + 断线重连订阅；gateway `CreatePlan` SSE 转推 | P1-08 | M2 |
+| FR-06 任务状态机与超时（P0） | ⛔ 旧模型 | `migrations/00_schema.sql:314` `chat_session.status` 仅 `active/completed/expired`；无 run/interrupt/QUEUED/RUNNING/WAITING_HITL/SUCCEEDED/CANCELLED | 引入 run/interrupt 模型（schema + 状态机）；恢复入口 `POST /v1/runs/{run_id}:resume` 携 `run_id+interrupt_id+expected_state_version+Idempotency-Key`；每次 resume 校验 release 时效；结果默认 30 天可删除 | P1-01(生命周期), P1-10, P2-01, §9.1 | M2 |
+| FR-07 幂等与断点续跑（P0） | 🟡 | `migrations/00_schema.sql:333` `plan_checkpoint` 表存在（session_id/node/state/seq）；`build.py:48` `compile()` **无 checkpointer** | 选定 LangGraph saver 并 `compile(checkpointer=)`（自定义表不能当官方 saver，§6.3-4）；run 级幂等键；租约 + fencing epoch 防并发双执行 | P1-09, P1-10, §6.3 | M2 |
+
+### 1.2 检索与知识（FR-08 ~ FR-11）
+
+| FR | 现状 | 证据（文件:行） | 剩余工作 | 关联 | 里程碑 |
+| --- | --- | --- | --- | --- | --- |
+| FR-08 结构化/非结构化分流检索（P0） | 🟡 离线可用 | `rag/retrieve.py` `HybridRetriever` 向量(pgvector)+关键词(pg_trgm ILIKE/similarity)+RRF(k=60) 已实现且 SQL 全参数化；但在线节点 `graph/nodes/retrieve.py:14` 返回空(TODO) | ①在线节点接线 ②PRD 写「tsvector 一路」实际用 trgm（中文分词未解决，见 §6 决策1）③无 cross-encoder rerank ④meta 硬过滤仅 `school_name/year`（`retrieve.py:24`），缺 province/category | P1-04, P1-13, §9.2 | M1/M4 |
+| FR-09 非结构化知识问答（P1） | ⛔ | `build.py:46` `check_conditional → END`，无 POLICY_QA 子图 | 子图路由（POLICY_QA/GENERATE_PLAN/EXPLAIN_RESULT/REVISE_PLAN）；依赖 FR-08 在线化 | P2-02 | M6 |
+| FR-10 离线数据采集与索引管线（P0） | 🟡 | `rag/etl.py`(376 行) + `scripts/ingest_charters.py` 存在；`docs/charters/2025/` 有 5700+ 院校 txt/json 原料 | 按 FR-10 验收核实管线完整度；**表名收口**：`00_schema.sql` 建 `charter_doc/charter_chunk`，`07_policy_chunk_trgm.sql` 建 `policy_doc/policy_chunk`，`retrieve.py:160,201` 查 `policy_chunk`——两套并存未统一 | P2-03 | M4 |
+| FR-11 ETL 四层质检防线（P0） | 🟡 | `scripts/qa_check.py` 存在 | 按 FR-11 四层（结构/语义/交叉/抽样）逐层核实；`etl_run_id` 回溯链 | P1-01 | M4 |
+
+### 1.3 算法与方案（FR-12 ~ FR-17）
+
+| FR | 现状 | 证据（文件:行） | 剩余工作 | 关联 | 里程碑 |
+| --- | --- | --- | --- | --- | --- |
+| FR-12 冲/稳/保方案生成（P0） | ✅ 算法侧 | `internal/algo/service/algo.go:54` `EstimateProb` 从分数生成整池；`api/algo/v1/algo.proto:159` 请求携 score/subjects/profile，`:178` 回 `AuditBasis` | **orchestrator 未调用 algo**（server 无 algo client）；StrategyAgent 仅转排序/筛选参数（不得改候选身份/概率） | P1-14 | M3 接线 |
+| FR-13 硬约束校验（P0） | 🟡 仅选科 | `algo.go:76` `CheckConstraints` 已实现；`algo.proto:140` `RejectedCandidate.rule` 枚举列了 subject_req/single_score/physical/gender/batch，但**实现只做选科** | 单科/体检/性别/学费需「条款→规则→审核→生效→执行」发布链路（P1-01）；补 `PASS/FAIL/UNKNOWN` 三态；未完成前不声称这些维度透出率=0 | P1-01, P1-15 | M3/M4 |
+| FR-14 位次换算（P0） | ✅ 正向 | `algo.go:36` `RankConvert` score→rank；`algo.proto:146` 请求仅 score，`:153` 回 rank+percentile | 仅正向（符合 R7，rank-only 不反推）；**`RankConvertReply` 无控制线**，而 `score_rank_map.control_score` 在库（`00_schema.sql:223`）——可补透出 | §2(控制线未透出) | M3 |
+| FR-15 录取概率估计（P0） | ✅ | `algo.proto:84` `ProbEstimate` method=`weighted_hit`、clamp `[0.01,0.99]`；`OptimizationReport.slip_rate=Π(1−pᵢ)`(`:117`) | 无置信区间字段（符合 R5，降 P2）；slip_rate 须标注非录取保证 | P1-05, P1-15 | M3 已完成 |
+| FR-16 方案自我挑战 Critic（P1） | 🟡 有偏差 | `build.py:17-19` `MAX_ASK_ROUNDS=6`✅、`MAX_VERIFY_RETRIES=2`✅、但 `MAX_CRITIC_LOOPS=3`❌（PRD FR-16 与 §7.2 自相矛盾：FR-16 写「最多 2 次」、§7.2 写「Critic 3 轮」） | Critic 上限统一为 2（并修 PRD §7.2 口径）；`route_after_intake`(`build.py:26`) 到上限带缺失继续 = P1-02 冲突源，需改为触发降级/明确低置信而非静默放行 | P1-02, P1-03 | M2/M6 |
+| FR-17 志愿表优化（P0） | ✅ 算法侧 | `algo.go:86` `OptimizeWishlist`；`algo.proto:193` 消费候选不重跑 rank/prob；`OptimizationReport` 含配比/滑档率/期望满意度 | orchestrator 未接；(P2)投档模拟未做 | P1-14 | M3 |
+
+### 1.4 生成、校验与治理（FR-18 ~ FR-24）
+
+| FR | 现状 | 证据（文件:行） | 剩余工作 | 关联 | 里程碑 |
+| --- | --- | --- | --- | --- | --- |
+| FR-18 报告生成（P0） | ⛔ | `build.py:38` report 节点 TODO；`state.py:62` 有 `report` 字段但无生成逻辑 | report 节点 + 强制免责声明 + 禁「保证录取」；数值由结构化模板渲染 | P1-05 | M5 |
+| FR-19 事实校验 Verifier（P0） | ⛔ | `build.py:38` verify 节点 TODO；`MAX_VERIFY_RETRIES=2` 已定义但无校验体 | 三类证据模型（文档/结构化/派生）落地；确定性重算比对；打回重写≤2、回算≤2；超限剥离 | P1-05 | M4/M5 |
+| FR-20 LLM 治理与成本闸门（P0） | ⛔ 仅记账表 | `internal/llmgw/service.go:24,35` `Chat/StreamChat` TODO；`00_schema.sql:353` `llm_call_log` 有 trace/role/model/prompt_hash/token/cost/latency，但**无原子预占+结算、无 logical_call_id/attempt_id**；`:409` `data_version` 为可变 int（非不可变 release_id） | role→model 路由；prompt_hash 缓存（key 携 `release_id`）；Budget Guard 原子预占+结算+账本；早期 Python 直连标注「无完整治理实验链路」 | P1-11, P1-12 | M4/M5 |
+| FR-21 限流与并发保护（P0） | ⛔ | `internal/gateway/service.go:16` 注释「限流器」为 TODO(M2) | 令牌桶限流 + 并发闸门（超限排队非 500）；公网发布前置 | P1-08 | M2/M4 |
+| FR-22 降级与故障处理（P0） | 🟡 | `state.py:66` 有 `degraded` 字段；PRD §7.4 隐私条款已按 R9 回填；但无实际降级路径逻辑（节点全 TODO） | 六类故障降级路径实现；体检/健康最小化+同意+限期+脱敏落地 | P1-03, P1-04, P1-06 | M5 |
+| FR-23 评测与发布门禁（P0） | 🟡 | `00_schema.sql:385` `eval_run` 表存在（git_sha/data_version/metrics/passed）；`scripts/qa_check.py`、`scripts/retrieve_test.py` 存在；但 `data/golden/` 仅 README，**golden set 未建** | 建 golden set（检索+端到端）进 CI；四层测试 L1~L4；recall 不降/幻觉率不升/P99 不超 | P2-04 | M4 |
+| FR-24 可观测（P1） | 🟡 | `common.v1.Trace` 贯穿各 proto 请求；`llm_call_log` 有 trace_id/latency/cost | OTel trace_id 贯通 Go↔Python；面板指标（QPS/P50P99/节点耗时/错误率/缓存命中/循环分布/幻觉率） | P1-08 | M6 |
+
+---
+
+## 2. 审查 19 项问题 → 回填状态
+
+> 「PRD 回填」= 该问题结论是否已写进 PRD v1.1 正文（上一轮修订完成）；「代码收口」= 是否已在代码层解决。**全部 19 项代码层均未收口**（除 P1-14 算法接口已按新口径实现）。
+
+| 编号 | 问题 | 关联 FR | PRD 回填 | 代码收口 |
+| --- | --- | --- | --- | --- |
+| P1-01 | 硬规则只有消费端，无生产发布链路 | FR-13/FR-10/FR-11 | ✅ R6 | ⛔ |
+| P1-02 | 必需字段与「到上限就低置信继续」冲突 | FR-01/FR-03/FR-16 | ✅ R7 | ⛔ `build.py:26` 仍静默放行 |
+| P1-03 | 降级/循环上限可能绕过正确性门禁 | FR-16/FR-19/FR-22 | ✅ | ⛔ |
+| P1-04 | 检索不足时放宽硬过滤会改变问题本身 | FR-08/FR-22 | ✅ | ⛔ |
+| P1-05 | 「每条结论溯源原文」无法验证派生数值 | FR-19 | ✅ R8(三类证据) | ⛔ |
+| P1-06 | 隐私目标与健康画像/永久保存冲突 | FR-22/§7.4 | ✅ R9 | ⛔ |
+| P1-07 | 图控制权在 gateway 与 LangGraph 间分裂 | §8/FR-09 | ✅ R13 | ⛔ |
+| P1-08 | SSE 连接承担了任务生命周期 | FR-05/FR-06 | ✅ R3 | ⛔ |
+| P1-09 | 有检查点≠有并发安全执行权 | FR-07 | ✅(租约/fencing) | ⛔ |
+| P1-10 | 按 session 去重吞掉合法第二次回答 | FR-06/FR-07 | ✅ R3(run/interrupt) | ⛔ |
+| P1-11 | 缓存 data_version 非跨服务一致快照 | FR-20 | ✅ R10(release_id) | ⛔ schema 仍 data_version |
+| P1-12 | 硬预算缺原子预占及重试账本 | FR-20 | ✅ R4 | ⛔ |
+| P1-13 | 画像修正后回边与派生数据失效不一致 | FR-04/FR-13 | ✅(REVISE_PLAN 新建 run) | ⛔ |
+| P1-14 | 原文算法流程与当前接口无法接合 | FR-12/FR-14/FR-17 | ✅ R1/R7 | 🟡 algo 已实现新接口，orchestrator 未接 |
+| P1-15 | 历史专业组数据不能直接作当年资格 | FR-13/FR-15 | ✅(标设计目标) | ⛔ 数据边界 |
+| P2-01 | HITL 过期和恢复规则不自洽 | FR-06 | ✅ R3 | ⛔ |
+| P2-02 | 政策问答/解释/修改缺独立路由 | FR-09 | ✅ R14 | ⛔ |
+| P2-03 | 概念 schema/脚本/契约草案混作实施规格 | 全局 | ✅(本文档即回应) | 🟡 本 gap-analysis 收口中 |
+| P2-04 | 技术选择与性能成本表述过度确定 | 全局/FR-23 | ✅(降级表述) | ⛔ |
+
+---
+
+## 3. 已实现、可直接复用的地基
+
+拆票时应把这些当**既有能力**，不重复造：
+
+1. **svc-algo 四 RPC**（`internal/algo/service/algo.go` + `biz/{rank,prob,constraint,optimize}`）：分数→位次、候选池生成+概率、选科硬约束、志愿表优化+滑档率。契约见 `api/algo/v1/algo.proto`，类型化 message（非 opaque JSON）。
+2. **离线混合检索器** `rag/retrieve.py::HybridRetriever`：向量+trgm 双路 RRF，SQL 参数化，确定性 tie-break。
+3. **确定性完整性闸门** `graph/state.py::check_completeness`：不依赖 LLM 判断「够没够」。
+4. **LangGraph 图骨架** `graph/build.py`：entry→intake→profile_confirm→retrieve→check_conditional，条件边 + 循环护栏常量已就位。
+5. **数据库 schema** `migrations/00_schema.sql`：13 张表（university/major/enrollment_plan/major_admission/school_admission/score_rank_map/charter_doc/charter_chunk/chat_session/plan_checkpoint/llm_call_log/eval_run/data_version），pgvector + pg_trgm 扩展、HNSW + GIN 索引齐备。
+6. **数据资产** `docs/charters/2025/`：5700+ 院校章程 txt/json 原料。
+7. **proto 单一事实来源** `api/{algo,gateway,llmgw,orchestrator,common}/v1`：Go/Python 双端生成（`make api`）。
+
+---
+
+## 4. 阻塞级缺口（按严重度）
+
+### 4.1 阻塞第一行代码（schema/契约与 PRD 模型不匹配）
+
+| # | 缺口 | 证据 | 影响 |
+| --- | --- | --- | --- |
+| B1 | **会话模型 vs run/interrupt 模型** | `00_schema.sql:306` `chat_session` 无 run/interrupt/state_version；PRD FR-06 已改 run 模型 | M2 任务底座无法照 PRD 实现，须先定 schema 迁移 |
+| B2 | **缓存键 data_version（可变）vs release_id（不可变）** | `00_schema.sql:409` `data_version` 为 SERIAL int；PRD FR-20/R10 要 release_id | 跨服务一致快照无法保证（P1-11） |
+| B3 | **LangGraph saver 未定** | `build.py:48` `compile()` 无 checkpointer；`plan_checkpoint` 是自定义表非官方 saver | FR-07 断点续跑地基缺失（§6.3-4） |
+| B4 | **profile_version 字段缺失** | `chat_session` 无该列 | 画像修正→派生失效一致性（P1-13）无锚点 |
+| B5 | **表名 charter_* / policy_* 双轨** | `00_schema.sql:272` charter_chunk vs `07_policy_chunk_trgm.sql:30` policy_chunk；`retrieve.py` 查 policy_chunk | fresh 环境检索可能查空表；须收口为一套 |
+
+### 4.2 搭骨架即撞上（口径/护栏偏差）
+
+| # | 缺口 | 证据 | 影响 |
+| --- | --- | --- | --- |
+| C1 | 字段口径 `track` vs `category` | `state.py:12` GLOBAL_REQUIRED 用 track；proto/DB 用 category | 画像→algo 入参对不上（§9.2） |
+| C2 | `score_or_rank` 接受 rank-only | `state.py:12,90`；但 FR-14/proto 仅支持 score→rank | 只给位次的请求会被闸门放行却无接口处理（P1-14/R7） |
+| C3 | Critic 上限 3 vs PRD 2 | `build.py:18` MAX_CRITIC_LOOPS=3；PRD FR-16=2、§7.2=3 | PRD 自相矛盾 + 代码偏差，须统一为 2 |
+| C4 | route_after_intake 到上限静默放行 | `build.py:26-27` | P1-02 冲突源：带缺失继续却标低置信，绕过门禁 |
+| C5 | 画像无运行时校验 | `state.py:29` TypedDict（仅类型提示） | 非法画像不会被拦截（P2-03） |
+
+### 4.3 写代码前要定（接口/字段补齐）
+
+- D1 `RankConvertReply` 补控制线透出（DB 有 `control_score`，proto 无字段）。
+- D2 `UserProfile`（`algo.proto:35`）仅含偏好维度，不含 province/year/score/health——orchestrator 构造入参时须明确「完整画像」与「algo UserProfile」的映射边界。
+- D3 所有跨服务 `*_json` / payload 的 JSON schema 约定（命名风格、struct 映射）——proto 已类型化的部分除外。
+- D4 基准年策略：请求传考试年（如 2026）而数据止于 2025 时的取数口径（窗口=[year-W, year-1]）。
+
+---
+
+## 5. 建议施工顺序（对齐审查 §10.1 A→F / PRD §9 M1~M6）
+
+> 算法闭环前置（四 RPC 已实现），先形成受控最小闭环再加智能增强。
+
+| 阶段 | 里程碑 | 首批可开票（依赖 §6 决策已定） | 阻塞前置 |
+| --- | --- | --- | --- |
+| A 规格对齐 | M1 | 固化 run/interrupt/事件契约 proto 草案（新字段用新编号，§7.5）；本文档 §4 缺口逐条立 issue | 无（只读/草案，可立即启动） |
+| B 任务底座 | M2 | schema 迁移（B1/B2/B4）；选定并接入 LangGraph saver（B3）；gateway 三入口 + SSE 事件分型；run 状态机 + 幂等恢复 | 决策 2（saver）、决策 4（release_id 形态） |
+| C 算法闭环 | M3 | orchestrator 接 algo 四 RPC（FR-12/14/15/17）；修 C1~C5 口径/护栏；受控 ALGORITHM_PREVIEW | 决策 1（分词，影响取数）、B5 表名收口 |
+| D 生产资格与证据 | M4 | ETL 四层质检 + 双路检索在线化 + rerank；当年规则发布链路（FR-13）；三类证据校验（FR-19）；golden set + CI 门禁（FR-23） | 决策 1（分词）、决策 5（golden set 标注归属） |
+| E 模型治理与表达 | M5 | llmgw 路由/缓存/原子预占结算（FR-20）；报告生成 + 失败模板（FR-18）；隐私脱敏（FR-22） | 决策 3（LLM 路径/模型/key） |
+| F 智能增强 | M6 | Strategy/Critic/政策问答/解释·修订子图（FR-04/09/16）；全链路 OTel（FR-24）；压测 | E 完成 |
+
+**立即可启动（零决策依赖）**：A 阶段的 proto 契约草案 + 把本文档 §4 的 B/C/D 缺口逐条登记为 GitHub Issue（用 `docs/agents/issue-tracker.md` 的 native blocking 依赖链接编码 A→F 顺序）。
+
+---
+
+## 6. 已拍板决策（2026-11-18，Francis 选定）
+
+> 以下 6 项原为「开放决策」，现已全部拍板，作为 M1~M6 施工前提；后续改动须回到本表更新。
+> 正式 ADR 记录见 `docs/adr/0001`~`0006`（与本表决策 1~6 一一对应）。
+
+| # | 决策 | ✅ 决议 | 阻塞阶段 | 出处 |
+| --- | --- | --- | --- | --- |
+| 1 | 中文全文分词选型 | **维持 pg_trgm + 向量主导，推迟 zhparser**；M4 建 golden set 量化出关键词路是瓶颈后再评估（与「RAG 分阶段演进策略」阶段三推迟一致）。否决：现在上 zhparser / pg_bigm（需自定义 PG 镜像 + 全量重建 tsv，且无 golden set 无法量化收益） | C/D | PRD 风险#2、审查 §9.2、`retrieve.py:6` |
+| 2 | LangGraph saver 选型 | **官方 `langgraph-checkpoint-postgres`**（自带 interrupt/resume + pending writes + 并发语义，覆盖 FR-07 与 P1-09 执行权）；`plan_checkpoint` 降级为业务审计快照。否决：改造自定义表（审查 §6.3-4 点名风险高） | B | 审查 §6.3-4、`build.py:48` |
+| 3 | 早期 LLM 模型 | **DeepSeek（deepseek-v4-pro）**；早期 Python 直连 = 实验链路，M5 收口 llmgw 网关；key 只放 `.env` 不入 Git；模型 id 接线时对齐 DeepSeek API 文档。M2 任务底座用测试替身即可，不需真模型 | E（M3 起） | PRD 风险#3、§8、`llmgw/service.go` |
+| 4 | release_id 形态 | **内容哈希不可变 `release` 表**（release_id = 各数据源版本清单 SHA256 前缀）；run 创建时绑定，缓存键 = `prompt_hash + release_id + model`；各读取端按 release_id 选数据、禁原地覆盖；`data_version` 保留作迁移过渡。根治 P1-11 | B/D | PRD R10、审查 P1-11、`00_schema.sql:409` |
+| 5 | golden set 标注归属 | **Francis 最终定标、Agent 出草稿 + 跑评测 + 出 diff 报告**；首批检索集 30 条（真实章程「问题→应命中 chunk/院校」）+ 端到端集 10 条（覆盖冲稳保 / 硬约束剔除 / 无可靠数据三类场景），后续迭代扩充 | D | PRD FR-23、`data/golden/README.md` |
+| 6 | charter_* / policy_* 表名收口 | **收口到 `policy_*`（活表），废弃 `charter_*`（孤儿空表）**；零数据迁移——下个迁移 drop/标注 `charter_doc/charter_chunk`，`00_schema` 加注释指向 `policy_*`。否决：迁回 charter_*（需重建 1024 维向量库，无收益） | C/D | `00_schema.sql:272` vs `07_policy_chunk_trgm.sql:30` |
+
+---
+
+## 7. 证据索引（实测文件:行）
+
+- `internal/gateway/service.go:16,24,30,36` — 三入口 TODO + 限流器 TODO
+- `internal/llmgw/service.go:17,24,35` — Chat/StreamChat TODO + 治理组件 TODO
+- `internal/algo/service/algo.go:36,54,76,86` — 四 RPC 实现
+- `api/algo/v1/algo.proto:35,84,117,140,146,153,159,178,193` — UserProfile/ProbEstimate/OptimizationReport/RejectedCandidate/RankConvert/EstimateProb/OptimizeWishlist 契约
+- `services/orchestrator/app/server.py:36,43,44` — ResumeGraph TODO / interrupt TODO / 事件转推
+- `services/orchestrator/graph/build.py:17-19,26,38,46,48` — 护栏常量 / 放行逻辑 / 缺失节点 / END / 无 checkpointer
+- `services/orchestrator/graph/state.py:12,29,66,83,90` — GLOBAL_REQUIRED / TypedDict / degraded / check_completeness / score_or_rank
+- `services/orchestrator/graph/nodes/{intake,profile_confirm,check_conditional,retrieve}.py` — 四节点 TODO 桩
+- `services/orchestrator/rag/retrieve.py:6,24,160,201` — trgm 替代 tsvector / meta 过滤字段 / policy_chunk 查询
+- `migrations/00_schema.sql:223,272,306,314,333,353,385,409` — control_score / charter_chunk / chat_session / status / plan_checkpoint / llm_call_log / eval_run / data_version
+- `migrations/07_policy_chunk_trgm.sql:19,30` — policy_doc / policy_chunk
+- `docs/prd.md` v1.1（24 条 FR + §9 里程碑 + §10 风险 + §12 验收总则）
+- `docs/agent-architecture-review.md`（P1-01~P1-15 + P2-01~P2-04 + §6.3 + §9 + §10.1）
