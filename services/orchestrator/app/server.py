@@ -251,6 +251,7 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             confirmed_profile_version=(
                 str(view.confirmed_profile_version) if view.confirmed_profile_version else ""
             ),
+            active_execution_remaining_ms=view.active_execution_remaining_ms,
         )
         if view.cancel_requested_at is not None:
             reply.cancel_requested_at.FromDatetime(view.cancel_requested_at)

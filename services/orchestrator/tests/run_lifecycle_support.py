@@ -84,6 +84,11 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                 statement = statement.strip()
                 if statement:
                     await conn.execute(statement)
+            migration = ROOT / "migrations" / "10_run_leases.sql"
+            for statement in migration.read_text(encoding="utf-8").split(";"):
+                statement = statement.strip()
+                if statement:
+                    await conn.execute(statement)
         finally:
             await conn.close()
 
@@ -107,6 +112,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await self._apply_sql_file(conn, "migrations/00_schema.sql")
             await self._apply_sql_file(conn, "migrations/08_release_and_run_foundation.sql")
             await self._apply_sql_file(conn, "migrations/09_profile_run_lifecycle.sql")
+            await self._apply_sql_file(conn, "migrations/10_run_leases.sql")
         finally:
             await conn.close()
 

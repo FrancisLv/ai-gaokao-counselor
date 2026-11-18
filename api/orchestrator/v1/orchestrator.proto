@@ -209,6 +209,7 @@ message RunViewReply {
   ResultReference result = 12;
   google.protobuf.Timestamp created_at = 13;
   google.protobuf.Timestamp updated_at = 14;
+  int64 active_execution_remaining_ms = 15;
 }
 
 message StateChangedPayload {

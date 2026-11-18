@@ -43,6 +43,10 @@ class RunLifecycle:
         dsn: str,
         *,
         auto_profile: bool = False,
+        worker_owner: str | None = None,
+        lease_duration: timedelta = timedelta(seconds=30),
+        clock: Callable[[], datetime] | None = None,
+        _after_claim: Callable[[UUID, int], Any] | None = None,
         _checkpoint_persisted: Callable[[UUID], None] | None = None,
         _resume_accepted: Callable[[UUID], None] | None = None,
     ) -> None:
@@ -50,6 +54,10 @@ class RunLifecycle:
             raise ValueError("RunLifecycle 需要 PostgreSQL DSN")
         self._dsn = dsn
         self._auto_profile = auto_profile
+        self._worker_owner = worker_owner or f"orchestrator-{uuid4()}"
+        self._lease_duration = lease_duration
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._after_claim = _after_claim
         self._checkpoint_persisted = _checkpoint_persisted
         self._resume_accepted = _resume_accepted
         self._saver_cm = None
@@ -170,7 +178,8 @@ class RunLifecycle:
                     """
                     SELECT run_id, session_id, task_kind, state, stage, terminal_reason,
                            state_version, release_id, confirmed_profile_version,
-                           cancel_requested_at, result_version, result_kind,
+                           active_execution_remaining_ms, cancel_requested_at,
+                           result_version, result_kind,
                            created_at, updated_at
                     FROM run
                     WHERE run_id = %s AND principal_id = %s
@@ -221,6 +230,7 @@ class RunLifecycle:
                 state_version=row["state_version"],
                 release_id=row["release_id"],
                 confirmed_profile_version=row["confirmed_profile_version"],
+                active_execution_remaining_ms=row["active_execution_remaining_ms"],
                 cancel_requested_at=row["cancel_requested_at"],
                 current_interrupt=current_interrupt,
                 result=result,
@@ -230,7 +240,151 @@ class RunLifecycle:
         finally:
             await conn.close()
 
+    async def _expire_due_hitl(self, *, principal_id: str, run_id: UUID) -> bool:
+        conn = await self._connect()
+        try:
+            async with conn.transaction():
+                run = await (
+                    await conn.execute(
+                        """
+                        SELECT run_id, state, stage, state_version,
+                               active_execution_remaining_ms
+                        FROM run
+                        WHERE run_id = %s AND principal_id = %s
+                        FOR UPDATE
+                        """,
+                        (run_id, principal_id),
+                    )
+                ).fetchone()
+                if run is None or run["state"] != "WAITING_HITL":
+                    return False
+                interrupt = await (
+                    await conn.execute(
+                        """
+                        SELECT interrupt_id, expires_at
+                        FROM run_interrupt
+                        WHERE run_id = %s AND state = 'OPEN'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        FOR UPDATE
+                        """,
+                        (run_id,),
+                    )
+                ).fetchone()
+                if interrupt is None or interrupt["expires_at"] > self._clock():
+                    return False
+                next_version = run["state_version"] + 1
+                await conn.execute(
+                    """
+                    UPDATE run_interrupt
+                    SET state = 'EXPIRED'
+                    WHERE interrupt_id = %s AND state = 'OPEN'
+                    """,
+                    (interrupt["interrupt_id"],),
+                )
+                expired = await (
+                    await conn.execute(
+                        """
+                        UPDATE run
+                        SET state = 'EXPIRED',
+                            terminal_reason = 'HITL_TIMEOUT',
+                            state_version = %s,
+                            updated_at = NOW()
+                        WHERE run_id = %s
+                          AND state = 'WAITING_HITL'
+                          AND state_version = %s
+                        RETURNING run_id
+                        """,
+                        (next_version, run_id, run["state_version"]),
+                    )
+                ).fetchone()
+                if expired is None:
+                    return False
+                next_seq = await self._next_event_seq(conn, run_id)
+                await conn.execute(
+                    """
+                    INSERT INTO run_event (
+                        run_id, event_seq, event_type, stage, state_version,
+                        payload_version, payload
+                    )
+                    VALUES (%s, %s, 'STATE_CHANGED', %s, %s, 1, %s)
+                    """,
+                    (
+                        run_id,
+                        next_seq,
+                        run["stage"],
+                        next_version,
+                        Jsonb(
+                            {
+                                "from_state": "WAITING_HITL",
+                                "to_state": "EXPIRED",
+                                "terminal_reason": "HITL_TIMEOUT",
+                            }
+                        ),
+                    ),
+                )
+                return True
+        finally:
+            await conn.close()
+
+    async def _run_due_work_once(self) -> None:
+        """内部 scheduler adapter 的单次扫描；不是公开 seam。"""
+        now = self._clock()
+        conn = await self._connect()
+        try:
+            runnable = await (
+                await conn.execute(
+                    """
+                    SELECT run_id
+                    FROM run
+                    WHERE (
+                        state = 'QUEUED'
+                        AND confirmed_profile_version IS NULL
+                    ) OR (
+                        state = 'RUNNING'
+                        AND (
+                            lease_expires_at IS NULL
+                            OR lease_expires_at <= %s
+                        )
+                    )
+                    ORDER BY created_at, run_id
+                    LIMIT 20
+                    """,
+                    (now,),
+                )
+            ).fetchall()
+            expired_hitl = await (
+                await conn.execute(
+                    """
+                    SELECT r.run_id, r.principal_id
+                    FROM run r
+                    JOIN run_interrupt i ON i.run_id = r.run_id
+                    WHERE r.state = 'WAITING_HITL'
+                      AND i.state = 'OPEN'
+                      AND i.expires_at <= %s
+                    ORDER BY i.expires_at, r.run_id
+                    LIMIT 20
+                    """,
+                    (now,),
+                )
+            ).fetchall()
+        finally:
+            await conn.close()
+
+        for row in runnable:
+            await self._process_profile_run(row["run_id"])
+        for row in expired_hitl:
+            await self._expire_due_hitl(
+                principal_id=row["principal_id"],
+                run_id=row["run_id"],
+            )
+
     async def ResumeRun(self, command: ResumeRunCommand) -> RunReceipt:
+        if await self._expire_due_hitl(
+            principal_id=command.principal_id,
+            run_id=command.run_id,
+        ):
+            raise RunLifecycleError("INTERRUPT_EXPIRED")
         answer_payload = self._resume_answer_payload(command)
         request_hash = self._request_hash(
             {
@@ -319,7 +473,7 @@ class RunLifecycle:
                         raise RunLifecycleError("INTERRUPT_NOT_FOUND")
                     if interrupt["state"] != "OPEN":
                         raise RunLifecycleError("INTERRUPT_CONSUMED")
-                    if interrupt["expires_at"] <= datetime.now(timezone.utc):
+                    if interrupt["expires_at"] <= self._clock():
                         raise RunLifecycleError("INTERRUPT_EXPIRED")
 
                     release = await (
@@ -444,29 +598,445 @@ class RunLifecycle:
             await self._saver.setup()
             self._profile_graph = build_profile_graph(self._saver)
 
-    async def _process_profile_run(self, run_id: UUID) -> None:
-        await self._ensure_profile_runtime()
-        conn = await self._connect(autocommit=True)
-        try:
-            await conn.execute(
-                "SELECT pg_advisory_lock(hashtextextended(%s, 0))",
-                (f"profile-run:{run_id}",),
-            )
+    async def _claim_run(self, conn, run_id: UUID) -> dict[str, Any] | None:
+        """取得执行权；租约未过期的其他 owner 不会被抢占。"""
+        now = self._clock()
+        async with conn.transaction():
             row = await (
                 await conn.execute(
                     """
                     SELECT run_id, session_id, principal_id, task_input, state, stage,
                            state_version, release_id, working_profile_version,
-                           confirmed_profile_version
+                           confirmed_profile_version, lease_owner, lease_epoch,
+                           lease_expires_at, active_execution_remaining_ms,
+                           active_execution_started_at
                     FROM run
                     WHERE run_id = %s
+                    FOR UPDATE
                     """,
                     (run_id,),
                 )
             ).fetchone()
-            if row is None or row["state"] != "QUEUED":
+            if row is None or row["state"] not in {"QUEUED", "RUNNING"}:
+                return None
+            if (
+                row["state"] == "QUEUED"
+                and row["confirmed_profile_version"] is not None
+            ):
+                return None
+            if row["state"] == "RUNNING":
+                expires_at = row["lease_expires_at"]
+                if expires_at is not None and expires_at > now:
+                    return None
+                remaining = row["active_execution_remaining_ms"]
+                started_at = row["active_execution_started_at"]
+                if started_at is not None:
+                    elapsed_ms = max(0, int((now - started_at).total_seconds() * 1000))
+                    remaining = max(0, remaining - elapsed_ms)
+                if remaining <= 0:
+                    return await self._expire_claimed_run(
+                        conn,
+                        row,
+                        state_version=row["state_version"] + 1,
+                        terminal_reason="EXECUTION_TIMEOUT",
+                    )
+            else:
+                remaining = row["active_execution_remaining_ms"]
+
+            next_version = row["state_version"] + 1
+            next_epoch = row["lease_epoch"] + 1
+            next_expiry = now + self._lease_duration
+            claimed = await (
+                await conn.execute(
+                        """
+                    UPDATE run
+                    SET state = 'RUNNING',
+                        state_version = %s,
+                        lease_owner = %s,
+                        lease_epoch = %s,
+                        lease_expires_at = %s,
+                        active_execution_remaining_ms = %s,
+                        active_execution_started_at = %s,
+                        updated_at = NOW()
+                    WHERE run_id = %s
+                      AND state = %s
+                      AND state_version = %s
+                      AND lease_epoch = %s
+                    RETURNING run_id, session_id, principal_id, task_input, state, stage,
+                              state_version, release_id, working_profile_version,
+                              confirmed_profile_version, lease_owner, lease_epoch,
+                              lease_expires_at, active_execution_remaining_ms,
+                              active_execution_started_at
+                    """,
+                    (
+                        next_version,
+                        self._worker_owner,
+                        next_epoch,
+                        next_expiry,
+                        remaining,
+                        now,
+                        run_id,
+                        row["state"],
+                        row["state_version"],
+                        row["lease_epoch"],
+                    ),
+                )
+            ).fetchone()
+            if claimed is None:
+                return None
+            next_seq = await self._next_event_seq(conn, run_id)
+            await conn.execute(
+                """
+                INSERT INTO run_event (
+                    run_id, event_seq, event_type, stage, state_version,
+                    payload_version, payload
+                )
+                VALUES (%s, %s, 'STATE_CHANGED', %s, %s, 1, %s)
+                """,
+                (
+                    run_id,
+                    next_seq,
+                    claimed["stage"],
+                    next_version,
+                    Jsonb(
+                        {
+                            "from_state": row["state"],
+                            "to_state": "RUNNING",
+                            "lease_owner": self._worker_owner,
+                            "lease_epoch": next_epoch,
+                        }
+                    ),
+                ),
+            )
+            return dict(claimed)
+
+    async def _expire_claimed_run(
+        self,
+        conn,
+        row,
+        *,
+        state_version: int,
+        terminal_reason: str,
+    ):
+        await conn.execute(
+            """
+            UPDATE run
+            SET state = 'FAILED',
+                terminal_reason = %s,
+                state_version = %s,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                active_execution_started_at = NULL,
+                updated_at = NOW()
+            WHERE run_id = %s
+              AND state = %s
+              AND state_version = %s
+              AND lease_epoch = %s
+            """,
+            (
+                terminal_reason,
+                state_version,
+                row["run_id"],
+                row["state"],
+                row["state_version"],
+                row["lease_epoch"],
+            ),
+        )
+        next_seq = await self._next_event_seq(conn, row["run_id"])
+        await conn.execute(
+            """
+            INSERT INTO run_event (
+                run_id, event_seq, event_type, stage, state_version,
+                payload_version, payload
+            )
+            VALUES (%s, %s, 'ERROR', %s, %s, 1, %s)
+            """,
+            (
+                row["run_id"],
+                next_seq,
+                row["stage"],
+                state_version,
+                Jsonb({"terminal_reason": terminal_reason}),
+            ),
+        )
+        return None
+
+    async def _park_claim(
+        self,
+        conn,
+        row,
+        *,
+        target_state: str,
+        stage: str,
+        terminal_reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        """释放当前 lease；仅当前 owner/epoch 可以提交。"""
+        now = self._clock()
+        remaining = row["active_execution_remaining_ms"]
+        started_at = row["active_execution_started_at"]
+        if started_at is not None:
+            elapsed_ms = max(0, int((now - started_at).total_seconds() * 1000))
+            remaining = max(0, remaining - elapsed_ms)
+        next_version = row["state_version"] + 1
+        parked = await (
+            await conn.execute(
+                """
+                UPDATE run
+                SET state = %s,
+                    stage = %s,
+                    terminal_reason = %s,
+                    state_version = %s,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    active_execution_remaining_ms = %s,
+                    active_execution_started_at = NULL,
+                    updated_at = NOW()
+                WHERE run_id = %s
+                  AND state = 'RUNNING'
+                  AND state_version = %s
+                  AND lease_owner = %s
+                  AND lease_epoch = %s
+                RETURNING run_id, session_id, principal_id, task_input, state, stage,
+                          state_version, release_id, working_profile_version,
+                          confirmed_profile_version, lease_owner, lease_epoch,
+                          lease_expires_at, active_execution_remaining_ms,
+                          active_execution_started_at
+                """,
+                (
+                    target_state,
+                    stage,
+                    terminal_reason,
+                    next_version,
+                    remaining,
+                    row["run_id"],
+                    row["state_version"],
+                    self._worker_owner,
+                    row["lease_epoch"],
+                ),
+            )
+        ).fetchone()
+        if parked is None:
+            raise RunLifecycleError("RUN_STATE_CONFLICT")
+        next_seq = await self._next_event_seq(conn, row["run_id"])
+        await conn.execute(
+            """
+            INSERT INTO run_event (
+                run_id, event_seq, event_type, stage, state_version,
+                payload_version, payload
+            )
+            VALUES (%s, %s, %s, %s, %s, 1, %s)
+            """,
+            (
+                row["run_id"],
+                next_seq,
+                "ERROR" if target_state in {"FAILED", "EXPIRED"} else "STATE_CHANGED",
+                stage,
+                next_version,
+                Jsonb(
+                    {
+                        "from_state": "RUNNING",
+                        "to_state": target_state,
+                        "terminal_reason": terminal_reason,
+                    }
+                ),
+            ),
+        )
+        return dict(parked)
+
+    async def _consume_active_budget(
+        self,
+        conn,
+        row: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        now = self._clock()
+        started_at = row["active_execution_started_at"]
+        remaining = row["active_execution_remaining_ms"]
+        if started_at is not None:
+            remaining = max(
+                0,
+                remaining - int((now - started_at).total_seconds() * 1000),
+            )
+        if remaining <= 0:
+            next_version = row["state_version"] + 1
+            async with conn.transaction():
+                failed = await (
+                    await conn.execute(
+                        """
+                        UPDATE run
+                        SET state = 'FAILED',
+                            terminal_reason = 'EXECUTION_TIMEOUT',
+                            state_version = %s,
+                            active_execution_remaining_ms = 0,
+                            lease_owner = NULL,
+                            lease_expires_at = NULL,
+                            active_execution_started_at = NULL,
+                            updated_at = NOW()
+                        WHERE run_id = %s
+                          AND state = 'RUNNING'
+                          AND state_version = %s
+                          AND lease_owner = %s
+                          AND lease_epoch = %s
+                        RETURNING run_id
+                        """,
+                        (
+                            next_version,
+                            row["run_id"],
+                            row["state_version"],
+                            self._worker_owner,
+                            row["lease_epoch"],
+                        ),
+                    )
+                ).fetchone()
+                if failed is None:
+                    return None
+                next_seq = await self._next_event_seq(conn, row["run_id"])
+                await conn.execute(
+                    """
+                    INSERT INTO run_event (
+                        run_id, event_seq, event_type, stage, state_version,
+                        payload_version, payload
+                    )
+                    VALUES (%s, %s, 'ERROR', %s, %s, 1, %s)
+                    """,
+                    (
+                        row["run_id"],
+                        next_seq,
+                        row["stage"],
+                        next_version,
+                        Jsonb({"terminal_reason": "EXECUTION_TIMEOUT"}),
+                    ),
+                )
+            return None
+
+        async with conn.transaction():
+            updated = await (
+                await conn.execute(
+                        """
+                    UPDATE run
+                    SET active_execution_remaining_ms = %s,
+                        active_execution_started_at = %s,
+                        updated_at = NOW()
+                    WHERE run_id = %s
+                      AND state = 'RUNNING'
+                      AND state_version = %s
+                      AND lease_owner = %s
+                      AND lease_epoch = %s
+                    RETURNING run_id
+                    """,
+                    (
+                        remaining,
+                        now,
+                        row["run_id"],
+                        row["state_version"],
+                        self._worker_owner,
+                        row["lease_epoch"],
+                    ),
+                )
+            ).fetchone()
+        if updated is None:
+            return None
+        consumed = dict(row)
+        consumed["active_execution_remaining_ms"] = remaining
+        consumed["active_execution_started_at"] = now
+        return consumed
+
+    async def _stop_if_cancelled(self, conn, row: dict[str, Any]) -> bool:
+        current = await (
+            await conn.execute(
+                """
+                SELECT state, state_version, lease_owner, lease_epoch,
+                       cancel_requested_at
+                FROM run
+                WHERE run_id = %s
+                """,
+                (row["run_id"],),
+            )
+        ).fetchone()
+        if current is None or current["cancel_requested_at"] is None:
+            return False
+        if (
+            current["state"] != "RUNNING"
+            or current["lease_owner"] != self._worker_owner
+            or current["lease_epoch"] != row["lease_epoch"]
+        ):
+            return False
+        next_version = current["state_version"] + 1
+        async with conn.transaction():
+            stopped = await (
+                await conn.execute(
+                    """
+                    UPDATE run
+                    SET state = 'CANCELLED',
+                        terminal_reason = 'CANCELLED_BY_USER',
+                        state_version = %s,
+                        lease_owner = NULL,
+                        lease_expires_at = NULL,
+                        active_execution_started_at = NULL,
+                        updated_at = NOW()
+                    WHERE run_id = %s
+                      AND state = 'RUNNING'
+                      AND state_version = %s
+                      AND lease_owner = %s
+                      AND lease_epoch = %s
+                    RETURNING run_id
+                    """,
+                    (
+                        next_version,
+                        row["run_id"],
+                        current["state_version"],
+                        self._worker_owner,
+                        row["lease_epoch"],
+                    ),
+                )
+            ).fetchone()
+            if stopped is None:
+                return False
+            next_seq = await self._next_event_seq(conn, row["run_id"])
+            await conn.execute(
+                """
+                INSERT INTO run_event (
+                    run_id, event_seq, event_type, stage, state_version,
+                    payload_version, payload
+                )
+                VALUES (%s, %s, 'STATE_CHANGED', %s, %s, 1, %s)
+                """,
+                (
+                    row["run_id"],
+                    next_seq,
+                    row["stage"],
+                    next_version,
+                    Jsonb(
+                        {
+                            "from_state": "RUNNING",
+                            "to_state": "CANCELLED",
+                            "terminal_reason": "CANCELLED_BY_USER",
+                        }
+                    ),
+                ),
+            )
+        return True
+
+    async def _process_profile_run(self, run_id: UUID) -> None:
+        await self._ensure_profile_runtime()
+        conn = await self._connect(autocommit=True)
+        try:
+            row = await self._claim_run(conn, run_id)
+            if row is None:
+                return
+            if self._after_claim is not None:
+                await self._after_claim(run_id, row["lease_epoch"])
+            if await self._stop_if_cancelled(conn, row):
+                return
+            row = await self._consume_active_budget(conn, row)
+            if row is None:
                 return
             if row["confirmed_profile_version"] is not None:
+                await self._park_claim(
+                    conn,
+                    row,
+                    target_state="QUEUED",
+                    stage=row["stage"],
+                )
                 return
 
             if await self._apply_consumed_interrupt(conn, row):
@@ -485,23 +1055,32 @@ class RunLifecycle:
                         fields=fields,
                     )
                     next_version = row["state_version"] + 1
-                    await conn.execute(
+                    revision_owner = await (
+                        await conn.execute(
                         """
                         UPDATE run
                         SET working_profile_version = %s,
                             state_version = %s,
                             updated_at = NOW()
                         WHERE run_id = %s
-                          AND state = 'QUEUED'
+                          AND state = 'RUNNING'
                           AND state_version = %s
+                          AND lease_owner = %s
+                          AND lease_epoch = %s
+                        RETURNING run_id
                         """,
                         (
                             revision["profile_version"],
                             next_version,
                             run_id,
                             row["state_version"],
+                            self._worker_owner,
+                            row["lease_epoch"],
                         ),
-                    )
+                        )
+                    ).fetchone()
+                    if revision_owner is None:
+                        raise RunLifecycleError("RUN_STATE_CONFLICT")
                     next_seq = await self._next_event_seq(conn, run_id)
                     await conn.execute(
                         """
@@ -584,12 +1163,15 @@ class RunLifecycle:
             if self._checkpoint_persisted is not None:
                 self._checkpoint_persisted(run_id)
             interrupt_id = uuid4()
-            expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+            prompt_time = self._clock()
+            expires_at = prompt_time + timedelta(minutes=30)
             async with conn.transaction():
                 current = await (
                     await conn.execute(
                         """
-                        SELECT state, state_version
+                        SELECT state, state_version, lease_owner, lease_epoch,
+                               active_execution_remaining_ms,
+                               active_execution_started_at
                         FROM run
                         WHERE run_id = %s
                         FOR UPDATE
@@ -597,7 +1179,12 @@ class RunLifecycle:
                         (run_id,),
                     )
                 ).fetchone()
-                if current is None or current["state"] != "QUEUED":
+                if (
+                    current is None
+                    or current["state"] != "RUNNING"
+                    or current["lease_owner"] != self._worker_owner
+                    or current["lease_epoch"] != row["lease_epoch"]
+                ):
                     return
                 await conn.execute(
                     """
@@ -619,19 +1206,46 @@ class RunLifecycle:
                     ),
                 )
                 next_version = current["state_version"] + 1
-                await conn.execute(
-                    """
-                    UPDATE run
-                    SET state = 'WAITING_HITL',
-                        stage = %s,
-                        state_version = %s,
-                        updated_at = NOW()
-                    WHERE run_id = %s
-                      AND state = 'QUEUED'
-                      AND state_version = %s
-                    """,
-                    (kind, next_version, run_id, current["state_version"]),
-                )
+                now = self._clock()
+                remaining = current["active_execution_remaining_ms"]
+                started_at = current["active_execution_started_at"]
+                if started_at is not None:
+                    remaining = max(
+                        0,
+                        remaining - int((now - started_at).total_seconds() * 1000),
+                    )
+                parked = await (
+                    await conn.execute(
+                        """
+                        UPDATE run
+                        SET state = 'WAITING_HITL',
+                            stage = %s,
+                            state_version = %s,
+                            lease_owner = NULL,
+                            lease_expires_at = NULL,
+                            active_execution_remaining_ms = %s,
+                            active_execution_started_at = NULL,
+                            updated_at = NOW()
+                        WHERE run_id = %s
+                          AND state = 'RUNNING'
+                          AND state_version = %s
+                          AND lease_owner = %s
+                          AND lease_epoch = %s
+                        RETURNING run_id
+                        """,
+                        (
+                            kind,
+                            next_version,
+                            remaining,
+                            run_id,
+                            current["state_version"],
+                            self._worker_owner,
+                            row["lease_epoch"],
+                        ),
+                    )
+                ).fetchone()
+                if parked is None:
+                    raise RunLifecycleError("RUN_STATE_CONFLICT")
                 next_seq = await self._next_event_seq(conn, run_id)
                 await conn.execute(
                     """
@@ -646,7 +1260,7 @@ class RunLifecycle:
                         next_seq,
                         kind,
                         next_version,
-                        Jsonb({"from_state": "QUEUED", "to_state": "WAITING_HITL"}),
+                        Jsonb({"from_state": "RUNNING", "to_state": "WAITING_HITL"}),
                     ),
                 )
                 next_seq += 1
@@ -671,20 +1285,14 @@ class RunLifecycle:
                                 "question_key": prompt["question_key"],
                                 "payload_version": 1,
                                 "payload": prompt,
-                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "created_at": prompt_time.isoformat(),
                                 "expires_at": expires_at.isoformat(),
                             }
                         ),
                     ),
                 )
         finally:
-            try:
-                await conn.execute(
-                    "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
-                    (f"profile-run:{run_id}",),
-                )
-            finally:
-                await conn.close()
+            await conn.close()
 
     @staticmethod
     def _pending_interrupt(snapshot):
@@ -738,7 +1346,8 @@ class RunLifecycle:
                 await conn.execute(
                     """
                     SELECT run_id, session_id, state, stage, state_version,
-                           release_id, working_profile_version
+                           release_id, working_profile_version, lease_owner,
+                           lease_epoch
                     FROM run
                     WHERE run_id = %s
                     FOR UPDATE
@@ -746,7 +1355,12 @@ class RunLifecycle:
                     (run["run_id"],),
                 )
             ).fetchone()
-            if run_row is None or run_row["state"] != "QUEUED":
+            if (
+                run_row is None
+                or run_row["state"] != "RUNNING"
+                or run_row["lease_owner"] != self._worker_owner
+                or run_row["lease_epoch"] != run["lease_epoch"]
+            ):
                 raise RunLifecycleError("RUN_STATE_CONFLICT")
             if run_row["working_profile_version"] != profile_version:
                 raise RunLifecycleError("PROFILE_VERSION_CONFLICT")
@@ -797,19 +1411,38 @@ class RunLifecycle:
             await conn.execute(
                 """
                 UPDATE run
-                SET confirmed_profile_version = %s,
+                SET state = 'QUEUED',
+                    confirmed_profile_version = %s,
                     stage = 'PROFILE_CONFIRMED',
                     state_version = %s,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    active_execution_remaining_ms = %s,
+                    active_execution_started_at = NULL,
                     updated_at = NOW()
                 WHERE run_id = %s
-                  AND state = 'QUEUED'
+                  AND state = 'RUNNING'
                   AND state_version = %s
+                  AND lease_owner = %s
+                  AND lease_epoch = %s
                 """,
                 (
                     profile_version,
                     next_version,
+                    max(
+                        0,
+                        run["active_execution_remaining_ms"]
+                        - int(
+                            (
+                                self._clock() - run["active_execution_started_at"]
+                            ).total_seconds()
+                            * 1000
+                        ),
+                    ),
                     run_row["run_id"],
                     run_row["state_version"],
+                    self._worker_owner,
+                    run["lease_epoch"],
                 ),
             )
             next_seq = await self._next_event_seq(conn, run_row["run_id"])
@@ -819,13 +1452,19 @@ class RunLifecycle:
                     run_id, event_seq, event_type, stage, state_version,
                     payload_version, payload
                 )
-                VALUES (%s, %s, 'PROGRESS', 'PROFILE_CONFIRMED', %s, 1, %s)
+                VALUES (%s, %s, 'STATE_CHANGED', 'PROFILE_CONFIRMED', %s, 1, %s)
                 """,
                 (
                     run_row["run_id"],
                     next_seq,
                     next_version,
-                    Jsonb({"profile_version": str(profile_version)}),
+                    Jsonb(
+                        {
+                            "from_state": "RUNNING",
+                            "to_state": "QUEUED",
+                            "profile_version": str(profile_version),
+                        }
+                    ),
                 ),
             )
             await conn.execute(
@@ -869,7 +1508,8 @@ class RunLifecycle:
             current = await (
                 await conn.execute(
                     """
-                    SELECT run_id, session_id, working_profile_version, state_version
+                    SELECT run_id, session_id, working_profile_version, state_version,
+                           state, lease_owner, lease_epoch
                     FROM run
                     WHERE run_id = %s
                     FOR UPDATE
@@ -877,7 +1517,13 @@ class RunLifecycle:
                     (run["run_id"],),
                 )
             ).fetchone()
-            if current is None or current["working_profile_version"] != base_version:
+            if (
+                current is None
+                or current["working_profile_version"] != base_version
+                or current["state"] != "RUNNING"
+                or current["lease_owner"] != self._worker_owner
+                or current["lease_epoch"] != run["lease_epoch"]
+            ):
                 raise RunLifecycleError("PROFILE_VERSION_CONFLICT")
             patch = {}
             if answer["type"] in {"ANSWER_FIELDS", "REJECT_OR_EDIT_PROFILE"}:
@@ -902,7 +1548,8 @@ class RunLifecycle:
                 idempotency_key=answer.get("interrupt_id"),
             )
             next_version = current["state_version"] + 1
-            await conn.execute(
+            updated = await (
+                await conn.execute(
                 """
                 UPDATE run
                 SET working_profile_version = %s,
@@ -910,16 +1557,24 @@ class RunLifecycle:
                     state_version = %s,
                     updated_at = NOW()
                 WHERE run_id = %s
-                  AND state = 'QUEUED'
+                  AND state = 'RUNNING'
                   AND state_version = %s
+                  AND lease_owner = %s
+                  AND lease_epoch = %s
+                RETURNING run_id
                 """,
                 (
                     new_revision["profile_version"],
                     next_version,
                     current["run_id"],
                     current["state_version"],
+                    self._worker_owner,
+                    run["lease_epoch"],
                 ),
-            )
+                )
+            ).fetchone()
+            if updated is None:
+                raise RunLifecycleError("RUN_STATE_CONFLICT")
             next_seq = await self._next_event_seq(conn, current["run_id"])
             await conn.execute(
                 """
@@ -1005,7 +1660,8 @@ class RunLifecycle:
                 row = await (
                     await conn.execute(
                         """
-                        SELECT run_id, session_id, state, stage, state_version
+                        SELECT run_id, session_id, state, stage, state_version,
+                               cancel_requested_at
                         FROM run
                         WHERE run_id = %s AND principal_id = %s
                         FOR UPDATE
@@ -1026,6 +1682,155 @@ class RunLifecycle:
                         stage=row["stage"],
                         state_version=row["state_version"],
                         first_event_seq=0,
+                    )
+                    await self._save_receipt(
+                        conn,
+                        principal_id=command.principal_id,
+                        operation="CANCEL_RUN",
+                        scope_key=scope_key,
+                        idempotency_key=command.idempotency_key,
+                        request_hash=request_hash,
+                        receipt=receipt,
+                        target_run_id=command.run_id,
+                    )
+                    return receipt
+
+                if row["state"] == "RUNNING":
+                    next_version = row["state_version"] + 1
+                    next_seq = await self._next_event_seq(conn, command.run_id)
+                    requested_at = row["cancel_requested_at"] or self._clock()
+                    updated = await (
+                        await conn.execute(
+                            """
+                            UPDATE run
+                            SET cancel_requested_at = COALESCE(cancel_requested_at, %s),
+                                state_version = %s,
+                                updated_at = NOW()
+                            WHERE run_id = %s
+                              AND principal_id = %s
+                              AND state = 'RUNNING'
+                              AND state_version = %s
+                            RETURNING run_id, session_id, state, stage, state_version
+                            """,
+                            (
+                                requested_at,
+                                next_version,
+                                command.run_id,
+                                command.principal_id,
+                                row["state_version"],
+                            ),
+                        )
+                    ).fetchone()
+                    if updated is None:
+                        raise RunLifecycleError("RUN_STATE_CONFLICT")
+                    await conn.execute(
+                        """
+                        INSERT INTO run_event (
+                            run_id, event_seq, event_type, stage, state_version,
+                            payload_version, payload
+                        )
+                        VALUES (%s, %s, 'PROGRESS', %s, %s, 1, %s)
+                        """,
+                        (
+                            command.run_id,
+                            next_seq,
+                            updated["stage"],
+                            updated["state_version"],
+                            Jsonb(
+                                {
+                                    "cancel_requested_at": requested_at.isoformat(),
+                                    "state": "RUNNING",
+                                }
+                            ),
+                        ),
+                    )
+                    receipt = RunReceipt(
+                        accepted=True,
+                        reason=None,
+                        run_id=updated["run_id"],
+                        session_id=updated["session_id"],
+                        state=updated["state"],
+                        stage=updated["stage"],
+                        state_version=updated["state_version"],
+                        first_event_seq=next_seq,
+                    )
+                    await self._save_receipt(
+                        conn,
+                        principal_id=command.principal_id,
+                        operation="CANCEL_RUN",
+                        scope_key=scope_key,
+                        idempotency_key=command.idempotency_key,
+                        request_hash=request_hash,
+                        receipt=receipt,
+                        target_run_id=command.run_id,
+                    )
+                    return receipt
+
+                if row["state"] == "WAITING_HITL":
+                    next_version = row["state_version"] + 1
+                    await conn.execute(
+                        """
+                        UPDATE run_interrupt
+                        SET state = 'CANCELLED'
+                        WHERE run_id = %s AND state = 'OPEN'
+                        """,
+                        (command.run_id,),
+                    )
+                    updated = await (
+                        await conn.execute(
+                            """
+                            UPDATE run
+                            SET state = 'CANCELLED',
+                                terminal_reason = 'CANCELLED_BY_USER',
+                                state_version = %s,
+                                updated_at = NOW()
+                            WHERE run_id = %s
+                              AND principal_id = %s
+                              AND state = 'WAITING_HITL'
+                              AND state_version = %s
+                            RETURNING run_id, session_id, state, stage, state_version
+                            """,
+                            (
+                                next_version,
+                                command.run_id,
+                                command.principal_id,
+                                row["state_version"],
+                            ),
+                        )
+                    ).fetchone()
+                    if updated is None:
+                        raise RunLifecycleError("RUN_STATE_CONFLICT")
+                    next_seq = await self._next_event_seq(conn, command.run_id)
+                    await conn.execute(
+                        """
+                        INSERT INTO run_event (
+                            run_id, event_seq, event_type, stage, state_version,
+                            payload_version, payload
+                        )
+                        VALUES (%s, %s, 'STATE_CHANGED', %s, %s, 1, %s)
+                        """,
+                        (
+                            command.run_id,
+                            next_seq,
+                            updated["stage"],
+                            updated["state_version"],
+                            Jsonb(
+                                {
+                                    "from_state": "WAITING_HITL",
+                                    "to_state": "CANCELLED",
+                                }
+                            ),
+                        ),
+                    )
+                    receipt = RunReceipt(
+                        accepted=True,
+                        reason=None,
+                        run_id=updated["run_id"],
+                        session_id=updated["session_id"],
+                        state=updated["state"],
+                        stage=updated["stage"],
+                        state_version=updated["state_version"],
+                        first_event_seq=next_seq,
                     )
                     await self._save_receipt(
                         conn,

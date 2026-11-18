@@ -809,3 +809,29 @@ sqlc 的 `:many` 先收集类型化结果 slice，再映射领域对象，相较
 - 当前自动画像推进是 RunLifecycle 内部同步处理；跨进程 worker 扫描、租约与 fencing epoch 由 issue #4 完成。
 - 确认后 run 保持 QUEUED / `PROFILE_CONFIRMED`，四算法 RPC 与 ALGORITHM_PREVIEW 由后续 tickets 接线。
 - 旧 `StartGraph/ResumeGraph` 仍保留为兼容入口，但新的画像确认状态只以 RunLifecycle 为权威。
+
+## 24. M2 ticket #4：worker 租约、崩溃接管与超时竞态
+
+**日期与范围**：2026-11-18。落地 issue #4 的 PostgreSQL 队列 worker、lease epoch fencing、主动执行预算、HITL 超时和执行中取消。唯一外部 seam 仍是 RunLifecycle 五操作。
+
+### 实现要点
+
+- 新增 additive 迁移 `10_run_leases.sql`：run 增加 lease owner / epoch / expiry、主动执行剩余额度与起算时间；补充 worker 扫描索引。历史迁移未修改。
+- worker claim 原子执行 `QUEUED → RUNNING`，写 owner、递增 epoch、设置租约和连续 STATE_CHANGED 事件；租约未过期的其他 owner 不能抢占。
+- 租约过期后新 worker 可递增 epoch 接管；状态、事件、interrupt 和终态提交均校验 owner + epoch + state_version，旧 worker 的迟到提交被 fencing 拒绝。
+- 主动执行预算只在实际 RUNNING 段扣减；超过 600000ms 进入 `FAILED / EXECUTION_TIMEOUT`，不创建 interrupt。
+- WAITING_HITL 不计入主动执行时间；超过 30 分钟关闭 OPEN interrupt，run 进入 `EXPIRED / HITL_TIMEOUT`。
+- RUNNING 取消先写 cancel_requested_at，当前合法 worker 在安全检查点转 `CANCELLED / CANCELLED_BY_USER`；QUEUED / WAITING_HITL 取消立即形成稳定终态。
+- 新增内部 `RunLifecycleWorker` 短轮询 adapter，从 PostgreSQL 权威 run 表领取 queued / expired lease / expired HITL；Redis 不参与执行权。
+- RunView additive proto 字段暴露 active execution 剩余额度；gRPC 仍只做 transport mapping，不形成第二状态机。
+
+### 测试
+
+- 新增 PostgreSQL 行为测试覆盖：claim 事件顺序、租约过期接管、旧 epoch fencing、checkpoint 后崩溃恢复、主动执行超时、HITL 计时/超时、RUNNING 与 WAITING_HITL 取消、旧 interrupt 阻断、无订阅连接的后台 worker 领取。
+- 原 ticket #2/#3 行为测试同步更新为 RUNNING 状态语义；fresh schema 验证推进到 `00 → 10`。
+- Python 全量测试、RunLifecycle gRPC 与迁移测试均通过；`make py-check py-test`、`make build check test` 由合并阶段复验。
+
+### 边界
+
+- 本票只实现画像阶段 worker；确认画像后的四算法调用与非空 ALGORITHM_PREVIEW 由 issue #5 接线。
+- 单机 PostgreSQL 短轮询满足 M2 可靠性底座；更大吞吐量和多区域调度不在本票范围。

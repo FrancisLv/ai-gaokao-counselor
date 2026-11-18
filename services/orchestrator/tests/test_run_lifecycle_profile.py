@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from run_lifecycle_support import RunLifecyclePostgresTest
@@ -407,6 +408,7 @@ class ProfileLifecycleTests(RunLifecyclePostgresTest):
             pass
 
         crashed_run_ids = []
+        now = datetime(2026, 11, 18, 8, 0, tzinfo=timezone.utc)
 
         def crash_after_checkpoint(run_id):
             crashed_run_ids.append(run_id)
@@ -415,6 +417,8 @@ class ProfileLifecycleTests(RunLifecyclePostgresTest):
         crashing = RunLifecycle(
             self.dsn,
             auto_profile=True,
+            worker_owner="worker-a",
+            clock=lambda: now,
             _checkpoint_persisted=crash_after_checkpoint,
         )
         self.addAsyncCleanup(crashing.close)
@@ -422,13 +426,18 @@ class ProfileLifecycleTests(RunLifecyclePostgresTest):
             await crashing.SubmitRun(command)
         await crashing.close()
 
-        restarted = RunLifecycle(self.dsn, auto_profile=True)
+        restarted = RunLifecycle(
+            self.dsn,
+            auto_profile=True,
+            worker_owner="worker-b",
+            clock=lambda: now + timedelta(seconds=31),
+        )
         self.addAsyncCleanup(restarted.close)
         before_recovery = await restarted.GetRun(
             principal_id="principal-a",
             run_id=crashed_run_ids[0],
         )
-        self.assertEqual(before_recovery.state, "QUEUED")
+        self.assertEqual(before_recovery.state, "RUNNING")
         self.assertIsNone(before_recovery.current_interrupt)
 
         replay = await restarted.SubmitRun(command)

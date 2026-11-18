@@ -134,6 +134,7 @@ class RunView:
     state_version: int
     release_id: str
     confirmed_profile_version: UUID | None
+    active_execution_remaining_ms: int
     cancel_requested_at: datetime | None
     current_interrupt: InterruptView | None
     result: ResultReference | None
