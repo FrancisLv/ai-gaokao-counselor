@@ -13,13 +13,23 @@ async def _serve() -> None:
     import grpc
 
     from app.run_lifecycle import RunLifecycle
+    from app.run_lifecycle.algo import GrpcAlgoClient
     from app.run_lifecycle.worker import RunLifecycleWorker
     from app.server import OrchestratorServicer
     from api.orchestrator.v1 import orchestrator_pb2_grpc
 
     addr = os.getenv("ORCHESTRATOR_ADDR", "[::]:9100")
     dsn = os.getenv("ORCHESTRATOR_DSN") or os.getenv("DATABASE_URL")
-    lifecycle = RunLifecycle(dsn, auto_profile=True) if dsn else None
+    algo_client = (
+        GrpcAlgoClient(address=os.getenv("ALGO_ADDR", "localhost:9002"))
+        if dsn
+        else None
+    )
+    lifecycle = (
+        RunLifecycle(dsn, auto_profile=True, algo_client=algo_client)
+        if dsn
+        else None
+    )
     worker = RunLifecycleWorker(lifecycle) if lifecycle is not None else None
     server = grpc.aio.server()
     orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
@@ -38,6 +48,8 @@ async def _serve() -> None:
             await worker.stop()
         if lifecycle is not None:
             await lifecycle.close()
+        if algo_client is not None:
+            await algo_client.Close()
 
 
 def main() -> None:

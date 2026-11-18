@@ -14,6 +14,7 @@ from typing import AsyncIterator
 from uuid import UUID
 
 import grpc
+from google.protobuf import json_format
 from api.orchestrator.v1 import orchestrator_pb2, orchestrator_pb2_grpc
 
 from app.run_lifecycle import (
@@ -187,7 +188,6 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
                     node=node, type="progress",
                     payload_json=json.dumps(payload, ensure_ascii=False, default=str),
                 )
-        yield orchestrator_pb2.GraphEvent(node="DONE", type="result", payload_json="{}")
 
     async def _require_lifecycle(self, context) -> RunLifecycle:
         if self._lifecycle is None:
@@ -220,6 +220,10 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             "PROFILE_INVALID_VALUE": grpc.StatusCode.INVALID_ARGUMENT,
             "PROFILE_UNSUPPORTED_SCOPE": grpc.StatusCode.FAILED_PRECONDITION,
             "PROFILE_UNSUPPORTED_INPUT": grpc.StatusCode.INVALID_ARGUMENT,
+            "PROFILE_NOT_CONFIRMED": grpc.StatusCode.FAILED_PRECONDITION,
+            "VALIDATION_FAILED": grpc.StatusCode.FAILED_PRECONDITION,
+            "NO_RELIABLE_DATA": grpc.StatusCode.FAILED_PRECONDITION,
+            "DEPENDENCY_UNAVAILABLE": grpc.StatusCode.UNAVAILABLE,
         }.get(exc.reason, grpc.StatusCode.INTERNAL)
         await context.abort(code, exc.reason)
 
@@ -287,6 +291,12 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
         if view.result is not None:
             reply.result.result_version = str(view.result.result_version)
             reply.result.result_kind = view.result.result_kind
+        if view.result_payload is not None:
+            reply.result_preview.CopyFrom(
+                OrchestratorServicer._algorithm_preview_message(
+                    view.result_payload
+                )
+            )
         reply.created_at.FromDatetime(view.created_at)
         reply.updated_at.FromDatetime(view.updated_at)
         return reply
@@ -339,7 +349,18 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
                 interrupt.expires_at.FromDatetime(
                     datetime.fromisoformat(event.payload["expires_at"])
                 )
+        elif event.type == "RESULT":
+            preview = event.payload.get("preview") or {}
+            reply.result.CopyFrom(
+                OrchestratorServicer._algorithm_preview_message(preview)
+            )
         return reply
+
+    @staticmethod
+    def _algorithm_preview_message(payload: dict):
+        message = orchestrator_pb2.AlgorithmPreview()
+        json_format.ParseDict(payload, message)
+        return message
 
     @staticmethod
     def _state_enum(state: str) -> int:

@@ -5,6 +5,7 @@ package orchestrator.v1;
 option go_package = "github.com/choucisan/ai-gaokao-counselor/api/orchestrator/v1;orchestratorv1";
 
 import "api/common/v1/common.proto";
+import "api/algo/v1/algo.proto";
 import "google/protobuf/timestamp.proto";
 
 // svc-orchestrator（Python · LangGraph）实现；svc-gateway 调用它来驱动编排。
@@ -194,6 +195,44 @@ message ResultReference {
   string result_kind = 2;
 }
 
+message AlgorithmVerificationCheck {
+  string key = 1;
+  string status = 2;
+  string detail = 3;
+}
+
+message UnverifiedCondition {
+  string code = 1;
+  string message = 2;
+}
+
+message AlgorithmPreview {
+  string result_version = 1;
+  string run_id = 2;
+  string release_id = 3;
+  string confirmed_profile_version = 4;
+  int32 rank = 5;
+  double percentile = 6;
+  repeated algo.v1.CandidateWithProb rush_candidates = 7;
+  repeated algo.v1.CandidateWithProb stable_candidates = 8;
+  repeated algo.v1.CandidateWithProb safe_candidates = 9;
+  int32 rush_total = 10;
+  int32 stable_total = 11;
+  int32 safe_total = 12;
+  algo.v1.AuditBasis audit_basis = 13;
+  repeated algo.v1.CandidateWithProb kept_candidates = 14;
+  repeated algo.v1.RejectedCandidate rejected_candidates = 15;
+  algo.v1.WishlistResult wishlist = 16;
+  string algorithm_method = 17;
+  string algorithm_config_version = 18;
+  repeated AlgorithmVerificationCheck verification_summary = 19;
+  repeated UnverifiedCondition unverified_conditions = 20;
+  string risk_notice = 21;
+  string disclaimer = 22;
+  bool formal_recommendation = 23;
+  string result_kind = 24;
+}
+
 message RunViewReply {
   string run_id = 1;
   string session_id = 2;
@@ -210,6 +249,7 @@ message RunViewReply {
   google.protobuf.Timestamp created_at = 13;
   google.protobuf.Timestamp updated_at = 14;
   int64 active_execution_remaining_ms = 15;
+  AlgorithmPreview result_preview = 16;
 }
 
 message StateChangedPayload {
@@ -229,5 +269,6 @@ message RunEvent {
   oneof payload {
     StateChangedPayload state_changed = 8;
     InterruptView interrupt = 9;
+    AlgorithmPreview result = 12;
   }
 }

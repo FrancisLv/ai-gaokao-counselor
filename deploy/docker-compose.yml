@@ -57,7 +57,8 @@ services:
     ports: ["9100:9100"]
     environment:
       - ORCHESTRATOR_DSN=postgres://app:app@postgres:5432/gaokao?sslmode=disable
-    depends_on: [postgres, redis]
+      - ALGO_ADDR=algo:9002
+    depends_on: [postgres, redis, algo]
 
   postgres:
     image: pgvector/pgvector:pg16

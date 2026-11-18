@@ -5,16 +5,22 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import math
 from collections.abc import Callable
 from typing import Any, AsyncIterator
 from uuid import UUID, uuid4
 
+import grpc
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
 import psycopg
+from google.protobuf.json_format import MessageToDict
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from api.algo.v1 import algo_pb2
+from api.common.v1 import common_pb2
+from app.run_lifecycle.algo import AlgoClient
 from app.run_lifecycle.models import (
     AnswerFields,
     ConfirmProfileAnswer,
@@ -49,6 +55,7 @@ class RunLifecycle:
         _after_claim: Callable[[UUID, int], Any] | None = None,
         _checkpoint_persisted: Callable[[UUID], None] | None = None,
         _resume_accepted: Callable[[UUID], None] | None = None,
+        algo_client: AlgoClient | None = None,
     ) -> None:
         if not dsn:
             raise ValueError("RunLifecycle 需要 PostgreSQL DSN")
@@ -60,6 +67,7 @@ class RunLifecycle:
         self._after_claim = _after_claim
         self._checkpoint_persisted = _checkpoint_persisted
         self._resume_accepted = _resume_accepted
+        self._algo_client = algo_client
         self._saver_cm = None
         self._saver: AsyncPostgresSaver | None = None
         self._profile_graph = None
@@ -176,13 +184,16 @@ class RunLifecycle:
             row = await (
                 await conn.execute(
                     """
-                    SELECT run_id, session_id, task_kind, state, stage, terminal_reason,
-                           state_version, release_id, confirmed_profile_version,
-                           active_execution_remaining_ms, cancel_requested_at,
-                           result_version, result_kind,
-                           created_at, updated_at
-                    FROM run
-                    WHERE run_id = %s AND principal_id = %s
+                    SELECT r.run_id, r.session_id, r.task_kind, r.state, r.stage,
+                           r.terminal_reason, r.state_version, r.release_id,
+                           r.confirmed_profile_version,
+                           r.active_execution_remaining_ms, r.cancel_requested_at,
+                           r.result_version, r.result_kind,
+                           rr.payload AS result_payload,
+                           r.created_at, r.updated_at
+                    FROM run r
+                    LEFT JOIN run_result rr ON rr.result_version = r.result_version
+                    WHERE r.run_id = %s AND r.principal_id = %s
                     """,
                     (run_id, principal_id),
                 )
@@ -234,6 +245,7 @@ class RunLifecycle:
                 cancel_requested_at=row["cancel_requested_at"],
                 current_interrupt=current_interrupt,
                 result=result,
+                result_payload=row["result_payload"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
             )
@@ -339,7 +351,6 @@ class RunLifecycle:
                     FROM run
                     WHERE (
                         state = 'QUEUED'
-                        AND confirmed_profile_version IS NULL
                     ) OR (
                         state = 'RUNNING'
                         AND (
@@ -622,6 +633,7 @@ class RunLifecycle:
             if (
                 row["state"] == "QUEUED"
                 and row["confirmed_profile_version"] is not None
+                and self._algo_client is None
             ):
                 return None
             if row["state"] == "RUNNING":
@@ -1016,6 +1028,419 @@ class RunLifecycle:
             )
         return True
 
+    async def _process_algorithm_preview(self, conn, row: dict[str, Any]) -> None:
+        profile_version = row["confirmed_profile_version"]
+        revision = await (
+            await conn.execute(
+                """
+                SELECT fields, lifecycle
+                FROM profile_revision
+                WHERE profile_version = %s
+                """,
+                (profile_version,),
+            )
+        ).fetchone()
+        if revision is None:
+            raise RunLifecycleError("PROFILE_NOT_CONFIRMED")
+        algo_input = self._profile.ToAlgoInput(
+            profile_version=profile_version,
+            lifecycle=revision["lifecycle"],
+            fields=revision["fields"],
+        )
+        trace = common_pb2.Trace(
+            trace_id=str(row["run_id"]),
+            session_id=str(row["session_id"]),
+            node="algorithm_preview",
+        )
+        user_profile = algo_pb2.UserProfile(**algo_input["profile"])
+        release_id = row["release_id"]
+
+        try:
+            rank = await self._algo_client.RankConvert(
+                algo_pb2.RankConvertRequest(
+                    trace=trace,
+                    province=algo_input["province"],
+                    year=algo_input["year"],
+                    category=algo_input["category"],
+                    score=algo_input["score"],
+                    release_id=release_id,
+                )
+            )
+            estimate = await self._algo_client.EstimateProb(
+                algo_pb2.EstimateProbRequest(
+                    trace=trace,
+                    province=algo_input["province"],
+                    year=algo_input["year"],
+                    category=algo_input["category"],
+                    batch=algo_input["batch"],
+                    score=algo_input["score"],
+                    subjects=algo_input["subjects"],
+                    profile=user_profile,
+                    release_id=release_id,
+                )
+            )
+            source_candidates = [
+                *estimate.rush_candidates,
+                *estimate.stable_candidates,
+                *estimate.safe_candidates,
+            ]
+            checked = await self._algo_client.CheckConstraints(
+                algo_pb2.CheckConstraintsRequest(
+                    trace=trace,
+                    profile=user_profile,
+                    candidates=source_candidates,
+                    subjects=algo_input["subjects"],
+                    category=algo_input["category"],
+                    release_id=release_id,
+                )
+            )
+            optimized = await self._algo_client.OptimizeWishlist(
+                algo_pb2.OptimizeWishlistRequest(
+                    trace=trace,
+                    candidates=list(checked.kept),
+                    profile=user_profile,
+                    release_id=release_id,
+                )
+            )
+        except grpc.RpcError as exc:
+            raise RunLifecycleError(
+                "DEPENDENCY_UNAVAILABLE",
+                f"svc-algo 不可用: {exc.code().name}",
+            ) from exc
+
+        if not estimate.HasField("basis"):
+            raise RunLifecycleError("VALIDATION_FAILED", "EstimateProb 缺少 AuditBasis")
+        if rank.rank <= 0 or estimate.basis.user_rank != rank.rank:
+            raise RunLifecycleError("VALIDATION_FAILED", "位次与 AuditBasis 不一致")
+        if not source_candidates or not checked.kept:
+            raise RunLifecycleError("NO_RELIABLE_DATA", "算法未返回可用候选")
+        if not optimized.HasField("wishlist") or not optimized.wishlist.candidates:
+            raise RunLifecycleError("NO_RELIABLE_DATA", "算法未返回可用志愿表")
+
+        kept_by_identity = {
+            self._candidate_identity(item): item.prob.probability
+            for item in checked.kept
+        }
+        for item in source_candidates:
+            identity = self._candidate_identity(item)
+            if identity not in kept_by_identity:
+                continue
+            if kept_by_identity[identity] != item.prob.probability:
+                raise RunLifecycleError("VALIDATION_FAILED", "约束过滤改写了概率")
+        for item in optimized.wishlist.candidates:
+            identity = self._candidate_identity(item.cwp)
+            if identity not in kept_by_identity:
+                raise RunLifecycleError("VALIDATION_FAILED", "优化输入含未通过约束的候选")
+            if kept_by_identity[identity] != item.cwp.prob.probability:
+                raise RunLifecycleError("VALIDATION_FAILED", "优化改写了概率")
+
+        result_version = uuid4()
+        preview = self._algorithm_preview_payload(
+            result_version=result_version,
+            row=row,
+            rank=rank,
+            estimate=estimate,
+            checked=checked,
+            optimized=optimized,
+        )
+        await self._publish_algorithm_preview(
+            conn,
+            row=row,
+            preview=preview,
+        )
+
+    @staticmethod
+    def _candidate_identity(candidate) -> tuple[str, str]:
+        if not candidate.HasField("candidate") or not candidate.HasField("prob"):
+            raise RunLifecycleError("VALIDATION_FAILED", "候选缺少身份或概率")
+        identity = (
+            candidate.candidate.university_code,
+            candidate.candidate.major_group,
+        )
+        probability = candidate.prob.probability
+        if (
+            not all(identity)
+            or not math.isfinite(probability)
+            or not 0.0 <= probability <= 1.0
+        ):
+            raise RunLifecycleError("VALIDATION_FAILED", "候选身份或概率非法")
+        return identity
+
+    @staticmethod
+    def _algorithm_preview_payload(
+        *,
+        result_version: UUID,
+        row: dict[str, Any],
+        rank,
+        estimate,
+        checked,
+        optimized,
+    ) -> dict[str, Any]:
+        message_options = {
+            "preserving_proto_field_name": True,
+            "use_integers_for_enums": True,
+        }
+        verification_summary = [
+            {
+                "key": "confirmed_profile",
+                "status": "CHECKED",
+                "detail": str(row["confirmed_profile_version"]),
+            },
+            {
+                "key": "release_binding",
+                "status": "CHECKED",
+                "detail": row["release_id"],
+            },
+            {
+                "key": "rank_audit_basis",
+                "status": "CHECKED",
+                "detail": f"{rank.rank}/{estimate.basis.user_rank}",
+            },
+            {
+                "key": "candidate_identity_and_probability",
+                "status": "CHECKED",
+                "detail": "候选与概率由 svc-algo 原样返回",
+            },
+            {
+                "key": "subject_constraints",
+                "status": "CHECKED",
+                "detail": "OptimizeWishlist 仅接收 CheckConstraints kept 候选",
+            },
+        ]
+        unverified_conditions = [
+            {
+                "code": "CURRENT_YEAR_PLAN_IDENTITY",
+                "message": "尚未完整核验当年招生计划身份与组成员变化",
+            },
+            {
+                "code": "FULL_ELIGIBILITY_RULES",
+                "message": "尚未实现完整当年资格规则链",
+            },
+            {
+                "code": "CONDITIONAL_FACTS",
+                "message": "体检、单科、语种、性别与专项计划条件未完整核验",
+            },
+            {
+                "code": "ONLINE_RAG_EVIDENCE",
+                "message": "未执行在线政策检索与文档证据校验",
+            },
+            {
+                "code": "THREE_CLASS_EVIDENCE_VERIFICATION",
+                "message": "未执行三类证据事实校验",
+            },
+            {
+                "code": "LLM_GATEWAY",
+                "message": "未接入真实 LLM Gateway",
+            },
+            {"code": "STRATEGY", "message": "未启用 Strategy"},
+            {"code": "CRITIC", "message": "未启用 Critic"},
+            {
+                "code": "FORMAL_REPORT",
+                "message": "未生成或验证正式报告",
+            },
+        ]
+        return {
+            "result_version": str(result_version),
+            "run_id": str(row["run_id"]),
+            "release_id": row["release_id"],
+            "confirmed_profile_version": str(row["confirmed_profile_version"]),
+            "rank": rank.rank,
+            "percentile": rank.percentile,
+            "rush_candidates": [
+                MessageToDict(item, **message_options)
+                for item in estimate.rush_candidates
+            ],
+            "stable_candidates": [
+                MessageToDict(item, **message_options)
+                for item in estimate.stable_candidates
+            ],
+            "safe_candidates": [
+                MessageToDict(item, **message_options)
+                for item in estimate.safe_candidates
+            ],
+            "rush_total": estimate.rush_total,
+            "stable_total": estimate.stable_total,
+            "safe_total": estimate.safe_total,
+            "audit_basis": MessageToDict(estimate.basis, **message_options),
+            "kept_candidates": [
+                MessageToDict(item, **message_options) for item in checked.kept
+            ],
+            "rejected_candidates": [
+                MessageToDict(item, **message_options) for item in checked.rejected
+            ],
+            "wishlist": MessageToDict(optimized.wishlist, **message_options),
+            "algorithm_method": estimate.basis.method,
+            "algorithm_config_version": row["release_id"],
+            "verification_summary": verification_summary,
+            "unverified_conditions": unverified_conditions,
+            "risk_notice": (
+                "本结果为内部受控算法预览，仅用于验证确定性算法闭环与可审计输出。"
+            ),
+            "disclaimer": (
+                "结果仅供决策参考，不构成录取保证；不得作为正式志愿方案。"
+            ),
+            "formal_recommendation": False,
+            "result_kind": "ALGORITHM_PREVIEW",
+        }
+
+    async def _publish_algorithm_preview(
+        self,
+        conn,
+        *,
+        row: dict[str, Any],
+        preview: dict[str, Any],
+    ) -> None:
+        result_version = UUID(preview["result_version"])
+        now = self._clock()
+        async with conn.transaction():
+            current = await (
+                await conn.execute(
+                    """
+                    SELECT state, state_version, lease_owner, lease_epoch,
+                           release_id, confirmed_profile_version,
+                           active_execution_remaining_ms,
+                           active_execution_started_at, cancel_requested_at
+                    FROM run
+                    WHERE run_id = %s
+                    FOR UPDATE
+                    """,
+                    (row["run_id"],),
+                )
+            ).fetchone()
+            if (
+                current is None
+                or current["state"] != "RUNNING"
+                or current["lease_owner"] != self._worker_owner
+                or current["lease_epoch"] != row["lease_epoch"]
+                or current["confirmed_profile_version"]
+                != row["confirmed_profile_version"]
+            ):
+                raise RunLifecycleError("RUN_STATE_CONFLICT")
+            if current["cancel_requested_at"] is not None:
+                raise RunLifecycleError("RUN_STATE_CONFLICT")
+            release = await (
+                await conn.execute(
+                    """
+                    SELECT status, revoked_at
+                    FROM release
+                    WHERE release_id = %s
+                    FOR SHARE
+                    """,
+                    (current["release_id"],),
+                )
+            ).fetchone()
+            if (
+                release is None
+                or release["status"] == "REVOKED"
+                or release["revoked_at"] is not None
+            ):
+                raise RunLifecycleError("RELEASE_REVOKED")
+
+            remaining = current["active_execution_remaining_ms"]
+            if current["active_execution_started_at"] is not None:
+                remaining = max(
+                    0,
+                    remaining
+                    - int(
+                        (
+                            now - current["active_execution_started_at"]
+                        ).total_seconds()
+                        * 1000
+                    ),
+                )
+            next_version = current["state_version"] + 1
+            await conn.execute(
+                """
+                INSERT INTO run_result (
+                    result_version, run_id, release_id,
+                    confirmed_profile_version, result_kind, payload,
+                    verification_summary, unverified_conditions
+                )
+                VALUES (%s, %s, %s, %s, 'ALGORITHM_PREVIEW', %s, %s, %s)
+                """,
+                (
+                    result_version,
+                    row["run_id"],
+                    current["release_id"],
+                    current["confirmed_profile_version"],
+                    Jsonb(preview),
+                    Jsonb(preview["verification_summary"]),
+                    Jsonb(preview["unverified_conditions"]),
+                ),
+            )
+            updated = await (
+                await conn.execute(
+                    """
+                    UPDATE run
+                    SET state = 'SUCCEEDED',
+                        stage = 'PREVIEW_READY',
+                        terminal_reason = NULL,
+                        state_version = %s,
+                        result_version = %s,
+                        result_kind = 'ALGORITHM_PREVIEW',
+                        lease_owner = NULL,
+                        lease_expires_at = NULL,
+                        active_execution_remaining_ms = %s,
+                        active_execution_started_at = NULL,
+                        updated_at = NOW()
+                    WHERE run_id = %s
+                      AND state = 'RUNNING'
+                      AND state_version = %s
+                      AND lease_owner = %s
+                      AND lease_epoch = %s
+                    RETURNING run_id
+                    """,
+                    (
+                        next_version,
+                        result_version,
+                        remaining,
+                        row["run_id"],
+                        current["state_version"],
+                        self._worker_owner,
+                        row["lease_epoch"],
+                    ),
+                )
+            ).fetchone()
+            if updated is None:
+                raise RunLifecycleError("RUN_STATE_CONFLICT")
+            next_seq = await self._next_event_seq(conn, row["run_id"])
+            await conn.execute(
+                """
+                INSERT INTO run_event (
+                    run_id, event_seq, event_type, stage, state_version,
+                    payload_version, payload
+                )
+                VALUES (%s, %s, 'STATE_CHANGED', 'PREVIEW_READY', %s, 1, %s)
+                """,
+                (
+                    row["run_id"],
+                    next_seq,
+                    next_version,
+                    Jsonb({"from_state": "RUNNING", "to_state": "SUCCEEDED"}),
+                ),
+            )
+            await conn.execute(
+                """
+                INSERT INTO run_event (
+                    run_id, event_seq, event_type, stage, state_version,
+                    payload_version, payload
+                )
+                VALUES (%s, %s, 'RESULT', 'PREVIEW_READY', %s, 2, %s)
+                """,
+                (
+                    row["run_id"],
+                    next_seq + 1,
+                    next_version,
+                    Jsonb(
+                        {
+                            "result_version": str(result_version),
+                            "result_kind": "ALGORITHM_PREVIEW",
+                            "preview": preview,
+                        }
+                    ),
+                ),
+            )
+
     async def _process_profile_run(self, run_id: UUID) -> None:
         await self._ensure_profile_runtime()
         conn = await self._connect(autocommit=True)
@@ -1031,12 +1456,24 @@ class RunLifecycle:
             if row is None:
                 return
             if row["confirmed_profile_version"] is not None:
-                await self._park_claim(
-                    conn,
-                    row,
-                    target_state="QUEUED",
-                    stage=row["stage"],
-                )
+                try:
+                    await self._process_algorithm_preview(conn, row)
+                except RunLifecycleError as exc:
+                    if exc.reason not in {
+                        "VALIDATION_FAILED",
+                        "DEPENDENCY_UNAVAILABLE",
+                        "PROFILE_NOT_CONFIRMED",
+                        "RELEASE_REVOKED",
+                        "NO_RELIABLE_DATA",
+                    }:
+                        raise
+                    await self._park_claim(
+                        conn,
+                        row,
+                        target_state="FAILED",
+                        stage=row["stage"],
+                        terminal_reason=exc.reason,
+                    )
                 return
 
             if await self._apply_consumed_interrupt(conn, row):

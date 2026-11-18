@@ -835,3 +835,29 @@ sqlc 的 `:many` 先收集类型化结果 slice，再映射领域对象，相较
 
 - 本票只实现画像阶段 worker；确认画像后的四算法调用与非空 ALGORITHM_PREVIEW 由 issue #5 接线。
 - 单机 PostgreSQL 短轮询满足 M2 可靠性底座；更大吞吐量和多区域调度不在本票范围。
+
+## 25. M3 ticket #5：四 RPC 与非空 ALGORITHM_PREVIEW
+
+**日期与范围**：2026-11-18。落地 issue #5：确认画像后按固定顺序调用 `RankConvert → EstimateProb → CheckConstraints → OptimizeWishlist`，把算法事实原样发布为不可变 `ALGORITHM_PREVIEW`。唯一行为 seam 仍是 `RunLifecycle`。
+
+### 实现要点
+
+- 四个 algo 请求 additive 增加 `release_id`；orchestrator 通过内部 `AlgoClient` 协议调用，生产 adapter 使用生成的 typed gRPC stub，不形成第二状态机。
+- `ProfileRuntime.ToAlgoInput` 仍是唯一画像映射入口；确认画像字段映射到 Province/Year/Category/Batch/Score/Subjects 与偏好 DTO。
+- 候选池只来自 `EstimateProb`；`CheckConstraints` 接收该服务端池，`OptimizeWishlist` 只接收 kept 候选。orchestrator 校验候选身份、概率和顺序保真，不改写算法事实。
+- RankConvert 位次必须与 EstimateProb `AuditBasis.user_rank` 一致；缺少 AuditBasis、空候选或关键算法输出缺失均 fail closed，不发布 result version。
+- 新增 `run_result` 迁移保存不可变预览、验证摘要和未核验条件；状态与 RESULT 事件在同事务发布。`GetRun` 与 `WatchRun` 返回同一 `result_version` 和相同 typed payload。
+- 预览明确列出完整当年资格、条件事实、在线 RAG/证据、三类证据校验、LLM Gateway、Strategy、Critic、正式报告均未核验；带风险提示、免责声明和“不得作为正式志愿方案”标记。
+- 删除旧 `StartGraph` 收尾的空 `DONE {}` 事件，避免无结果时伪造完成。
+- svc-orchestrator 新增 `ALGO_ADDR`（本地默认 `localhost:9002`，Compose 使用 `algo:9002`）；包含 `algo` 启动依赖。
+
+### 测试
+
+- 新增 RunLifecycle PostgreSQL 行为测试覆盖：四 RPC 顺序与同 release、候选/概率/AuditBasis 保真、非空预览、GET/WATCH 一致、完整未核验条件、缺 AuditBasis 与空候选 fail closed。
+- 新增 generated protobuf gRPC 边界测试，经 `GrpcAlgoClient` 从 RunLifecycle 发起完整流程；另以 `ORCHESTRATOR_ALGO_ADDR` 显式运行真实 svc-algo 进程的四 RPC 闭环。
+- `make py-check py-test`、RunLifecycle PostgreSQL/迁移/gRPC 测试、`make build check test` 通过；默认离线测试不访问算法数据或模型。
+
+### 边界
+
+- 本票只发布 `ALGORITHM_PREVIEW`，不宣称完整资格、证据或正式报告已核验；ALGORITHM_PREVIEW 的完整失败矩阵、复现性回归与发布竞态由 issue #6 加固。
+- 当前 release_id 已贯穿四个请求；在线算法数据表按 release_id 实际选行仍依赖后续发布数据迁移，不在本票伪造完成。

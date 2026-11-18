@@ -781,7 +781,10 @@ class ProfileLifecycleTests(RunLifecyclePostgresTest):
     async def _wait_for_interrupt(self, lifecycle, run_id):
         for _ in range(200):
             view = await lifecycle.GetRun(principal_id="principal-a", run_id=run_id)
-            if view.current_interrupt is not None:
+            if (
+                view.state == "WAITING_HITL"
+                and view.current_interrupt is not None
+            ):
                 return view
             await asyncio.sleep(0.01)
         self.fail("run 未在超时内进入 interrupt")

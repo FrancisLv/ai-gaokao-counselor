@@ -45,7 +45,10 @@ class LeaseLifecycleTests(RunLifecyclePostgresTest):
                 principal_id="principal-a",
                 run_id=receipt.run_id,
             )
-            if view.current_interrupt is not None:
+            if (
+                view.state == "WAITING_HITL"
+                and view.current_interrupt is not None
+            ):
                 break
             await asyncio.sleep(0.01)
         else:
@@ -130,7 +133,10 @@ class LeaseLifecycleTests(RunLifecyclePostgresTest):
                 principal_id="principal-a",
                 run_id=replay.run_id,
             )
-            if taken_over.current_interrupt is not None:
+            if (
+                taken_over.state == "WAITING_HITL"
+                and taken_over.current_interrupt is not None
+            ):
                 break
             await asyncio.sleep(0.01)
         else:
@@ -275,7 +281,10 @@ class LeaseLifecycleTests(RunLifecyclePostgresTest):
                 principal_id="principal-a",
                 run_id=submitted.run_id,
             )
-            if waiting.current_interrupt is not None:
+            if (
+                waiting.state == "WAITING_HITL"
+                and waiting.current_interrupt is not None
+            ):
                 break
             await asyncio.sleep(0.01)
         else:
@@ -445,7 +454,10 @@ class LeaseLifecycleTests(RunLifecyclePostgresTest):
                 principal_id="principal-a",
                 run_id=submitted.run_id,
             )
-            if waiting.current_interrupt is not None:
+            if (
+                waiting.state == "WAITING_HITL"
+                and waiting.current_interrupt is not None
+            ):
                 break
             await asyncio.sleep(0.01)
         else:
@@ -517,7 +529,10 @@ class LeaseLifecycleTests(RunLifecyclePostgresTest):
                 principal_id="principal-a",
                 run_id=receipt.run_id,
             )
-            if view.current_interrupt is not None:
+            if (
+                view.state == "WAITING_HITL"
+                and view.current_interrupt is not None
+            ):
                 break
             await asyncio.sleep(0.01)
         else:

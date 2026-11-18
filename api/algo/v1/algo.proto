@@ -149,6 +149,7 @@ message RankConvertRequest {
   string          year     = 3; // 报考年（如 2025）；决定载入哪年 score_rank_map（缺失→明确报错，不回退）
   string          category = 4; // 物理类/历史类（对应 DB score_rank_map.category 字段，非 track）
   int32           score    = 5;
+  string          release_id = 6; // run 在 Submit 时绑定的不可变发布清单
 }
 message RankConvertReply {
   int32  rank       = 1; // 位次
@@ -166,6 +167,7 @@ message EstimateProbRequest {
   repeated string subjects           = 7; // 选科组合，如 ["物理","化学","生物"]，用于选科硬过滤
   UserProfile     profile            = 8; // 风险偏好/兴趣/偏好城市等，用于效用排序
   int32           per_category_limit = 9; // 每档最多返回数量（默认 0=全量，后端不截断；Q1）
+  string          release_id         = 10; // run 在 Submit 时绑定的不可变发布清单
 }
 message EstimateProbReply {
   // 分档候选池（院校专业组），每组含进档概率、冲稳保分类、组内专业明细。
@@ -184,6 +186,7 @@ message CheckConstraintsRequest {
   repeated CandidateWithProb candidates = 3; // 待校验候选（约束过滤只读静态 Candidate 字段，忽略 prob）
   repeated string          subjects   = 4; // 用户选科组合（选科硬约束必需，同 EstimateProbRequest.subjects；UserProfile 不含选科，故独立传入）
   string                   category   = 5; // 科类：物理类/历史类（首选匹配冗余保险，与候选 SQL 过滤口径一致）
+  string                   release_id = 6; // run 在 Submit 时绑定的不可变发布清单
 }
 message CheckConstraintsReply {
   repeated CandidateWithProb kept     = 1; // 通过校验的候选
@@ -194,6 +197,7 @@ message OptimizeWishlistRequest {
   common.v1.Trace          trace      = 1;
   repeated CandidateWithProb candidates = 2; // 候选池：EstimateProbReply 三档合并（每项自带 prob.category），或上层增删改后回传；本 RPC 不重跑 rank/prob
   UserProfile              profile    = 3; // 含 risk_appetite → 冲稳保配比
+  string                   release_id = 4; // run 在 Submit 时绑定的不可变发布清单
 }
 message OptimizeWishlistReply {
   WishlistResult wishlist = 1; // 冲/稳/保配比与梯度平滑后的成品志愿表（含解析式滑档率 Π(1−pᵢ)）

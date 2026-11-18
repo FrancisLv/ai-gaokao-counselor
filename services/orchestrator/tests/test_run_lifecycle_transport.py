@@ -6,6 +6,7 @@ import grpc
 from api.orchestrator.v1 import orchestrator_pb2 as pb
 from api.orchestrator.v1 import orchestrator_pb2_grpc as pb_grpc
 from run_lifecycle_support import RunLifecyclePostgresTest
+from test_run_lifecycle_algorithm_preview import FakeAlgoClient
 
 
 class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
@@ -168,6 +169,85 @@ class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
             await channel.close()
             await server.stop(grace=None)
 
+    async def test_grpc_result_event_and_get_run_share_the_algorithm_preview(self):
+        from app.run_lifecycle import RunLifecycle
+        from app.run_lifecycle.worker import RunLifecycleWorker
+        from app.server import OrchestratorServicer
+
+        await self.seed_release()
+        lifecycle = RunLifecycle(
+            self.dsn,
+            auto_profile=True,
+            worker_owner="grpc-preview-worker",
+            algo_client=FakeAlgoClient(),
+        )
+        self.addAsyncCleanup(lifecycle.close)
+        worker = RunLifecycleWorker(lifecycle, poll_interval=0.01)
+        await worker.start()
+        self.addAsyncCleanup(worker.stop)
+        server = grpc.aio.server()
+        pb_grpc.add_OrchestratorServicer_to_server(
+            OrchestratorServicer(lifecycle=lifecycle),
+            server,
+        )
+        port = server.add_insecure_port("127.0.0.1:0")
+        await server.start()
+        self.addAsyncCleanup(server.stop, None)
+        channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+        self.addAsyncCleanup(channel.close)
+        client = pb_grpc.OrchestratorStub(channel)
+        metadata = (("x-principal-id", "principal-a"),)
+
+        receipt = await client.SubmitRun(
+            pb.SubmitRunRequest(
+                task_kind=pb.GENERATE_PLAN,
+                profile_input=pb.StructuredProfileInput(
+                    province="湖南",
+                    application_year=2025,
+                    category="物理类",
+                    batch="本科批",
+                    score=600,
+                    subjects=["物理", "化学", "生物"],
+                ),
+                idempotency_key="grpc-preview-submit",
+            ),
+            metadata=metadata,
+        )
+        waiting = await self._wait_for_grpc_interrupt(client, receipt.run_id, metadata)
+        await client.ResumeRun(
+            pb.ResumeRunRequest(
+                run_id=receipt.run_id,
+                interrupt_id=waiting.current_interrupt.interrupt_id,
+                expected_state_version=waiting.state_version,
+                profile_version=waiting.current_interrupt.profile_version,
+                confirm_profile=pb.ConfirmProfileAnswer(),
+                idempotency_key="grpc-preview-confirm",
+            ),
+            metadata=metadata,
+        )
+        view = await self._wait_for_grpc_preview(client, receipt.run_id, metadata)
+        events = client.WatchRun(
+            pb.WatchRunRequest(run_id=receipt.run_id, after_event_seq=0),
+            metadata=metadata,
+        )
+        result_event = None
+        try:
+            while result_event is None:
+                event = await events.read()
+                if event.type == pb.RESULT:
+                    result_event = event
+        finally:
+            events.cancel()
+
+        self.assertEqual(view.state, pb.SUCCEEDED)
+        self.assertEqual(view.result.result_kind, "ALGORITHM_PREVIEW")
+        self.assertEqual(view.result_preview.result_kind, "ALGORITHM_PREVIEW")
+        self.assertEqual(
+            view.result_preview.stable_candidates[0].candidate.university_code,
+            "U001",
+        )
+        self.assertEqual(result_event.result, view.result_preview)
+
     async def _wait_for_grpc_interrupt(self, client, run_id, metadata):
         import asyncio
 
@@ -176,7 +256,10 @@ class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
                 pb.GetRunRequest(run_id=run_id),
                 metadata=metadata,
             )
-            if view.HasField("current_interrupt"):
+            if (
+                view.state == pb.WAITING_HITL
+                and view.HasField("current_interrupt")
+            ):
                 return view
             await asyncio.sleep(0.01)
         self.fail("gRPC run 未进入 interrupt")
@@ -193,3 +276,16 @@ class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
                 return view
             await asyncio.sleep(0.01)
         self.fail("gRPC run 未确认画像")
+
+    async def _wait_for_grpc_preview(self, client, run_id, metadata):
+        import asyncio
+
+        for _ in range(300):
+            view = await client.GetRun(
+                pb.GetRunRequest(run_id=run_id),
+                metadata=metadata,
+            )
+            if view.HasField("result_preview"):
+                return view
+            await asyncio.sleep(0.01)
+        self.fail("gRPC run 未发布 algorithm preview")

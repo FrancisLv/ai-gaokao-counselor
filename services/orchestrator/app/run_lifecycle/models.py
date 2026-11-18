@@ -138,6 +138,7 @@ class RunView:
     cancel_requested_at: datetime | None
     current_interrupt: InterruptView | None
     result: ResultReference | None
+    result_payload: dict[str, Any] | None
     created_at: datetime
     updated_at: datetime
 

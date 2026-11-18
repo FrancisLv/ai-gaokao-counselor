@@ -57,6 +57,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await conn.execute(
                 """
                 DROP TABLE IF EXISTS
+                    run_result,
                     run_interrupt,
                     profile_confirmation,
                     profile_revision,
@@ -89,6 +90,11 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                 statement = statement.strip()
                 if statement:
                     await conn.execute(statement)
+            migration = ROOT / "migrations" / "11_algorithm_preview_results.sql"
+            for statement in migration.read_text(encoding="utf-8").split(";"):
+                statement = statement.strip()
+                if statement:
+                    await conn.execute(statement)
         finally:
             await conn.close()
 
@@ -113,6 +119,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await self._apply_sql_file(conn, "migrations/08_release_and_run_foundation.sql")
             await self._apply_sql_file(conn, "migrations/09_profile_run_lifecycle.sql")
             await self._apply_sql_file(conn, "migrations/10_run_leases.sql")
+            await self._apply_sql_file(conn, "migrations/11_algorithm_preview_results.sql")
         finally:
             await conn.close()
 
