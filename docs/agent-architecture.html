@@ -1,2283 +1,370 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>架构设计 · 高考志愿智能决策 Agent 系统</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>架构总览 · 高考志愿智能决策 Agent 系统</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>window.addEventListener('load',function(){if(window.mermaid){mermaid.initialize({startOnLoad:true,theme:'default',securityLevel:'loose'});}});</script>
 <style>
-  :root{
-    --bg:#0f1115; --panel:#161a21; --panel2:#1c222b; --panel3:#212934;
-    --border:#2a323d; --text:#e6e9ee; --muted:#9aa5b1;
-    --go:#63d2ff; --py:#ffd479; --algo:#86efac; --llm:#c69bff;
-    --warn:#fbbf24; --danger:#f87171; --accent:#4ea1ff;
-    --code-bg:#0b0e12;
-  }
-  *{box-sizing:border-box}
-  html{scroll-behavior:smooth}
-  body{
-    margin:0;background:var(--bg);color:var(--text);line-height:1.75;font-size:15.5px;
-    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  }
-  .layout{display:flex;max-width:1560px;margin:0 auto}
-  nav{width:270px;flex:0 0 270px;position:sticky;top:0;height:100vh;overflow-y:auto;
-      padding:28px 16px 60px;border-right:1px solid var(--border);background:var(--panel)}
-  nav .brand{font-weight:700;font-size:14.5px;color:var(--accent);margin-bottom:4px}
-  nav .brand small{display:block;color:var(--muted);font-weight:400;font-size:11.5px;margin-top:4px}
-  nav h4{font-size:10.5px;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted);margin:20px 0 7px;font-weight:600}
-  nav a{display:block;color:var(--muted);text-decoration:none;font-size:13px;padding:4.5px 10px;border-radius:6px;border-left:2px solid transparent}
-  nav a:hover{color:var(--text);background:var(--panel2)}
-  nav a.active{color:var(--accent);background:var(--panel2);border-left-color:var(--accent)}
-
-  main{flex:1;min-width:0;padding:48px 54px 130px}
-  header.top{border-bottom:1px solid var(--border);padding-bottom:24px;margin-bottom:34px}
-  header.top h1{font-size:28px;margin:0 0 10px;line-height:1.35}
-  header.top .sub{color:var(--muted);font-size:14px}
-  .badges{margin-top:16px;display:flex;gap:8px;flex-wrap:wrap}
-  .badge{font-size:12px;padding:4px 11px;border-radius:999px;border:1px solid var(--border);background:var(--panel2);color:var(--muted)}
-  .badge.go{border-color:#27566b;color:var(--go)} .badge.py{border-color:#6b5620;color:var(--py)}
-  .badge.algo{border-color:#2f5d3a;color:var(--algo)} .badge.llm{border-color:#4a3a6b;color:var(--llm)}
-
-  section{margin-bottom:52px;scroll-margin-top:20px}
-  h2{font-size:21px;margin:0 0 6px;padding-bottom:10px;border-bottom:2px solid var(--border);display:flex;align-items:center;gap:10px}
-  h2 .num{font-size:12.5px;background:var(--accent);color:#06203f;font-weight:800;padding:2px 8px;border-radius:5px}
-  h3{font-size:16px;margin:26px 0 10px;color:#cdd6e2}
-  h4{font-size:14.5px;margin:18px 0 8px;color:var(--accent)}
-  p{margin:10px 0} ul,ol{margin:10px 0;padding-left:22px} li{margin:5px 0}
-  strong{color:#fff}
-  code{background:var(--code-bg);border:1px solid var(--border);border-radius:4px;padding:1.5px 6px;
-       font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.8px;color:#8fd4ff}
-  pre{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;padding:16px 18px;overflow-x:auto;
-      font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;line-height:1.6;color:#c9d6e5;margin:14px 0}
-  pre code{background:none;border:none;padding:0;color:inherit;font-size:inherit}
-
-  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 20px;margin:14px 0}
-  .card.hl{border-left:3px solid var(--accent)} .card.ok{border-left:3px solid var(--algo)}
-  .card.warn{border-left:3px solid var(--warn)} .card.danger{border-left:3px solid var(--danger)}
-  .card .title{font-weight:700;color:#fff;margin-bottom:6px;font-size:15px}
-  blockquote{margin:14px 0;padding:12px 18px;background:var(--panel2);border-left:3px solid var(--algo);
-             border-radius:0 8px 8px 0;color:#d6dee8}
-
-  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px}
-  th,td{border:1px solid var(--border);padding:8px 11px;text-align:left;vertical-align:top}
-  th{background:var(--panel2);color:#fff;font-weight:600;white-space:nowrap}
-  tbody tr:nth-child(even){background:rgba(255,255,255,.015)}
-
-  /* ---------- 架构图 ---------- */
-  .diagram{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px;margin:18px 0;overflow-x:auto}
-  .layer{border:1px dashed var(--border);border-radius:10px;padding:12px 14px 14px;margin-bottom:10px;position:relative;background:rgba(255,255,255,.012)}
-  .layer > .lname{position:absolute;top:-10px;left:14px;background:var(--bg);padding:0 8px;font-size:11.5px;
-                  letter-spacing:1px;color:var(--muted);text-transform:uppercase;font-weight:600}
-  .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
-  .box{flex:1 1 0;min-width:140px;border:1px solid var(--border);border-radius:8px;padding:9px 11px;background:var(--panel2);font-size:12.5px;line-height:1.45}
-  .box b{display:block;color:#fff;font-size:13px;margin-bottom:3px}
-  .box span{color:var(--muted);font-size:11.5px}
-  .box.go{border-color:#2b5c74;background:linear-gradient(180deg,rgba(99,210,255,.10),rgba(99,210,255,.02))}
-  .box.py{border-color:#6b5a20;background:linear-gradient(180deg,rgba(255,212,121,.10),rgba(255,212,121,.02))}
-  .box.algo{border-color:#2f5d3a;background:linear-gradient(180deg,rgba(134,239,172,.10),rgba(134,239,172,.02))}
-  .box.llm{border-color:#4a3a6b;background:linear-gradient(180deg,rgba(198,155,255,.10),rgba(198,155,255,.02))}
-  .box.data{border-color:#4a4030;background:linear-gradient(180deg,rgba(251,191,36,.08),rgba(251,191,36,.02))}
-  .arrow{text-align:center;color:var(--muted);font-size:16px;line-height:1;margin:2px 0}
-
-  .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:10px}
-  .legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:middle}
-
-  .steps{counter-reset:s;list-style:none;padding-left:0}
-  .steps li{position:relative;padding:9px 0 9px 44px;border-bottom:1px dashed var(--border)}
-  .steps li:last-child{border-bottom:none}
-  .steps li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:9px;width:28px;height:28px;
-    border-radius:50%;background:var(--panel3);border:1px solid var(--border);color:var(--accent);
-    font-size:12.5px;font-weight:700;display:flex;align-items:center;justify-content:center}
-  .who{font-size:11px;padding:1px 7px;border-radius:5px;margin-left:6px;border:1px solid var(--border);color:var(--muted);white-space:nowrap}
-  .who.go{color:var(--go);border-color:#2b5c74} .who.py{color:var(--py);border-color:#6b5a20}
-  .who.algo{color:var(--algo);border-color:#2f5d3a} .who.llm{color:var(--llm);border-color:#4a3a6b}
-  .who.hitl{color:var(--warn);border-color:#6b5620}
-
-  footer{border-top:1px solid var(--border);padding-top:18px;color:var(--muted);font-size:13px}
-  @media (max-width:1050px){nav{display:none} main{padding:28px 18px 80px}}
-  @media print{
-    :root{--bg:#fff;--panel:#fff;--panel2:#f6f8fa;--panel3:#eef1f4;--border:#d0d7de;--text:#111;--muted:#57606a;--code-bg:#f6f8fa}
-    nav{display:none} main{padding:0} body{font-size:11pt}
-    section,.card,.diagram,pre,table{page-break-inside:avoid} h2,h3{page-break-after:avoid}
-    code{color:#0b4f8a} .box{background:#f6f8fa !important;border-color:#d0d7de !important}
-  }
+:root{--fg:#1f2328;--muted:#656d76;--bd:#d0d7de;--bg:#fff;--side:#f6f8fa;--ac:#0969da;}
+*{box-sizing:border-box;}
+body{margin:0;color:var(--fg);background:var(--bg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Helvetica,Arial,sans-serif;line-height:1.65;}
+#side{position:fixed;top:0;left:0;width:280px;height:100vh;overflow:auto;background:var(--side);border-right:1px solid var(--bd);padding:20px 16px;}
+#side h2{font-size:14px;color:var(--muted);margin:0 0 12px;text-transform:none;}
+#side a{display:block;padding:6px 10px;color:var(--fg);text-decoration:none;border-radius:6px;font-size:14px;margin-bottom:2px;}
+#side a:hover{background:#eaeef2;color:var(--ac);}
+#main{margin-left:280px;padding:32px 48px;max-width:960px;}
+h1{font-size:28px;border-bottom:2px solid var(--bd);padding-bottom:12px;}
+h2{font-size:21px;margin-top:36px;border-bottom:1px solid var(--bd);padding-bottom:6px;}
+blockquote{margin:16px 0;padding:12px 16px;border-left:4px solid #d4a72c;background:#fff8e5;border-radius:0 6px 6px 0;color:#4d3800;}
+blockquote p{margin:6px 0;}
+table{border-collapse:collapse;width:100%;margin:16px 0;font-size:14px;}
+th,td{border:1px solid var(--bd);padding:8px 12px;text-align:left;vertical-align:top;}
+th{background:var(--side);font-weight:600;}
+tr:nth-child(even) td{background:#fbfcfd;}
+code{background:#eff1f3;padding:2px 6px;border-radius:4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:85%;}
+pre{background:var(--side);border:1px solid var(--bd);border-radius:8px;padding:14px;overflow:auto;}
+pre code{background:none;padding:0;}
+pre.mermaid{background:#fff;border:1px solid var(--bd);text-align:center;}
+a{color:var(--ac);}
+hr{border:0;border-top:1px solid var(--bd);margin:28px 0;}
+@media(max-width:900px){#side{display:none;}#main{margin-left:0;padding:20px;}}
 </style>
 </head>
 <body>
-<div class="layout">
-
-<nav>
-  <div class="brand">架构设计文档<small>高考志愿智能决策 Agent 系统 · Go + Python</small></div>
-  <h4>目录</h4>
-  <a href="#s1">1 · 设计目标与约束</a>
-  <a href="#s2">2 · AI 适用性分析</a>
-  <a href="#s3">3 · 架构总览（分层）</a>
-  <a href="#s4">4 · 服务划分与调用关系</a>
-  <a href="#s5">5 · 请求全链路时序</a>
-  <a href="#s6">6 · 多 Agent 编排图</a>
-  <a href="#s7">7 · RAG 管线</a>
-  <a href="#s8">8 · 领域算法层</a>
-  <a href="#s9">9 · 数据存储设计</a>
-  <a href="#s10">10 · 服务契约（proto）</a>
-  <a href="#s11">11 · 可观测与评测</a>
-  <a href="#s12">12 · 部署拓扑</a>
-  <a href="#s13">13 · 仓库目录结构</a>
-  <a href="#s14">14 · 关键设计决策（ADR）</a>
-  <a href="#s15">15 · 自研编排 vs 框架</a>
-  <a href="#s16">16 · 降级与故障处理</a>
-  <a href="#s17">17 · 安全与合规</a>
-  <a href="#s18">18 · 演进路线</a>
+<nav id="side">
+<h2>架构总览（派生自 PRD v1.3）</h2>
+<a href="#1-系统定位与边界">1. 系统定位与边界</a>
+<a href="#2-四服务拓扑与数据所有权">2. 四服务拓扑与数据所有权</a>
+<a href="#3-端到端时序-15-步主干">3. 端到端时序（15 步主干）</a>
+<a href="#4-run-生命周期状态机">4. run 生命周期状态机</a>
+<a href="#5-治理与红线">5. 治理与红线</a>
+<a href="#6-里程碑与部署阶梯">6. 里程碑与部署阶梯</a>
+<a href="#7-权威来源指向">7. 权威来源指向</a>
 </nav>
-
-<main>
-<header class="top">
-  <h1>架构设计 · 高考志愿智能决策 Agent 系统</h1>
-  <div class="sub">多 Agent + RAG + 领域算法 ｜ LangGraph 承载编排，Go 负责网关/算法/成本治理，Python 负责推理与评测</div>
-  <div class="badges">
-    <span class="badge py">LangGraph · 编排主干</span>
-    <span class="badge go">Go · 网关/算法/成本治理</span>
-    <span class="badge py">Python · 推理/RAG/评测</span>
-    <span class="badge llm">LLM Gateway</span>
-    <span class="badge algo">结构化查询 + 非结构化 RAG</span>
-    <span class="badge">gRPC 双端契约</span>
-    <span class="badge">OTel 全链路追踪</span>
-  </div>
-</header>
-
-<!-- ===== 1 ===== -->
-<section id="s1">
-  <h2><span class="num">1</span>设计目标与约束</h2>
-  <div class="row">
-    <div class="box go"><b>G1 · 幻觉零容忍</b><span>每条结论必须可溯源到原文；验证器逐条比对，不合格打回重写。</span></div>
-    <div class="box go"><b>G2 · 规则硬约束</b><span>选科/单科/体检/批次等为硬规则，由确定性代码裁决，不交给 LLM。</span></div>
-    <div class="box algo"><b>G3 · 数值可解释</b><span>位次换算与录取概率必须给出计算依据，可复现、可审计。</span></div>
-    <div class="box py"><b>G4 · 时效性</b><span>招生政策逐年变化，知识必须走检索而非模型参数。</span></div>
-    <div class="box"><b>G5 · 成本与延迟可控</b><span>按角色路由模型，缓存 + 限额 + 熔断，P99 与单次成本可观测。</span></div>
-    <div class="box"><b>G6 · 可评测</b><span>golden set 进 CI，回归不通过即阻断发布。</span></div>
-  </div>
-  <div class="card warn">
-    <div class="title">明确非目标（写进文档，约束范围）</div>
-    <ul style="margin:6px 0">
-      <li>不做通用聊天助手；不做多学科家教；不做院校排名预测</li>
-      <li>不做志愿「代填」，系统只提供决策支持，最终由用户确认</li>
-      <li>不采集任何未成年人个人敏感信息，不做用户画像商业化</li>
-    </ul>
-  </div>
-  <blockquote>
-    核心架构原则：<strong>LLM 负责语义理解、规划与表达；确定性代码负责规则、数值与约束。两者边界必须清晰。</strong>
-  </blockquote>
-</section>
-
-<!-- ===== 2 ===== -->
-<section id="s2">
-  <h2><span class="num">2</span>AI 适用性分析：哪里该用 AI，哪里不该</h2>
-
-  <div class="card hl">
-    <div class="title">这一节回答一个必须回答的问题</div>
-    <strong>「这不是传统志愿填报工具就能做吗？为什么要用 AI？」</strong><br>
-    这是本项目在面试中 100% 会被问到的问题。答不好，整个项目会被判定为
-    「为了用 AI 而用 AI」。本节给出经得起追问的答案，它也是第
-    <a href="#s7">7</a>、<a href="#s8">8</a> 章架构决策的论证依据。
-  </div>
-
-  <h3>2.1 先承认对方是对的</h3>
-  <p>诚实地说：<strong>在「精确匹配与数值计算」上，传统做法确实更好，AI 更差。</strong></p>
-  <table>
-    <thead><tr><th>能力</th><th>传统做法（志愿填报工具）</th><th>AI</th></tr></thead>
-    <tbody>
-      <tr><td>精确数值查询</td><td><strong>强</strong>：SQL 查库，零误差</td><td>弱：会算错、会幻觉</td></tr>
-      <tr><td>规则过滤</td><td><strong>强</strong>：布尔判断，确定</td><td>弱：不稳定，会漏</td></tr>
-      <tr><td>结果一致性</td><td><strong>强</strong>：同输入同输出</td><td>弱：有随机性</td></tr>
-      <tr><td>成本</td><td><strong>低</strong>：查询几乎免费</td><td>高：每次调用付费</td></tr>
-      <tr><td>延迟</td><td><strong>快</strong>：毫秒级</td><td>慢：秒级</td></tr>
-    </tbody>
-  </table>
-  <div class="card warn">
-    <div class="title">结论一</div>
-    如果需求只是「输入分数 → 输出符合条件的院校列表」，<strong>那不需要 AI</strong>。
-    这类工具已经做得很好，而且在精确性上做得比 AI 好。<br>
-    <strong>面试时先讲这一层。</strong>它证明你懂边界，而不是被 AI 热潮冲昏头。
-  </div>
-
-  <h3>2.2 AI 真正加了什么（五项，每项都对应「传统做不到」）</h3>
-  <table>
-    <thead><tr><th style="width:32px">#</th><th>AI 的价值</th><th>传统做法为什么做不到</th></tr></thead>
-    <tbody>
-      <tr>
-        <td>1</td>
-        <td><strong>把「人话」变成「查询条件」</strong><br>
-          <span style="color:var(--muted)">用户说：「我儿子物理类 580 分，想学计算机，家离江苏近点，预算别太高，他不太喜欢纯理论的。」</span></td>
-        <td>传统系统要用户填十来个字段、点几百个筛选器。「不太喜欢纯理论的」不是一个字段，<strong>直接卡住</strong></td>
-      </tr>
-      <tr>
-        <td>2</td>
-        <td><strong>模糊偏好的语义映射</strong><br>
-          <span style="color:var(--muted)">「别太理论」→ 计算机类下偏应用 / 偏理论的分野<br>
-          「离家近」→ 结合所在地做地理推断<br>
-          「好就业」→ 把「就业」映射到专业与行业</span></td>
-        <td>这些是语义问题，不是字段匹配。传统工具只能让用户自己在预设标签里选，<strong>而多数考生和家长根本不知道有哪些标签可选</strong></td>
-      </tr>
-      <tr>
-        <td>3</td>
-        <td><strong>非结构化知识的问答</strong><br>
-          <span style="color:var(--muted)">「这个学校转专业政策是什么」「大类招生怎么分流」「保研率多少」</span></td>
-        <td>答案在招生章程、政策文件里，是文本不是字段。传统系统只有结构化字段，答不了。<strong>这正是 RAG 的位置</strong></td>
-      </tr>
-      <tr>
-        <td>4</td>
-        <td><strong>生成式解释，而不是给个表格</strong><br>
-          <span style="color:var(--muted)">为什么这个在「冲」、那个在「稳」，和哪个偏好契合、哪里冲突、风险是什么</span></td>
-        <td>传统只能给列表或套模板；模板覆盖不了个性化权衡</td>
-      </tr>
-      <tr>
-        <td>5</td>
-        <td><strong>多轮追问与修正</strong><br>
-          <span style="color:var(--muted)">「不想去东北」「再加两个保底的」「这个专业具体学什么」</span></td>
-        <td>传统是「一次性查询」，不支持协商式探索</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <h3>2.3 产品层面的真正差异</h3>
-  <p>传统工具的核心假设是：<strong>用户已经知道自己要什么</strong>，只要给他好用的筛选器就行。</p>
-  <p>现实是：一个 17 岁的学生和家长，面对 3000 所院校、800 个专业，
-  <strong>最大的痛点不是「筛不出来」，而是「不知道该问什么」</strong>。
-  他们本身是模糊的，需要被引导、被解释、被追问。</p>
-  <blockquote>
-    传统工具解决：<strong>明确的用户 → 高效检索</strong><br>
-    本项目解决：<strong>模糊的用户 → 逐步明确 → 可解释的方案</strong><br><br>
-    AI 的价值不在「让筛选更准」，而在<strong>「让模糊的人也能得到答案」</strong>。
-    这是产品定位的差异，不是技术炫技。
-  </blockquote>
-
-  <h3>2.4 判断一个场景该不该用 AI：三条标准</h3>
-  <table>
-    <thead><tr><th>标准</th><th>本项目</th></tr></thead>
-    <tbody>
-      <tr><td>① 输入是否非结构化 / 模糊？</td><td>是：自然语言 + 模糊偏好 &nbsp;✓</td></tr>
-      <tr><td>② 输出是否要求生成 / 解释？</td><td>是：方案 + 理由 + 风险提示 &nbsp;✓</td></tr>
-      <tr><td>③ 是否有大量非结构化知识需检索？</td><td>是：政策、招生章程、体检规定 &nbsp;✓</td></tr>
-    </tbody>
-  </table>
-  <p>三条全中 → <strong>该用 AI</strong>。反过来说：若需求只是「分数 → 院校列表」，那确实不该用。</p>
-  <div class="card ok">
-    <div class="title">这个框架可以直接在面试里讲</div>
-    它展示的是<strong>方法论</strong>，而不是「我觉得 AI 好」。
-    知道什么时候不用 AI，比知道什么时候用 AI 更能说明水平。
-  </div>
-
-  <h3>2.5 结论：混合架构，而不是「用 AI 替代传统」</h3>
-  <table>
-    <thead><tr><th>环节</th><th>由谁负责</th><th>落在哪一章</th></tr></thead>
-    <tbody>
-      <tr><td>精确数值查询（分数线、招生计划）</td><td>SQL（全参数化）</td><td>第 <a href="#s7">7</a>、<a href="#s9">9</a> 章</td></tr>
-      <tr><td>硬规则裁决（选科 / 单科 / 体检）</td><td>确定性规则引擎</td><td>第 <a href="#s8">8</a> 章</td></tr>
-      <tr><td>数值计算（位次换算、概率估计）</td><td>领域算法</td><td>第 <a href="#s8">8</a> 章</td></tr>
-      <tr><td>自然语言理解 / 模糊偏好映射</td><td>LLM</td><td>第 <a href="#s6">6</a> 章</td></tr>
-      <tr><td>非结构化知识检索</td><td>RAG</td><td>第 <a href="#s7">7</a> 章</td></tr>
-      <tr><td>解释生成 / 多轮交互</td><td>LLM</td><td>第 <a href="#s6">6</a> 章</td></tr>
-    </tbody>
-  </table>
-  <div class="card hl">
-    <div class="title">与架构核心决策的关系</div>
-    这张表正是第 <a href="#s7">7</a> 章那条核心决策的来源：
-    <strong>结构化数据走 SQL，非结构化文本走 RAG</strong>。
-    本节是它的论证，那一章是它的实现。
-  </div>
-  <div class="card danger">
-    <div class="title">一条纪律</div>
-    <strong>绝不让 LLM 去做它最弱的事。</strong>
-    位次换算、概率计算若交给 LLM，既引入幻觉，又放弃可复现性——
-    这是反模式，不是「更智能」。
-  </div>
-
-  <h3>2.6 面试答法：三层结构 + 一个杀手锏</h3>
-  <div class="card">
-    <div class="title">第一层 · 承认边界</div>
-    「核心的匹配和数值计算，传统做法确实更好。我保留了它们——结构化数据走 SQL
-    精确查询，规则用确定性规则引擎，位次和概率用算法。这些环节我故意不用 LLM。」
-  </div>
-  <div class="card">
-    <div class="title">第二层 · 划清 AI 的职责</div>
-    「AI 只负责三件传统做不到的事：把模糊的自然语言转成结构化查询意图、
-    检索非结构化政策文本、生成可解释的方案。这三条是表单式工具的结构性盲区，
-    不是优化能解决的。」
-  </div>
-  <div class="card ok">
-    <div class="title">第三层 · 用数据收尾（杀手锏）</div>
-    「我做了对比测试：面对模糊输入（如「想学计算机但别太理论」），
-    纯筛选器方案的可用率是 X%，加入自然语言理解后是 Y%。
-    差别不是「更准」，是「原来根本没法用」。」<br>
-    <span style="color:var(--muted)">（X / Y 由第 <a href="#s11">11</a> 章的评测体系产出，务必填真实数字）</span>
-  </div>
-  <p>第三层是决定性的：大多数人只能「说理由」，而你能「给数字」——
-  这说明你不是觉得，是测过。</p>
-</section>
-
-<!-- ===== 3 ===== -->
-<section id="s3">
-  <h2><span class="num">3</span>架构总览（分层）</h2>
-
-  <div class="diagram">
-    <div class="layer">
-      <div class="lname">接入层 · Edge</div>
-      <div class="row">
-        <div class="box go"><b>API Gateway (Go)</b><span>HTTP/JSON + SSE 流式、鉴权、参数校验、幂等键</span></div>
-        <div class="box go"><b>Rate Limiter (Go)</b><span>令牌桶、按用户/租户限额、并发闸门</span></div>
-        <div class="box go"><b>Session (Go)</b><span>会话态、断点续跑、HITL 门控</span></div>
-      </div>
-    </div>
-
-    <div class="arrow">▼</div>
-
-    <div class="layer">
-      <div class="lname">编排层 · Orchestration（LangGraph 承载图与状态 + Go 负责门控）</div>
-      <div class="row">
-        <div class="box py"><b>Graph Engine (LangGraph)</b><span>节点/条件边、subgraph 循环、节点级重试、并行分支</span></div>
-        <div class="box py"><b>Checkpoint (LangGraph Saver)</b><span>Postgres saver 每步落盘，支持中断恢复与时间旅行重放</span></div>
-        <div class="box go"><b>HITL Gate (Go)</b><span>interrupt/resume 的用户侧门控、SSE 推送与确认回执</span></div>
-        <div class="box go"><b>Budget Guard (Go)</b><span>token/调用次数/耗时预算，超限即降级</span></div>
-      </div>
-    </div>
-
-    <div class="arrow">▼</div>
-
-    <div class="layer">
-      <div class="lname">能力层 · Agents &amp; Tools</div>
-      <div class="row">
-        <div class="box llm"><b>ProfileAgent</b><span>画像抽取</span></div>
-        <div class="box llm"><b>RetrieveAgent</b><span>检索编排</span></div>
-        <div class="box llm"><b>StrategyAgent</b><span>冲稳保方案</span></div>
-        <div class="box llm"><b>CriticAgent</b><span>方案挑战</span></div>
-        <div class="box llm"><b>ReportAgent</b><span>报告生成</span></div>
-        <div class="box llm"><b>Verifier</b><span>引用校验</span></div>
-      </div>
-      <div class="row">
-        <div class="box algo"><b>ConstraintChecker</b><span>规则引擎</span></div>
-        <div class="box algo"><b>RankConverter</b><span>位次换算</span></div>
-        <div class="box algo"><b>ProbEstimator</b><span>概率估计</span></div>
-        <div class="box algo"><b>WishlistOptimizer</b><span>志愿表优化</span></div>
-        <div class="box go"><b>LLM Gateway</b><span>svc-llm-gateway · 模型路由/缓存/重试/降级/成本记账</span></div>
-      </div>
-    </div>
-
-    <div class="arrow">▼ gRPC</div>
-
-    <div class="layer">
-      <div class="lname">推理与检索层 · Inference &amp; Retrieval（Python）</div>
-      <div class="row">
-        <div class="box py"><b>InferenceService</b><span>本地模型 Embed / Rerank（云 Chat/Stream 经 svc-llm-gateway）</span></div>
-        <div class="box py"><b>RetrievalService</b><span>Hybrid 检索、元数据过滤、RRF 融合、Rerank</span></div>
-        <div class="box py"><b>IndexPipeline</b><span>离线：解析、切分、元数据抽取、双写</span></div>
-        <div class="box py"><b>EvalService</b><span>golden set 回归、指标计算</span></div>
-      </div>
-    </div>
-
-    <div class="arrow">▼</div>
-
-    <div class="layer">
-      <div class="lname">数据层 · Storage</div>
-      <div class="row">
-        <div class="box data"><b>PostgreSQL</b><span>结构化：分数线/招生计划/院校专业 + <code>pgvector</code> + <code>tsvector</code></span></div>
-        <div class="box data"><b>Redis</b><span>缓存、限流、队列（长任务）、会话态</span></div>
-        <div class="box data"><b>Object Storage</b><span>原始政策 PDF/HTML 原件，供溯源</span></div>
-        <div class="box data"><b>Checkpoint DB</b><span>编排检查点（可与 PG 同实例，独立表）</span></div>
-      </div>
-    </div>
-
-    <div class="arrow">▲ 旁路</div>
-
-    <div class="layer">
-      <div class="lname">观测层 · Observability（横切）</div>
-      <div class="row">
-        <div class="box go"><b>OpenTelemetry</b><span>trace_id 贯穿 Go↔Python</span></div>
-        <div class="box go"><b>Prometheus / Grafana</b><span>QPS、P99、错误率、成本曲线</span></div>
-        <div class="box py"><b>LLM Tracing</b><span>prompt/响应/token/成本落库</span></div>
-      </div>
-    </div>
-
-    <div class="legend">
-      <span><i style="background:#63d2ff"></i>Go 工程</span>
-      <span><i style="background:#ffd479"></i>Python 推理/RAG</span>
-      <span><i style="background:#86efac"></i>确定性算法</span>
-      <span><i style="background:#c69bff"></i>LLM 驱动</span>
-      <span><i style="background:#fbbf24"></i>数据存储</span>
-    </div>
-  </div>
-
-  <div class="card hl">
-    <div class="title">为什么这样分层</div>
-    <ul style="margin:6px 0">
-      <li><strong>编排用 LangGraph，Go 守住治理与算法</strong>：图与状态交给行业标准框架（拿岗位入场券、省下 4–8 周引擎工时），Go 专注框架之上的成本治理、HITL 门控与领域算法——差异化来自框架做不到的部分，而不是重写框架。</li>
-      <li><strong>Python 收敛在推理/检索/评测</strong>：只做它生态最强的事，接口用 gRPC 隔离，未来换模型/换向量库不影响 Go 侧。</li>
-      <li><strong>算法单独成层</strong>：确定性代码与 LLM 分离，才能独立测试、独立回归、独立审计。</li>
-    </ul>
-  </div>
-</section>
-
-<!-- ===== 4 ===== -->
-<section id="s4">
-  <h2><span class="num">4</span>服务划分与调用关系（Go / Python 各管什么 · 谁调谁 · 数据怎么流）</h2>
-
-  <div class="card hl">
-    <div class="title">这一章要解决三个最容易绕晕的问题</div>
-    <ol style="margin:6px 0">
-      <li><strong>哪些代码是 Go、哪些是 Python？</strong>——服务清单与边界</li>
-      <li><strong>谁调用谁？</strong>——调用关系图</li>
-      <li><strong>数据从哪来、经过谁、存到哪？</strong>——离线数据流 + 在线数据流</li>
-    </ol>
-    读完它，再回头看第 <a href="#s5">5</a>、<a href="#s6">6</a> 章的时序与编排图，就能对上号。
-  </div>
-
-  <!-- 4.1 -->
-  <h3>4.1 心智模型：两类程序 + 一个数据仓库</h3>
-  <p>先把整个系统压缩成一句话：<strong>它只有两类程序，外加一个它们共用的数据仓库。</strong></p>
-  <div class="row">
-    <div class="box go"><b>Go · gateway / llm-gateway / algo</b><span>控制平面：门口的保安 + 会计。入口请求进 <b>gateway</b>；模型治理在 <b>llm-gateway</b>；算数、裁规则在 <b>algo</b>（三者可同一份代码、按角色部署）。</span></div>
-    <div class="box py"><b>Python · svc-orchestrator</b><span>智能平面：专家团。理解人话、查资料、写方案、自我审查——所有需要 LLM 与 RAG 的活都在这里。</span></div>
-    <div class="box data"><b>数据仓库</b><span>档案室：PostgreSQL(+pgvector/tsvector) · Redis · 对象存储。两种语言都读写它。</span></div>
-  </div>
-  <div class="card ok">
-    <div class="title">一句话边界</div>
-    <strong>Go 管「控制与治理」，Python 管「智能与检索」，数据层两者共用。</strong><br>
-    规则判定与数值计算<strong>绝不</strong>交给 Python 的 LLM 去算；语义理解与生成<strong>绝不</strong>在 Go 里硬编码。
-    （论证见第 <a href="#s7">7</a> 章的核心决策、第 <a href="#s8">8</a> 章的算法层。）
-  </div>
-
-  <!-- 4.2 -->
-  <h3>4.2 服务清单：谁是进程、谁只是库</h3>
-  <table>
-    <thead><tr><th>服务 / 进程</th><th>语言 / 框架</th><th>职责</th><th>起步形态</th></tr></thead>
-    <tbody>
-      <tr>
-        <td><code>svc-gateway</code></td>
-        <td><span class="who go">Go</span> Kratos</td>
-        <td>客户端入口：HTTP/JSON + SSE、鉴权、限流、会话、HITL 门控、并发闸门</td>
-        <td><strong>面向客户端（唯一对外）</strong></td>
-      </tr>
-      <tr>
-        <td><code>svc-llm-gateway</code></td>
-        <td><span class="who go">Go</span> Kratos</td>
-        <td>模型治理：路由 / 缓存 / 重试 / 降级 / 成本记账 / 预算闸门；<strong>持有模型 key</strong></td>
-        <td><strong>被 svc-orchestrator 调用</strong></td>
-      </tr>
-      <tr>
-        <td><code>svc-algo</code></td>
-        <td><span class="who go">Go</span> Kratos</td>
-        <td>领域算法：位次换算 / 概率估计 / 规则引擎 / 志愿表优化 / 投档模拟</td>
-        <td><strong>被 svc-orchestrator 调用</strong></td>
-      </tr>
-      <tr>
-        <td><code>svc-orchestrator</code></td>
-        <td><span class="who py">Python</span> grpc.aio + LangGraph</td>
-        <td>编排图与节点；本地模型 Embed / Rerank；检索（hybrid）；离线索引；评测</td>
-        <td><strong>独立进程（对内）</strong></td>
-      </tr>
-      <tr>
-        <td><code>svc-retrieval</code></td>
-        <td><span class="who py">Python</span></td>
-        <td>拆分后：只留检索 + 索引管线（吃内存 / GPU 时独立扩缩容）</td>
-        <td>M3 后按需再拆</td>
-      </tr>
-      <tr>
-        <td><code>svc-inference</code></td>
-        <td><span class="who py">Python</span></td>
-        <td>拆分后：只留推理，便于独占 GPU / 独立计费</td>
-        <td>M3 后按需再拆</td>
-      </tr>
-    </tbody>
-  </table>
-  <div class="card">
-    <div class="title">关于「文档里那个 Orchestrator 服务」</div>
-    第 <a href="#s12">12</a> 章把<strong>编排</strong>画成一个独立的 Orchestrator 服务；这里把编排<strong>并进 svc-orchestrator</strong>。
-    原因：LangGraph 运行在 Python 进程内，起步阶段没必要为它单起一个服务（要不要独立见 4.7 决策点）。
-    通用惯例是：<strong>先合并，等有了真实的拆分理由（扩缩容差异 / 故障隔离 / 团队边界）再拆。</strong>
-  </div>
-  <div class="card hl">
-    <div class="title">为什么 Go 要拆成多个角色（本方案的关键）</div>
-    如果一个 Go 进程<strong>既做客户端入口（在 Python 上游）、又做 LLM 网关（在 Python 下游）</strong>，就会形成<strong>双向同步调用 → 环路</strong>，有循环等待 / 池耗尽死锁的风险（详见 <strong>4.9</strong>）。<br>
-    拆成 <code>svc-gateway</code> / <code>svc-llm-gateway</code> / <code>svc-algo</code> 三个角色（<strong>可同一份代码、按角色部署</strong>，但必须不同地址 / 不同部署）后，调用链变成单向的 <strong>DAG</strong>：gateway → orchestrator → { llm-gateway, algo }，不再成环。
-  </div>
-  <table>
-    <thead><tr><th>基础设施（不是你的服务，但要部署）</th><th>作用</th><th>谁在用</th></tr></thead>
-    <tbody>
-      <tr><td>PostgreSQL（+pgvector +tsvector）</td><td>结构化数据 + 向量 + 全文倒排，三合一</td><td>svc-algo 读；svc-orchestrator 检索 / 写检查点</td></tr>
-      <tr><td>Redis</td><td>缓存、限流计数、长任务队列、会话</td><td>svc-gateway / svc-orchestrator</td></tr>
-      <tr><td>对象存储</td><td>政策 PDF/HTML 原件，供溯源比对</td><td>svc-orchestrator 写；Verifier 读</td></tr>
-      <tr><td>OTel Collector + Prometheus + Grafana</td><td>全链路追踪与指标</td><td>四个服务都上报</td></tr>
-    </tbody>
-  </table>
-
-  <!-- 4.3 -->
-  <h3>4.3 谁调用谁（单向 DAG，无环）</h3>
-  <pre><code>                     ┌────────────────────────┐
-   浏览器 / 客户端 ──►│    [Go] svc-gateway     │  入口·鉴权·限流·会话·SSE / HITL
-    HTTP/JSON + SSE   │      （无状态 ×N）       │
-                     └────────────┬───────────┘
-                                  │ gRPC：StartGraph / ResumeGraph（控制）
-                                  ▼
-                     ┌────────────────────────┐
-                     │ [Python] svc-orchestrator│  LangGraph 图 / 检查点
-                     │      （无状态 ×N）       │  本地 Embed / Rerank
-                     └───┬────────────────┬───┘
-          gRPC：LLM       │                │ gRPC：算法
-                          ▼                ▼
-        ┌──────────────────────┐  ┌──────────────────────┐
-        │ [Go] svc-llm-gateway  │  │    [Go] svc-algo      │
-        │ 路由 / 缓存 / 预算 / 记账│  │ 位次 / 概率 / 规则 / 优化│
-        └──────────┬───────────┘  └──────────┬───────────┘
-                   │ HTTP                   │ SQL
-                   ▼                        ▼
-             ┌───────────┐         ┌──────────────────────┐
-             │ 模型 API   │         │ PostgreSQL(+pgvector) │
-             │  key 在此  │         │ Redis · 对象存储      │
-             └───────────┘         └──────────────────────┘
-                                        ▲  （svc-orchestrator 也经 SQL/向量 直连 PG）
-
-      关键：箭头全程单向 → 无环（DAG）。下游都不回调上游。</code></pre>
-  <div class="card ok">
-    <div class="title">为什么这样就不成环</div>
-    <strong>上游（svc-gateway）、中游（svc-orchestrator）、下游（svc-llm-gateway / svc-algo）各一层，箭头只向下。</strong><br>
-    · svc-gateway 只调 svc-orchestrator，不碰下游；<br>
-    · svc-orchestrator 只调两个下游（svc-llm-gateway / svc-algo），不回调 svc-gateway；<br>
-    · 两个下游只调模型 / 数据库，<strong>都不回调 svc-orchestrator</strong>（所以云模型由 svc-llm-gateway 直连，而不再转发给 Python）。
-  </div>
-  <table>
-    <thead><tr><th>调用方 → 被调方</th><th>协议</th><th>用途</th></tr></thead>
-    <tbody>
-      <tr><td>客户端 → svc-gateway</td><td>HTTP/JSON + SSE</td><td>提交请求、接收流式输出</td></tr>
-      <tr><td>svc-gateway → svc-orchestrator</td><td>gRPC</td><td>StartGraph / ResumeGraph（驱动 / 恢复编排）</td></tr>
-      <tr><td>svc-orchestrator → svc-llm-gateway</td><td>gRPC</td><td>LLM 调用（由 svc-llm-gateway 路由 / 预算 / 记账）</td></tr>
-      <tr><td>svc-orchestrator → svc-algo</td><td>gRPC</td><td>领域算法（位次 / 概率 / 规则 / 优化 / 模拟）</td></tr>
-      <tr><td>svc-llm-gateway → 模型 API</td><td>HTTP</td><td>实际调用云模型（<strong>key 只在 svc-llm-gateway</strong>）</td></tr>
-      <tr><td>svc-orchestrator → PostgreSQL</td><td>SQL / 向量 / 全文</td><td>检索 chunk、写检查点</td></tr>
-      <tr><td>svc-algo → PostgreSQL</td><td>SQL</td><td>算法读历史（一分一段 / 录取线 / 位次）</td></tr>
-      <tr><td>svc-gateway → Redis</td><td>—</td><td>会话、限流计数</td></tr>
-      <tr><td>四者 → OTel / 对象存储</td><td>OTLP / HTTP</td><td>追踪上报；原始文件读写</td></tr>
-    </tbody>
-  </table>
-  <div class="card">
-    <div class="title">本地模型例外</div>
-    Embedding / Rerank 走<strong>本地小模型</strong>（无 key、无成本），由 svc-orchestrator 内部完成，不经过 svc-llm-gateway——既省一跳，也不破坏 DAG。只有「需要计费 / 路由 / 治理的云端 LLM」才经 svc-llm-gateway。
-  </div>
-
-  <!-- 4.4 -->
-  <h3>4.4 数据从哪来、怎么进系统（离线）</h3>
-  <pre><code>   数据源                          解析与归一化                     分流
-  ┌──────────────┐   ┌───────────────────────┐   ┌───────────────────────────┐
-  │ 省考试院      │   │  [Python] 采集 / 解析  │   │ 结构化 → PostgreSQL 关系表  │
-  │ 阳光高考      │──►│  ① 抓取(记来源 + 时间) │──►│  admission_score /         │
-  │ 院校官网      │   │  ② HTML/PDF → 文本+表格│   │  score_rank_map / ...      │
-  └──────────────┘   │  ③ 归一化(省/年/科类)  │   └───────────────────────────┘
-                     │  ④ 分流                │   ┌───────────────────────────┐
-                     └───────────┬───────────┘   │ 文本 → 切分 → embedding     │
-                                 │               │  → pgvector ‖ tsvector      │
-                                 │               │  （双写，带 source_uri）     │
-                                 │               └───────────────────────────┘
-                                 └──────────────►  原始文件 → 对象存储（供溯源）</code></pre>
-  <div class="card hl">
-    <div class="title">一句话记住分流规则</div>
-    <strong>分数线、招生计划这类强结构化数据 → 直接进 SQL，不进向量库；</strong>
-    <strong>政策、章程、体检规定这类非结构化文本 → 才走 RAG（切分 + 向量 + 倒排）。</strong><br>
-    这是第 <a href="#s7">7</a> 章的核心决策：数值错一个字就是事故，不能靠「检索」去碰运气。
-  </div>
-
-  <!-- 4.5 -->
-  <h3>4.5 一次「生成志愿方案」的数据流（在线）</h3>
-  <p>下面用<strong>数据视角</strong>重走一遍主链路（步骤细节见第 <a href="#s5">5</a> 章）。注意每一步数据「变成了什么」。</p>
-  <table>
-    <thead><tr><th style="width:28px">#</th><th>在哪发生</th><th>数据进来</th><th>数据出去（变成什么）</th></tr></thead>
-    <tbody>
-      <tr><td>1</td><td>svc-gateway</td><td>用户自然语言</td><td>会话 + trace_id，写 PG</td></tr>
-      <tr><td>2</td><td>Python · INTAKE</td><td>自然语言</td><td><strong>结构化画像 JSON</strong>；<strong>查缺 → 追问(interrupt) → resume 循环</strong>，闸门校验必需字段</td></tr>
-      <tr><td>3</td><td>HITL（svc-gateway 推送）</td><td>画像卡片</td><td>用户确认 / 修正 → ResumeGraph</td></tr>
-      <tr><td>4</td><td>Python · RETRIEVE</td><td>画像 + 查询意图</td><td>分支 A：SQL 得<strong>结构化行</strong>；分支 B：文本 → <strong>向量 chunk</strong>（pgvector ‖ tsvector → RRF → rerank）</td></tr>
-      <tr><td>5</td><td>CHECK_CONDITIONAL / BACKFILL_ASK</td><td>候选的硬性要求</td><td>候选含体检 / 单科 / 语种要求且用户未提供 → <strong>按需追问</strong>（interrupt/resume）→ 回确认</td></tr>
-      <tr><td>6</td><td>Python · STRATEGY</td><td>行 + chunk</td><td><strong>冲 / 稳 / 保候选</strong>（每项带引用）</td></tr>
-      <tr><td>7</td><td>svc-algo · CONSTRAINT</td><td>候选</td><td>过滤非法项（选科 / 单科 / 体检 / 批次不符），保留理由</td></tr>
-      <tr><td>8</td><td>svc-algo · RISK</td><td>候选 + PG 历史</td><td><strong>录取概率 + 依据</strong>（位次换算 + 分位数 / 核密度）</td></tr>
-      <tr><td>9</td><td>Python · CRITIC</td><td>当前方案</td><td>问题清单 →（有问题且未超轮次）回步骤 6</td></tr>
-      <tr><td>10</td><td>svc-algo · OPTIMIZE</td><td>合法候选</td><td><strong>志愿表</strong>（约束满足 + 排序优化）</td></tr>
-      <tr><td>11</td><td>Python · REPORT</td><td>志愿表</td><td>报告（理由 + 出处 + 风险 + 免责）</td></tr>
-      <tr><td>12</td><td>Python + svc-algo · VERIFY</td><td>报告每条事实</td><td>拿对象存储原文比对 → 不一致回 11（未超限）</td></tr>
-      <tr><td>13</td><td>svc-gateway</td><td>最终方案</td><td>落库（方案 / 成本 / 耗时）→ SSE 结束 → 返回</td></tr>
-    </tbody>
-  </table>
-  <div class="card">
-    <div class="title">数据在这一路上「变身」了五次</div>
-    自然语言 → 结构化画像 → 检索证据（行 + chunk）→ 带概率的候选 → 合法志愿表 → 可解释报告。<br>
-    这就是为什么<strong>不能只用 LLM</strong>：每一次「变身」里，数值 / 规则 / 排序都必须由确定性代码接管。
-  </div>
-
-  <!-- 4.6 -->
-  <h3>4.6 状态存在哪：为什么各服务都「无状态」</h3>
-  <ul>
-    <li>LangGraph 每推进一步，就把<strong>状态快照写进 PostgreSQL</strong>（<code>plan_checkpoint</code> 表）。断点续跑、HITL 恢复、时间旅行重放，全靠它。</li>
-    <li>因此 <strong>Python 进程可以随便重启</strong>——「记忆」不在内存，在 PG。</li>
-    <li><code>svc-gateway</code> / <code>svc-llm-gateway</code> / <code>svc-algo</code> 同样只读写 PG 与 Redis，不存本地状态 → <strong>四个服务都能水平扩容</strong>。</li>
-    <li><code>llm_call_log</code> 表：每次 LLM 调用的 token / 成本 / 延迟 → 成本曲线与预算闸门的数据来源。</li>
-  </ul>
-  <div class="card ok">
-    <div class="title">这条设计是面试加分点</div>
-    「把运行态外置到数据库、让应用进程无状态」是生产系统的标准动作，
-    也是你能拿真实压测数据（QPS / P99 / 滚动发布）说话的前提（见第 <a href="#s12">12</a> 章）。
-  </div>
-
-  <!-- 4.7 -->
-  <h3>4.7 决策点：LLM 调用要不要「绕经」Go 网关</h3>
-  <div class="card warn">
-    <div class="title">这是文档里唯一没说死、需要你拍板的地方</div>
-    第 <a href="#s3">3</a> 章把「LLM Gateway（Go）」列为能力层，第 <a href="#s10">10</a> 章的契约又写「role 由 Go 指定，模型路由与成本控制留在 Go」；
-    可 LangGraph 节点跑在 Python 进程里，<strong>节点要调 LLM 时天然是 Python 发起</strong>——于是产生两条路。
-  </div>
-  <table>
-    <thead><tr><th>方案</th><th>调用路径</th><th>优点</th><th>代价</th></tr></thead>
-    <tbody>
-      <tr>
-        <td><strong>A（严格）</strong></td>
-        <td>Python 节点 → gRPC → Go LLM Gateway → 模型</td>
-        <td>Go 全程掌控 role→模型 路由、缓存、预算、记账，最贴合文档叙事</td>
-        <td>多一跳；若不做角色拆分，会形成双向调用、有死锁风险（见 4.9）</td>
-      </tr>
-      <tr>
-        <td><strong>B（简单）</strong></td>
-        <td>Python 节点 → 模型 API（直连）</td>
-        <td>起步最快，少一跳，调试简单</td>
-        <td>路由逻辑分散两边，Go 不完全在调用路径上，只能靠「下发配置 + 读日志表」间接治理</td>
-      </tr>
-    </tbody>
-  </table>
-  <div class="card hl">
-    <div class="title">建议（与 4.9 的关系）</div>
-    <strong>代码结构按方案 A 预留</strong>（三个角色目录已就位），但<strong>运行时调用在 M1–M2 先走方案 B</strong>（Python 直连模型，省一跳、快速验证）。
-    到 M5 工程化阶段，把运行时也收口成 A——让 svc-llm-gateway 真正挡在调用路径上，实现前置成本闸门。<br>
-    <span style="color:var(--muted)">4.9 的 DAG 拆分是终态架构；本节说的是起步阶段的务实妥协。两者不矛盾，只是时间线不同。</span>
-  </div>
-  <div class="card warn">
-    <div class="title">⚠️ 选 A 必须先解决一个副作用（见 4.9）</div>
-    方案 A 天然引入<strong>双向调用</strong>：Go 既在 Python 上游（入口）、又在下游（LLM 网关）→ 形成环路，有死锁风险。<br>
-    本方案的做法是<strong>把 Go 拆成 svc-gateway / svc-llm-gateway / svc-algo 三个角色</strong>，让调用链单向、无环。详见 <strong>4.9 调用拓扑与环路消除</strong>。
-  </div>
-
-  <!-- 4.8 -->
-  <h3>4.8 为什么用两种语言（Go + Python）：论证与面试答法</h3>
-
-  <div class="card hl">
-    <div class="title">这一节回答的问题</div>
-    「为什么用两种语言？只用 Python 不行吗？」——这是面试里 100% 会被问到、也是唯一可能被质疑「过度设计」的地方。下面给出<strong>论证骨架</strong>与<strong>可直接背的话术</strong>。
-  </div>
-
-  <h4>先分清两个问题</h4>
-  <ul>
-    <li><strong>对系统本身</strong>：早期纯 Python 更省事，混合更能上规模——两者都成立。</li>
-    <li><strong>对你个人（7 年 Go）</strong>：纯 Python = 自废武功；混合 = 把唯一的稀缺资产变成护城河。</li>
-  </ul>
-
-  <h4>纯 Python vs 混合</h4>
-  <table>
-    <thead><tr><th>维度</th><th>纯 Python</th><th>混合（Go + Python）</th></tr></thead>
-    <tbody>
-      <tr><td>开发速度</td><td>快，单人首选</td><td>慢一档（要维护 proto / gRPC / 两套 CI）</td></tr>
-      <tr><td>调试</td><td>单语言，简单</td><td>跨语言两跳，麻烦</td></tr>
-      <tr><td>高并发网关 / 限流</td><td>弱（GIL，不如 Go 稳）</td><td>强（Go 主场）</td></tr>
-      <tr><td>成本 / 配额 / 可观测</td><td>能写，但不专业</td><td>强（Go 治理层）</td></tr>
-      <tr><td>差异化叙事</td><td>弱：同质化</td><td>强：「我能把 Agent 做成生产级后端」</td></tr>
-      <tr><td>生态契合度</td><td>最高（全原生）</td><td>略低（需接口隔离）</td></tr>
-      <tr><td>单人维护成本</td><td>低</td><td>高</td></tr>
-    </tbody>
-  </table>
-  <div class="card warn">
-    <div class="title">但混合最大的坑</div>
-    它很容易变成<strong>过度设计</strong>：一上来就 proto + gRPC + 双向调用，会花好几周在脚手架上，而不是在决定系统靠不靠谱的检索质量与评测上。
-    所以「混合更好」有个前提：<strong>纪律</strong>——按 M1–M6 分阶段注入 Go，Go 只放「框架做不到 + 你有优势」的地方（见第 <a href="#s15">15</a> 章）。
-  </div>
-
-  <h4>答法一 · 30 秒版（先背这个）</h4>
-  <blockquote>
-    「因为系统里有两类本质不同的活。<strong>智能那部分</strong>——编排、RAG、推理、评测——我从一开始就放在 Python 的 LangGraph 里，那是这类项目的行业标准，生态也最强。<strong>控制与治理那部分</strong>——网关、并发、限流、成本闸门、可观测，还有位次 / 概率这类领域算法——是长期运行的生产后端，我用 Go。<br>
-    一句话：<strong>Python 把智能做出来，Go 把它做成能上生产的服务。</strong>」
-  </blockquote>
-
-  <h4>答法二 · 2 分钟三层结构</h4>
-  <div class="card">
-    <div class="title">第一层 · 先承认边界（先泄压）</div>
-    「如果这个项目只是做个 RAG demo 或聊天机器人，我会用纯 Python，而且那样更好、更省事。我不会为了显得高级硬上两种语言。」
-  </div>
-  <div class="card">
-    <div class="title">第二层 · 划清两类工作，为什么必须分开</div>
-    <strong>智能侧（Python 唯一合理）</strong>：LangGraph 编排 + 状态 / 检查点 / 断点恢复 / 人工介入；RAG（向量 + 倒排 + RRF + rerank）；推理、评测 → 生态牢牢在 Python。<br>
-    <strong>控制侧（Go 明显更强）</strong>：API 网关 + 流式 + 高并发扇出；限流 / 配额 / 熔断降级；LLM 成本「前置」闸门；跨语言可观测；领域算法（位次换算 / 概率估计 / 规则引擎 / 志愿表优化 / 投档模拟）。<br>
-    「这两类塞进一个 Python 运行时，控制侧会被拖累，智能侧又用不上 Go 的好处。」
-  </div>
-  <div class="card">
-    <div class="title">第三层 · 一句话边界 + 直接回答「为什么纯 Python 不行」</div>
-    「Python 负责智能，Go 负责治理。纯 Python 不是做不出来，而是在三件事上吃亏：
-    ① 网关 / 治理的并发与稳定性；
-    ② 成本、配额、降级这类生产级治理，不是 Python 的强项；
-    ③ 也是最现实的——纯 Python 我会和一大堆只会 Python + LangChain 的候选人撞在一起，<strong>没有区分度</strong>。」
-  </div>
-
-  <h4>杀手锏 · 用数字收尾</h4>
-  <div class="card ok">
-    「为了证明不是拍脑袋，我做了对比：把 LLM 成本闸门前置到 Go 网关后，多轮循环下的单会话成本下降了 <strong>X%</strong>；或者同一压测下，Go 网关 P99 是 <strong>A ms</strong>，Python asyncio 网关是 <strong>B ms</strong>。差别不是『更快』，是『能不能稳定扛住』。」
-    <div style="color:var(--muted);margin-top:6px">⚠️ X / A / B 必须是你<strong>真跑出来</strong>的数字。没测就先别讲——空话会反噬。</div>
-  </div>
-
-  <h4>主动堵住四个追问</h4>
-  <table>
-    <thead><tr><th>追问</th><th>答法</th></tr></thead>
-    <tbody>
-      <tr><td>为什么不干脆全用 Go，把 LangGraph 也重写？</td><td>编排引擎是别人已做到极致的东西，自研要 4–8 周纯投入，还会丢掉 LangGraph 这张岗位入场券（见第 <a href="#s15">15</a> 章）。差异化不该来自「谁跑这张图」，而该来自框架之上的治理与领域算法。</td></tr>
-      <tr><td>为什么不全都用 Python？</td><td>AI 生态确实是 Python 的决定性优势，所以智能侧我全用 Python，没有重造。但治理与算法不是 AI 生态问题，是<strong>后端工程问题</strong>，那里 Go 更合适。</td></tr>
-      <tr><td>两种语言维护成本不高吗？</td><td>边界我刻意收窄成一条：只用一个 <code>.proto</code> 做单一契约，gRPC 隔离，两边都无状态、运行态都在 PG。这不是随意拼，是刻意的架构边界——两边能独立部署、独立测试。</td></tr>
-      <tr><td>你是不是因为只会 Go 才用 Go？</td><td>坦白 + 反打：「我 7 年确实主要是 Go 工程师。但我没有为了用 Go 而用 Go——最核心的编排我故意留在 Python。这套边界换一个只会 Python 的团队一样成立，只是两边比例会变。」</td></tr>
-    </tbody>
-  </table>
-
-  <div class="card hl">
-    <div class="title">如果对方就是不认同「要两种语言」</div>
-    别硬刚，顺势转：「我完全能用纯 Python 单独交付这个系统；Go 那部分是我额外带来的工程能力。如果团队是纯 Python 栈，我不会坚持，但成本治理和领域算法这块的思考照样带得进来。」—— 把「分歧」变成「我多一层能力」。
-  </div>
-  <div class="card warn">
-    <div class="title">总提醒</div>
-    全程别出现「我觉得 Go 更好」这种<strong>偏好式表达</strong>。你要传递的是：<strong>「这是一种职责切分，而且我想过什么时候不该这么切。」</strong>知道什么时候不用两种语言，比坚持用两种语言更能说明水平。
-  </div>
-  <!-- 4.9 -->
-  <h3>4.9 调用拓扑：为什么会成环、如何消除（DAG 化）</h3>
-
-  <div class="card warn">
-    <div class="title">问题：Go 同时在上游和下游</div>
-    如果 Go 既做客户端入口（在 Python 上游）、又做 LLM 网关（在 Python 下游），两端会<strong>同步地互相调用</strong>：
-    <pre style="margin:8px 0"><code>Go 网关 ── 调用 ──► Python 图 ── 回调 ──► Go 的 LLM 网关 ──► 模型
-   ▲                                                          │
-   └────────────────── 同一个 Go 服务 ◄────────────────────────┘</code></pre>
-  </div>
-
-  <h4>会带来什么</h4>
-  <table>
-    <thead><tr><th>问题</th><th>说明</th></tr></thead>
-    <tbody>
-      <tr><td><strong>循环等待 / 池耗尽</strong></td><td>Go 等 Python，Python 等 Go；若两者共用受限的 worker / 连接池 → 谁都等不到对方，低负载没事、上量就炸。</td></tr>
-      <tr><td><strong>循环依赖</strong></td><td>Go 依赖 Python，Python 又依赖 Go → 启动顺序、版本对齐、回滚都变复杂。</td></tr>
-      <tr><td><strong>延迟叠加</strong></td><td>一次 LLM 调用变成往返折返，每一跳都在关键路径上。</td></tr>
-      <tr><td><strong>故障环</strong></td><td>两边的失败域耦合，谁挂都连累对方。</td></tr>
-    </tbody>
-  </table>
-  <div class="card">
-    <div class="title">根因</div>
-    按「语言」切角色，而不是按<strong>调用方向</strong>切 → 同一个 Go 同时站在 Python 的上游和下游 → 必然成环。
-  </div>
-
-  <h4>本方案的解法：拆角色，做成 DAG</h4>
-  <p>把 Go 拆成三个部署角色（可同一份代码）：</p>
-  <table>
-    <thead><tr><th>角色</th><th>位置</th><th>职责</th></tr></thead>
-    <tbody>
-      <tr><td><code>svc-gateway</code></td><td>Python 的<strong>上游</strong></td><td>客户端入口：HTTP/SSE、鉴权、限流、会话、HITL 门控</td></tr>
-      <tr><td><code>svc-llm-gateway</code></td><td>Python 的<strong>下游</strong></td><td>LLM 网关、成本 / 预算（持有 key）</td></tr>
-      <tr><td><code>svc-algo</code></td><td>Python 的<strong>下游</strong></td><td>领域算法</td></tr>
-    </tbody>
-  </table>
-  <p>调用链变成单向链：<code>客户端 → svc-gateway → svc-orchestrator → { svc-llm-gateway, svc-algo } → 模型 / DB</code>，<strong>环消失</strong>（见 4.3 的调用图）。</p>
-  <div class="card hl">
-    <div class="title">关键约束</div>
-    <strong>两个下游（svc-llm-gateway / svc-algo）都不能回调 svc-orchestrator。</strong>因此云端 LLM 由 svc-llm-gateway <strong>直连模型 API</strong>（而不是「再转发给 Python 去执行」）。
-    本地模型（Embedding / Rerank）反过来留在 svc-orchestrator 内部、不经过 svc-llm-gateway——这样下游都不回调上游，DAG 才成立。
-  </div>
-
-  <h4>三种解法对照（本方案选 A）</h4>
-  <table>
-    <thead><tr><th>解法</th><th>做法</th><th>结果</th></tr></thead>
-    <tbody>
-      <tr><td><strong>A（已采用）</strong></td><td>拆 Go 为 gateway / llm-gateway / algo 三角色 → 单向 DAG</td><td>✅ 无环 + 保住 Go 前置治理；代价：多一些部署角色</td></tr>
-      <tr><td>B</td><td>去掉反向调用：Python 直连模型，Go 靠「下发配置 + 读 <code>llm_call_log</code>」间接治理</td><td>✅ 无环、最省事；代价：不能「调用前」硬拦截（适合 M1–M2 起步）</td></tr>
-      <tr><td>C</td><td>接受双向，但加护栏（独立连接池 / 超时背压 / 幂等）</td><td>⚠️ 能跑但不优雅；必须能讲清为什么</td></tr>
-    </tbody>
-  </table>
-
-  <div class="card ok">
-    <div class="title">面试点</div>
-    「我最初的实现里 Go 既在 Python 上游（入口）又在下游（LLM 网关），<strong>同步双向会形成循环等待、有池耗尽死锁风险</strong>。所以我把它拆成 <code>gateway</code>、<code>llm-gateway</code>、<code>algo</code> 三个角色，让整个调用拓扑变成单向的 <strong>DAG</strong>。」
-    —— 这一句把你从「会写代码」拉到「懂分布式调用拓扑」。
-  </div>
-
-  <div class="card">
-    <div class="title">本章一句话（可直接用于面试）</div>
-    「<strong>Go 是控制平面（control plane），Python 是智能平面（intelligence plane）</strong>，
-    两者用 gRPC 解耦，运行态集中在 PostgreSQL，所以两边都是无状态的、可水平扩容的。」
-  </div>
-</section>
-
-<!-- ===== 5 ===== -->
-<section id="s5">
-  <h2><span class="num">5</span>请求全链路时序（以「生成志愿方案」为例）</h2>
-  <p><span class="who go">Go</span> 侧动作分属三个角色：入口 / 会话 / HITL / 循环闸门 → <code>svc-gateway</code>；LLM 治理 → <code>svc-llm-gateway</code>；领域算法 → <code>svc-algo</code>（见 4.3 / 4.9）。</p>
-  <ol class="steps">
-    <li><strong>客户端发起</strong><span class="who go">Go</span> POST <code>/v1/plans</code> + SSE 订阅；带 <code>Idempotency-Key</code>，网关鉴权、限流、生成 <code>trace_id</code>。</li>
-    <li><strong>建会话</strong><span class="who go">Go</span> Session 服务创建 <code>session_id</code>，写入初始输入；LangGraph 图启动，落第一个检查点。</li>
-    <li><strong>交互采集（INTAKE 子图）</strong><span class="who llm">LLM</span><span class="who hitl">HITL</span> ProfileAgent 经 <code>svc-llm-gateway</code> 调云模型，把自然语言解析成<strong>结构化画像</strong>（JSON Schema 约束）；随后<strong>确定性校验函数查缺</strong> → 缺必要项就<strong>追问</strong>（<code>interrupt</code> + SSE 推送）→ 用户答完 <code>resume</code> → 再查缺……<strong>循环直到「全局必需」齐全</strong>（或到轮次上限 / 用户声明「不确定」）。</li>
-    <li><strong>位次兜底</strong><span class="who algo">Algo</span> 若用户只给分数，RankConverter 按省份+年份查「一分一段表」换算位次。</li>
-    <li><strong>暂停确认</strong><span class="who hitl">HITL</span> 引擎进入 <code>PROFILE_CONFIRM</code>，SSE 推送画像卡片；用户修正后恢复，检查点续跑。</li>
-    <li><strong>并行检索</strong><span class="who py">Python</span> RetrieveAgent 发 gRPC：
-      <br>· 分支 A（结构化）：SQL 精确查询历年分数线 / 招生计划 / 选科要求
-      <br>· 分支 B（非结构化）：向量 + 倒排双路检索政策/招生章程，元数据过滤（省份/年份/科类）
-      <br>· RRF 融合 → Rerank → 返回带 <code>source_uri</code> 的 chunk</li>
-    <li><strong>条件补问</strong><span class="who go">svc-gateway</span><span class="who hitl">HITL</span> <code>CHECK_CONDITIONAL</code> 检查候选是否含「体检 / 单科 / 语种」要求且用户尚未提供 → 若有，走 <code>BACKFILL_ASK</code> 追问（<code>interrupt/resume</code>），答完回 <code>PROFILE_CONFIRM</code>；否则继续。</li>
-    <li><strong>生成方案</strong><span class="who llm">LLM</span> StrategyAgent 基于检索结果生成冲/稳/保候选列表，每项携带证据引用 <code>[]</code>。</li>
-    <li><strong>硬约束校验</strong><span class="who algo">Algo</span> ConstraintChecker 用规则引擎过滤：选科不符、单科不达标、体检受限、批次错配 → 剔除并记录原因。</li>
-    <li><strong>风险量化</strong><span class="who algo">Algo</span> ProbEstimator 用历史录取位次分布估计录取概率（分位数/核密度），输出概率与人话解释（解释由 LLM 写，数值由算法给）。</li>
-    <li><strong>方案挑战</strong><span class="who llm">LLM</span> CriticAgent 审查：梯度是否合理？有无冲突？有无遗漏限制？返回问题清单。</li>
-    <li><strong>循环闸门</strong><span class="who go">svc-gateway</span> 若有问题且 <code>loop &lt; N</code> → 回到步骤 8（生成方案，携带 Critic 意见）；否则继续。</li>
-    <li><strong>志愿表优化</strong><span class="who algo">Algo</span> WishlistOptimizer 在平行志愿规则下做约束满足 + 排序优化（冲稳保配比、梯度平滑、避免同位次扎堆）。</li>
-    <li><strong>生成报告</strong><span class="who llm">LLM</span> ReportAgent 输出方案说明 + 每项理由 + 数据出处 + 风险提示 + 免责声明。</li>
-    <li><strong>幻觉校验</strong><span class="who go">svc-algo</span><span class="who llm">LLM</span> Verifier 对每条事实性陈述检索原文比对：不一致则打回步骤 14（<code>retry &lt; M</code>），一致则通过。</li>
-    <li><strong>落库与返回</strong><span class="who go">Go</span> 写结果、成本、耗时；关闭 SSE，返回最终结构化方案。</li>
-  </ol>
-  <div class="card ok">
-    <div class="title">这条链路里，真正的难点在哪里</div>
-    不是「调 LLM」，而是：<strong>检索路由的正确性</strong>（什么时候该查 SQL、什么时候该 RAG）、
-    <strong>两个循环的收敛</strong>（Critic 循环 + Verify 循环必须有上限且能收敛）、
-    <strong>检查点与恢复</strong>（HITL 暂停后能精确续跑）、<strong>成本闸门</strong>（多轮循环下 token 会放大）。
-  </div>
-</section>
-
-<!-- ===== 6 ===== -->
-<section id="s6">
-  <h2><span class="num">6</span>多 Agent 编排图（LangGraph 实现）</h2>
-  <p>下图是 Agent 图的结构：它由 <strong>LangGraph</strong> 承载与持久化，Go 侧补充护栏与门控。末尾的能力归属表说明每个能力由谁提供；要不要自研的完整论证见<a href="#s15">第 15 章</a>。</p>
-  <pre><code>                    ┌──────────┐
-                    │   INIT   │  创建会话 / 载入输入
-                    └────┬─────┘
-                         ▼
-        ┌──────────────────────────────────────────┐
-        │  INTAKE（子图：交互采集 + 确定性闸门）      │
-        │   解析 → 查缺(校验函数) → 追问(interrupt)  │
-        │     ▲                          │           │
-        │     └──────── resume ◄─────────┘           │
-        │   循环直到「全局必需」齐全                    │
-        │   （或到轮次上限 / 用户声明"不确定"）         │
-        └───────────────────┬──────────────────────┘
-                            ▼
-                  ┌────────────────────┐
-                  │  PROFILE_CONFIRM   │  ⏸ HITL 中断，等用户确认
-                  └─────────┬──────────┘
-                            ▼
-                  ┌────────────────────┐
-                  │     RETRIEVING     │  SQL ‖ RAG → RRF → Rerank
-                  └─────────┬──────────┘
-                            ▼
-                  ┌────────────────────┐  候选含「体检/单科/语种」
-                  │ CHECK_CONDITIONAL  │  要求 且用户尚未提供？
-                  └───┬────────────┬───┘
-              有      │            │  无
-                      ▼            │
-        ┌────────────────────┐     │
-        │   BACKFILL_ASK     │     │  ⏸ 按候选追问「条件必需」项
-        └─────────┬──────────┘     │  （答完 → 回 PROFILE_CONFIRM）
-                  └────────────────┤
-                                   ▼
-                  ┌────────────────────┐
-                  │   STRATEGIZING     │  LLM → 冲/稳/保候选 ◄────────┐
-                └─────────┬──────────┘                              │
-                          ▼                                         │
-                ┌────────────────────┐                              │
-                │   CONSTRAINING     │  规则引擎过滤（确定性）       │
-                └─────────┬──────────┘                              │
-                          ▼                                         │
-                ┌────────────────────┐                              │
-                │  RISK_ASSESSING    │  位次换算 + 概率估计          │
-                └─────────┬──────────┘                              │
-                          ▼                                         │
-                ┌────────────────────┐  有问题 且 loop &lt; N            │
-                │    CRITIQUING      │──────────────────────────────┘
-                └─────────┬──────────┘
-                          ▼ 通过
-                ┌────────────────────┐
-                │    OPTIMIZING      │  志愿表约束满足 + 排序优化
-                └─────────┬──────────┘
-                          ▼
-                ┌────────────────────┐  幻觉 且 retry &lt; M
-                │     REPORTING      │◄─────────────┐
-                └─────────┬──────────┘              │
-                          ▼                         │
-                ┌────────────────────┐              │
-                │     VERIFYING      │──────────────┘
-                └─────────┬──────────┘
-                          ▼ 通过
-                    ┌──────────┐
-                    │   DONE   │
-                    └──────────┘
-
-  任意节点异常 → 按策略重试 → 仍失败则进入 DEGRADED / FAILED（见第 15 章）</code></pre>
-
-  <h3>这张图怎么落地：能力归属表</h3>
-  <table>
-    <thead><tr><th>能力</th><th>由谁提供</th><th>设计要点</th></tr></thead>
-    <tbody>
-      <tr><td>节点定义</td><td><span class="who py">LangGraph</span></td><td>节点 = <code>Name / 输入输出 Schema / Handler</code>；重试与超时用节点级策略声明</td></tr>
-      <tr><td>条件边</td><td><span class="who py">LangGraph</span></td><td>边由纯函数决定下一节点，函数可单测，不把路由写进 LLM</td></tr>
-      <tr><td>循环护栏</td><td><span class="who go">Go</span></td><td><code>Critic</code> 与 <code>Verify</code> 的最大轮次在 Go 侧裁决，带「无进展」检测，防死循环与 token 爆炸</td></tr>
-      <tr><td>检查点与恢复</td><td><span class="who py">LangGraph</span></td><td>Postgres saver 每步落盘，<code>resume(session_id)</code> 断点续跑；Go 侧只提供查询与触发接口</td></tr>
-      <tr><td>人工介入</td><td><span class="who py">LangGraph</span> + <span class="who go">Go</span></td><td>图上用 interrupt 暂停；Go 负责 SSE 推送、用户确认回执与恢复触发</td></tr>
-      <tr><td>并发</td><td><span class="who py">LangGraph</span> + <span class="who go">Go</span></td><td>图内并行分支由框架调度；跨服务扇出（多院校概率并行）用 Go 的 errgroup + 上下文取消</td></tr>
-      <tr><td>幂等</td><td><span class="who go">Go</span></td><td>节点粒度幂等键，重试不产生重复副作用（写库、外部调用）</td></tr>
-      <tr><td>成本闸门</td><td><span class="who go">Go</span></td><td>Budget Guard 在每次 LLM 调用前裁决，超预算截断循环并降级</td></tr>
-      <tr><td>可观测</td><td><span class="who go">Go</span> + <span class="who py">Python</span></td><td>trace_id 贯穿；图内 span 由框架产出，跨语言 span 由 OTel 合并</td></tr>
-    </tbody>
-  </table>
-  <div class="card hl">
-    <div class="title">为什么这张表重要</div>
-    左列是「图里需要哪些能力」，中列是「谁来提供」。<strong>把 LangGraph 已覆盖的部分交出去，把 Go 补位的部分（护栏、幂等、成本、跨服务扇出）自己写好</strong>——这就是「会用框架」和「能驾驭框架」的区别。
-  </div>
-
-  <h3>Intake 交互采集子图：画像 Schema 与两阶段采集</h3>
-
-  <div class="card hl">
-    <div class="title">一句话</div>
-    第一步既不是「让用户填表单」，也不是「开放聊天」，而是<strong>「Schema 驱动 + 确定性闸门 + 有限轮次」的交互采集</strong>。
-    这正是第 <a href="#s2">2</a> 章那条论点的落点：传统工具假设用户知道自己要什么，而现实是用户是模糊的——采集阶段就是「把模糊的人问清楚」。
-  </div>
-
-  <h4>为什么要分两类字段（以及两阶段采集）</h4>
-  <p>如果一上来就要求用户填「体检情况」，就正好犯了第 <a href="#s2">2</a> 章说的毛病——逼用户填他自己都不知道要不要填的字段。所以分两段：</p>
-  <ul>
-    <li><strong>第 1 段（全局必需）</strong>：只问必答的几项，拿到就往下走，去检索候选。</li>
-    <li><strong>第 2 段（条件必需，按需补问）</strong>：拿到候选后，只有当候选里<strong>确实有</strong>「体检 / 单科 / 语种」要求、且用户还没提供时，才追问那几项（即 <code>CHECK_CONDITIONAL → BACKFILL_ASK</code>）。</li>
-  </ul>
-
-  <h4>画像 Schema（闸门据此判断「够没够」）</h4>
-  <table>
-    <thead><tr><th>类别</th><th>字段</th><th>说明</th></tr></thead>
-    <tbody>
-      <tr><td><strong>全局必需</strong></td><td>省份 / 年份 / 科类 / <strong>分数 或 位次（至少一个）</strong> / 选科组合</td><td>缺任一项都不能往下走</td></tr>
-      <tr><td><strong>条件必需</strong></td><td>体检（色觉 / 视力）、单科成绩、外语语种、性别、往届应届、户籍 / 学籍（专项计划）</td><td>只对「目标候选确实有该要求」时才需要</td></tr>
-      <tr><td><strong>可推导（不必问）</strong></td><td>位次（分数 + 省 + 年 + 科类查一分一段表）、批次控制线</td><td>由算法算出，少问用户</td></tr>
-      <tr><td><strong>可选偏好</strong></td><td>地域 / 预算（学费）/ 专业兴趣 / 冲稳保倾向</td><td>缺失不阻断，只影响排序与解释</td></tr>
-    </tbody>
-  </table>
-
-  <div class="card warn">
-    <div class="title">闸门必须确定性（关键）</div>
-    「信息够不够往下走」由<strong>一个校验函数</strong>判断（必需字段齐 + 合法），<strong>不许让 LLM 当闸门</strong>——否则不稳定、不可测。
-    追问的<strong>话术</strong>可以由 LLM 生成（自然、口语化），但<strong>问什么、够没够</strong>由 Schema + 校验函数决定。
-  </div>
-
-  <h4>为什么这些必须收——它们喂的是约束层</h4>
-  <div class="card">
-    体检 / 单科 / 语种 / 性别不是「锦上添花的画像」，而是<strong>约束层（第 <a href="#s8">8</a> 章 ConstraintChecker）的硬输入</strong>。
-    采集缺一项，约束层就可能放行一个<strong>本该被剔除的非法志愿</strong>——直接是事故。这就是闸门不能松的原因。
-  </div>
-
-  <h4>三个反模式（要避开）</h4>
-  <ol style="margin:6px 0">
-    <li><strong>做成「一张大表单」</strong> → 退回传统填报工具，没发挥 AI 价值。</li>
-    <li><strong>无限追问</strong> → 必须有轮次上限 + 「不确定 / 跳过」出口（记录为低置信）。</li>
-    <li><strong>让 LLM 判断「信息够不够」</strong> → 闸门必须确定性。</li>
-  </ol>
-
-  <div class="card ok">
-    <div class="title">面试点</div>
-    「第一步我做成一个<strong>带确定性闸门的交互采集子图</strong>：Schema 定义必需字段，校验函数决定『够没够』，追问走 interrupt/resume。
-    而且分两段——先收全局必需，等拿到候选后，<strong>只对候选真正有要求的『体检/单科/语种』按需补问</strong>，避免一上来把用户问死。」
-  </div>
-
-  <h3>6.2 HITL 会话生命周期与超时管理</h3>
-  <div class="card warn">
-    <div class="title">必须回答的问题：用户不回来了怎么办？</div>
-    interrupt 暂停后，检查点和会话资源不能无限保留。必须有明确的生命周期管理，否则会造成存储泄漏和数据时效性问题。
-  </div>
-
-  <h4>会话状态机</h4>
-  <table>
-    <thead><tr><th>状态</th><th>含义</th><th>超时 / 过期</th></tr></thead>
-    <tbody>
-      <tr><td><code>ACTIVE</code></td><td>图正在执行中</td><td>单步超时 30s（LLM 调用）；整图超时 10min</td></tr>
-      <tr><td><code>WAITING_HITL</code></td><td>interrupt 暂停，等用户确认</td><td><strong>保留 30 分钟</strong>；超时后状态仍保留但标记为 <code>EXPIRED</code></td></tr>
-      <tr><td><code>EXPIRED</code></td><td>用户超时未响应</td><td>检查点保留 7 天供恢复；用户重新发起则创建新会话</td></tr>
-      <tr><td><code>COMPLETED</code></td><td>正常结束</td><td>结果永久保留；检查点 30 天后归档</td></tr>
-      <tr><td><code>FAILED</code></td><td>不可恢复错误</td><td>检查点保留 7 天供排查</td></tr>
-    </tbody>
-  </table>
-
-  <h4>恢复时的数据时效性校验</h4>
-  <p>用户 resume 时，如果距 interrupt 已超过 <strong>1 小时</strong>，必须重新校验：</p>
-  <ul>
-    <li>检索到的政策/章程是否仍在生效年份内（跨年场景）</li>
-    <li>招生计划数据是否有更新（每年 6 月密集更新）</li>
-    <li>若数据已过期 → 自动重新检索，不直接使用旧结果</li>
-  </ul>
-
-  <div class="card hl">
-    <div class="title">实现要点</div>
-    <ul style="margin:6px 0">
-      <li><strong>定时清理</strong>：Redis key 过期 + PG 定时任务清理过期检查点</li>
-      <li><strong>SSE 心跳</strong>：每 15s 发心跳，前端据此判断连接状态；断连后前端提示「点击重连」</li>
-      <li><strong>恢复入口</strong>：<code>POST /v1/plans/{session_id}/resume</code>，网关检查会话状态后决定是否允许恢复</li>
-      <li><strong>幂等保护</strong>：同一 session_id 的 resume 请求去重，防止用户多次点击导致图重复推进</li>
-    </ul>
-  </div>
-</section>
-
-<!-- ===== 7 ===== -->
-<section id="s7">
-  <h2><span class="num">7</span>RAG 管线（离线 + 在线）</h2>
-
-  <h3>7.1 关键决策：结构化 vs 非结构化分流</h3>
-  <div class="card warn">
-    <div class="title">这是本系统最重要的一个设计决策</div>
-    <strong>分数线、招生计划、选科要求这类强结构化数据，绝不用 RAG 去「检索」——直接走 SQL 精确查询。</strong><br>
-    RAG 只用于政策文件、招生章程、体检规定这类非结构化文本。<br><br>
-    原因：RAG 对精确数值（如「2025 年某校某专业最低位次 12345」）的召回与保真不可靠，
-    而这类数据错一个字就是事故。用 SQL 拿数值、用 RAG 拿规则语义，各司其职。
-  </div>
-
-  <h3>7.2 离线索引管线</h3>
-  <div class="diagram">
-    <div class="row">
-      <div class="box py"><b>① 采集</b><span>考试院/阳光高考/院校官网；记录来源与抓取时间</span></div>
-      <div class="box py"><b>② 解析</b><span>HTML/PDF → 文本 + 表格；表格还原结构</span></div>
-      <div class="box py"><b>③ 归一化</b><span>省份/年份/科类/批次/专业代码统一编码</span></div>
-      <div class="box py"><b>④ 分流</b><span>结构化 → 关系表；文本 → 文档块</span></div>
-      <div class="box py"><b>⑤ 切分</b><span>政策按条款语义切分，带标题路径</span></div>
-      <div class="box py"><b>⑥ 元数据抽取</b><span>省份/年份/科类/文种/生效范围</span></div>
-      <div class="box py"><b>⑦ 双写</b><span>PG 表 + pgvector + tsvector 倒排</span></div>
-      <div class="box py"><b>⑧ 质检</b><span>抽样人工校验 + 覆盖率报告</span></div>
-    </div>
-  </div>
-  <div class="card">
-    <div class="title">切分策略（chunk）</div>
-    <ul style="margin:6px 0">
-      <li><strong>结构化数据</strong>：不切分，一个实体一行，字段即结构。检索走 SQL。</li>
-      <li><strong>政策/章程</strong>：按「条款」切分，保留<b>父级标题路径</b>（如「第三章 录取规则 &gt; 3.2 平行志愿」），块大小 300–600 字，重叠 15%。</li>
-      <li><strong>表格类</strong>：转成 KV 文本 + 保留原表引用，且提供 <code>table_id</code> 供回溯。</li>
-      <li>每块写入 <code>source_uri + 抓取时间 + 生效年份</code>，供引用溯源与时效判断。</li>
-    </ul>
-  </div>
-
-  <h3>7.2.1 数据采集质检（ETL QA）</h3>
-  <div class="card danger">
-    <div class="title">⚠️ 数据错了，整个系统都白搭</div>
-    爬来的数据如果有误（OCR 识别错、网站改版解析失败、人工录入错误），下游所有计算和推荐都会出错。
-    必须在入库前建立质检防线。
-  </div>
-
-  <h4>四层质检防线</h4>
-  <table>
-    <thead><tr><th>层级</th><th>检查内容</th><th>触发时机</th><th>失败处理</th></tr></thead>
-    <tbody>
-      <tr>
-        <td><strong>L1 · 格式校验</strong></td>
-        <td>必填字段非空、数值类型正确、枚举值合法（省份/科类/批次编码）</td>
-        <td>解析完成后立即</td>
-        <td>拒绝入库，记录到 <code>etl_error_log</code>，告警通知</td>
-      </tr>
-      <tr>
-        <td><strong>L2 · 范围校验</strong></td>
-        <td>分数 0~750、位次 1~总人数、招生计划 ≥ 0、录取线 ≥ 批次线</td>
-        <td>L1 通过后</td>
-        <td>拒绝入库，标记为「待人工复核」</td>
-      </tr>
-      <tr>
-        <td><strong>L3 · 趋势校验</strong></td>
-        <td>同校同专业录取位次年际波动 &lt; 30%；招生计划突变 &gt; 50% 标记告警</td>
-        <td>L2 通过后，与历史数据对比</td>
-        <td>允许入库但标记 <code>needs_review</code>，在推荐时降低置信度</td>
-      </tr>
-      <tr>
-        <td><strong>L4 · 抽样人工复核</strong></td>
-        <td>每批次随机抽 5% 数据，人工比对原始文件</td>
-        <td>每轮 ETL 完成后</td>
-        <td>错误率 &gt; 1% → 整批打回重做</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <h4>异常检测规则（举例）</h4>
-  <pre><code># 数值合理性
-assert 0 &lt;= admission_score &lt;= 750
-assert 0 &lt; min_rank &lt;= total_candidates
-assert plan_count &gt;= 0
-
-# 趋势合理性（与上年对比）
-if abs(this_year_rank - last_year_rank) / last_year_rank &gt; 0.3:
-    flag("位次异常波动", college_id, major_id, year)
-
-# 逻辑一致性
-assert admission_score &gt;= batch_cutoff  # 录取线不应低于批次线
-assert major.subject_req is subset of track.allowed_subjects  # 选科要求合法</code></pre>
-
-  <div class="card ok">
-    <div class="title">实现要点</div>
-    <ul style="margin:6px 0">
-      <li><strong>ETL 管线用 Python 脚本</strong>（pandas + 自定义校验器），独立于在线服务</li>
-      <li><strong>每轮 ETL 生成质检报告</strong>（JSON），记录通过率、异常条目、处理结果</li>
-      <li><strong>告警通道</strong>：错误日志写 PG + 可选推送（邮件/企业微信）</li>
-      <li><strong>数据版本管理</strong>：每次 ETL 记录 <code>etl_run_id</code>，可回溯到具体哪一轮入库</li>
-    </ul>
-  </div>
-
-  <h3>7.3 在线检索链路</h3>
-  <pre><code>query
-  │
-  ├─ ① Query 理解/改写      LLM 抽取意图 + 过滤条件（省份/年份/科类/院校/专业）
-  │
-  ├─ ② 路由决策             需要精确数值？→ SQL 路径
-  │                        需要规则/政策语义？→ RAG 路径
-  │                        两者都要 → 并行
-  │
-  ├─ ③ 并行执行
-  │      SQL 路径      参数化查询（无 LLM 介入，防注入）
-  │      RAG 路径      向量检索(pgvector) ‖ 倒排检索(tsvector)
-  │                     + 元数据硬过滤(WHERE 省份/年份/科类)
-  │
-  ├─ ④ 融合             RRF（倒数排名融合）合并两路 RAG 结果
-  │
-  ├─ ⑤ 重排             Rerank（cross-encoder）取 Top-K
-  │
-  ├─ ⑥ 上下文组装       去重 + 按证据分组 + 注入引用编号 [1][2]
-  │                     （携带 source_uri / 年份，供 Verifier 比对）
-  │
-  └─ ⑦ 返回             chunks[] + 结构化结果 + 证据元信息</code></pre>
-
-  <div class="card ok">
-    <div class="title">检索质量怎么保证</div>
-    <ul style="margin:6px 0">
-      <li><strong>硬过滤优先</strong>：省份/年份/科类必须作为 filter 而非排序因素，否则会召回过期数据。</li>
-      <li><strong>时效加权</strong>：同年份优先；政策类文档按生效年份排序。</li>
-      <li><strong>可评测</strong>：建 golden query set（100–200 条），测 <code>recall@k</code>、<code>MRR</code>、<code>citation accuracy</code>。</li>
-      <li><strong>防注入</strong>：RAG 文档内容视为<strong>数据</strong>而非指令，上下文里显式分隔，禁止文档内的指令生效。</li>
-    </ul>
-  </div>
-
-  <h3>7.4 技术选型：为什么自建检索层（LlamaIndex / LangChain 的定位在哪）</h3>
-
-  <div class="card hl">
-    <div class="title">结论</div>
-    <strong>编排归 LangGraph，检索自建薄层压在 pgvector / tsvector 上。</strong><br>
-    LlamaIndex（以及 LangChain 的 retrieval 层）<strong>不是必需</strong>；要留，就只留在「离线解析 / 快速基线」当工具，<strong>别让它当 RAG 主干</strong>。
-  </div>
-
-  <table>
-    <thead><tr><th>框架能给的</th><th>本架构真正要的</th></tr></thead>
-    <tbody>
-      <tr><td>快速把一堆文档变可检索</td><td>结构化（SQL）/ 非结构化（RAG）分流</td></tr>
-      <tr><td>现成的 Index / Retriever / QueryEngine</td><td>可控 hybrid：pgvector ‖ tsvector → RRF → rerank</td></tr>
-      <tr><td>大量向量库集成</td><td>每条结果带 <code>source_uri</code>，供 Verifier 逐条比对</td></tr>
-      <tr><td>Reader / NodeParser 等摄取零件</td><td>自定切分（按条款 + 标题路径，300–600 字，重叠 15%）</td></tr>
-      <tr><td>Response synthesis 自动合成</td><td>强制引用 + 幻觉校验（不许框架「顺手帮你写一段」）</td></tr>
-      <tr><td>框架自带的 RAG 管线</td><td>检索是被编排层调用的<b>能力</b>，不是框架的<b>地盘</b></td></tr>
-    </tbody>
-  </table>
-
-  <div class="card warn">
-    <div class="title">把它当主干，会在四个地方别扭</div>
-    <ol style="margin:6px 0">
-      <li><strong>SQL / RAG 分流被它挡着</strong>：本项目的核心决策是「数值走 SQL、语义走 RAG」，而框架的模型是「文本检索」——把分数线塞进去检索，是它最不该干、也最不擅长的活。</li>
-      <li><strong>引用与幻觉控制要「露出来」</strong>：每条结论必须带出处、还要 Verifier 拿原文比对；用自动合成，citation 控不精细，最后还得拆开重写。</li>
-      <li><strong>切分本来就要自己写</strong>：按「第 X 条 + 标题路径」切是定制逻辑，默认 splitter 做不到，你反正要写——那用它这层就意义不大。</li>
-      <li><strong>会多出重叠的编排层</strong>：编排已用 LangGraph（见第 <a href="#s6">6</a> 章）；再叠一个框架的 Workflow / QueryEngine，面试官必问「为什么两层、边界在哪」。</li>
-    </ol>
-  </div>
-
-  <h4>建议栈</h4>
-  <table>
-    <thead><tr><th>环节</th><th>选型</th><th>说明</th></tr></thead>
-    <tbody>
-      <tr><td>编排</td><td>LangGraph（Python）</td><td>图 / 状态 / 检查点 / HITL，见第 <a href="#s6">6</a> 章</td></tr>
-      <tr><td>向量检索</td><td><code>pgvector</code></td><td>与主库同实例、同事务</td></tr>
-      <tr><td>全文倒排</td><td><code>tsvector</code></td><td>与向量同库，一次连接跑两路</td></tr>
-      <tr><td>融合</td><td>自实现 RRF</td><td>几十行代码，完全可控</td></tr>
-      <tr><td>重排</td><td>cross-encoder（如 bge-reranker）</td><td>直接调，或走 sentence-transformers</td></tr>
-      <tr><td>嵌入</td><td>sentence-transformers（<code>bge-large-zh-v1.5</code>）</td><td>现有仓库已用，保留</td></tr>
-      <tr><td>解析 / 入库</td><td>pdfplumber / BeautifulSoup（或借框架的 Reader 当工具）</td><td>用完即弃，不进核心路径</td></tr>
-    </tbody>
-  </table>
-  <div class="card">
-    <div class="title">为什么</div>
-    控制权全在自己手里、每一步都能解释——这正是第 <a href="#s15">15</a> 章「护城河优先级」第 1、2 位（检索质量、验证器）要的东西。
-  </div>
-
-  <h4>它适合放哪（能用，但只当零件）</h4>
-  <ul>
-    <li><strong>离线解析</strong>：PDF / HTML 读取可以用现成 Reader 省事，用完即弃。</li>
-    <li><strong>快速基线</strong>：想两天内先跑通一个「能查」的原型、验证数据质量，可以用它。</li>
-    <li><strong>零件级复用</strong>：Embedding / Reranker 封装可参考，但直接调 sentence-transformers 同样简单。</li>
-  </ul>
-  <div class="card hl">
-    <div class="title">原则</div>
-    <strong>用它的「零件」，不用它的「引擎」。</strong>
-  </div>
-
-  <h4>与本项目现状的关系</h4>
-  <p>现有 <code>GaokaoCompass</code> 仓库用的是 <strong>LlamaIndex + ChromaDB + bge-large-zh-v1.5</strong>。把它定位为 <strong>bootstrap（引导原型），不是终态</strong>：</p>
-  <ul>
-    <li>现在这套跑通、验证数据没问题，价值很高，先别拆。</li>
-    <li>到 M1 做 RetrievalService 时，逐步把「检索 + 合成」换成 pgvector / tsvector 自建层；框架若还留，只留在离线解析那段。</li>
-    <li>要能讲清「为什么从 Chroma 迁到 pgvector」：因为要 <strong>SQL 与向量同库</strong>（一个事务、一次运维）、要 hybrid + 自控 RRF、要元数据硬过滤。</li>
-  </ul>
-
-  <div class="card warn">
-    <div class="title">什么时候可以放心继续用它</div>
-    ① 只想快速出 demo、不追检索指标；② 数据是纯文本单一来源、不需要 SQL / RAG 分流；③ 不打算自己写 RRF / rerank / verifier。<br>
-    —— 本项目三条都不命中。
-  </div>
-
-  <div class="card">
-    <div class="title">面试备答</div>
-    <strong>Q：你的 RAG 用了什么框架？</strong><br>
-    「摄取解析我用了现成库省事，但<strong>检索主链是自己写的</strong>：pgvector 做向量、tsvector 做全文，RRF 融合后过 cross-encoder 重排，每条结果带 <code>source_uri</code> 供验证器比对。
-    我没直接上框架的 QueryEngine，因为我的架构是『数值走 SQL、语义走 RAG』，而且要求强制引用——框架的自动合成会把这些控制点藏起来，我需要它们露在外面。」
-  </div>
-
-  <!-- 7.5 -->
-  <h3>7.5 存储选型：为什么 pgvector 够用（附中文全文检索的坑）</h3>
-
-  <div class="card hl">
-    <div class="title">结论</div>
-    <strong>目标架构里 ChromaDB 退役，PostgreSQL 一个库扛三件事</strong>（结构化 + pgvector 向量 + tsvector 全文）。<br>
-    而且在这个项目里 <strong>DB 不是瓶颈，LLM 才是</strong>——DB 毫秒级，LLM 秒级，差两三个数量级。
-  </div>
-
-  <h4>为什么 PostgreSQL 一个库就够</h4>
-  <p>PG 把三件事合并了：结构化数据（分数线 / 招生计划 / 一分一段）走关系表；向量检索走 <code>pgvector</code>；全文倒排走 <code>tsvector</code> + GIN。三个收益恰好都踩在本架构上：</p>
-  <ol style="margin:6px 0">
-    <li><strong>SQL 与向量同库</strong>：一个事务、一次连接、一套备份运维。</li>
-    <li><strong>元数据硬过滤能 JOIN 结构化表</strong>：Chroma 只能按 metadata 过滤；PG 可直接 <code>WHERE 省份=? AND 年份=?</code>，甚至和录取线表 JOIN。这正是本架构「硬过滤优先」的落法。</li>
-    <li><strong>hybrid 天然可行</strong>：pgvector 与 tsvector 同引擎，RRF 融合前两路结果都在库里，少一个系统。</li>
-  </ol>
-  <table>
-    <thead><tr><th>维度</th><th>ChromaDB</th><th>PostgreSQL（pgvector + tsvector）</th></tr></thead>
-    <tbody>
-      <tr><td>原型速度</td><td>极快、零运维</td><td>要起库 / 建表，稍慢</td></tr>
-      <tr><td>结构化 + 向量同库</td><td>❌ 割裂</td><td>✅ 同库同事务，可 JOIN</td></tr>
-      <tr><td>全文 / BM25</td><td>❌ 无原生</td><td>✅ tsvector + GIN</td></tr>
-      <tr><td>元数据过滤</td><td>基本</td><td>强（SQL WHERE / JOIN）</td></tr>
-      <tr><td>运维</td><td>多一套系统</td><td>一套</td></tr>
-      <tr><td>生产并发 / HA</td><td>弱（本地模式）</td><td>强</td></tr>
-    </tbody>
-  </table>
-  <div class="card">
-    <div class="title">迁移节奏</div>
-    现在（bootstrap）继续用 Chroma 没问题——它已帮你验证了数据质量；到 M1 做 RetrievalService 时换 PG，Chroma 退役。判断标准：要不要 JOIN 结构化 + 要不要 hybrid + 要不要生产并发——本项目三条都要。
-  </div>
-
-  <h4>性能：三块分开看</h4>
-  <table>
-    <thead><tr><th>负载</th><th>说明</th></tr></thead>
-    <tbody>
-      <tr><td><strong>结构化查询</strong>（11M 行 CSV）</td><td>单机 PG 处理千万~上亿行是常规；配好（province + year + category）复合索引后，按省份 + 年份 + 分数查录取线，典型<strong>单位数~几十毫秒</strong>。属于 PG 最擅长的等值过滤。</td></tr>
-      <tr><td><strong>向量检索</strong>（pgvector）</td><td>用 <strong>HNSW</strong> 索引（别用 IVFFlat，起步难调）；1024 维、几万~几十万 chunk 的规模下，查询通常 <strong>1~10ms</strong>。本项目规模对 pgvector 属小数据。</td></tr>
-      <tr><td><strong>全文检索</strong>（tsvector）</td><td>⚠️ 中文有坑，见下。</td></tr>
-    </tbody>
-  </table>
-
-  <div class="card danger">
-    <div class="title">⚠️ 中文全文检索的坑（最容易被忽略）</div>
-    PostgreSQL 内置全文检索是为<strong>空格分词的语言</strong>（英 / 法 / 俄）设计的。<strong>中文没有空格，默认 tsvector 分词效果很差</strong>——直接搜「平行志愿 录取规则」会不理想。三种解法：
-    <ul style="margin:6px 0">
-      <li>装 <strong>zhparser</strong> 或 <strong>pg_jieba</strong> 扩展（中文分词，最正统）；</li>
-      <li>用 <strong>pg_bigm / pg_trgm</strong> 做子串 / 三元组匹配（简单、无需分词，召回偏宽）；</li>
-      <li>或<strong>以向量为主、关键词为辅</strong>，keyword 只做粗过滤。</li>
-    </ul>
-    这个决定要早做，它直接影响 hybrid 里「倒排那一路」的质量。面试主动提「中文语料要上 zhparser」是加分点。
-  </div>
-
-  <div class="card warn">
-    <div class="title">混合查询（filter + ANN）的坑</div>
-    pgvector 支持「先按 WHERE 过滤再 ANN」，但过滤太狠时，近邻可能不够。缓解：给常见过滤维度（省份 / 年份）做<strong>部分索引（partial index）</strong>，或先过滤再在子集里搜。pgvector 0.7+ 对「带过滤的近似搜索」更好，版本尽量新。
-  </div>
-  <div class="card">
-    <div class="title">并发与内存</div>
-    PG 能扛高并发，但要用<strong>连接池</strong>（pgbouncer）；HNSW 索引要常驻内存才快，本项目规模内存占用可控（几百 MB ~ 1~2 GB 级），想省内存可用 <code>halfvec</code>（本项目不必要）。
-  </div>
-
-  <h4>什么时候才该换「专用向量库」</h4>
-  <p>满足任一，再考虑 Milvus / Qdrant：向量到<strong>亿级</strong>以上；需要<strong>几百 QPS 且 &lt;10ms 稳定 SLA</strong>；需要 GPU 加速 ANN。本项目规模离这条线差 2~3 个数量级。第 <a href="#s14">14</a> 章的 ADR 也是这么写的：亿级向量或高 QPS 时才迁 Milvus。</p>
-  <div class="card hl">
-    <div class="title">一句话</div>
-    目标架构里 <strong>Chroma 退役，PG 一个库扛三件事，性能绰绰有余</strong>；真正要小心的是<strong>中文分词选型</strong>，其次才是向量索引调参。
-  </div>
-</section>
-
-<!-- ===== 8 ===== -->
-<section id="s8">
-  <h2><span class="num">8</span>领域算法层（Go · 确定性代码）</h2>
-  <p>这层是本项目的「护城河」——纯 LLM 方案做不出可靠结果，必须靠算法兜底。</p>
-
-  <table>
-    <thead><tr><th>模块</th><th>职责</th><th>方法</th></tr></thead>
-    <tbody>
-      <tr>
-        <td><code>RankConverter</code></td><td>分数 ↔ 位次 换算；跨年位次可比化</td>
-        <td>一分一段表查表 + 插值；同位次法/线差法；输出可比位次</td>
-      </tr>
-      <tr>
-        <td><code>ProbEstimator</code></td><td>某院校专业录取概率</td>
-        <td>历史录取位次分布 → 分位数 / 正态 / 核密度估计；输出概率 + 置信区间 + 依据样本年份</td>
-      </tr>
-      <tr>
-        <td><code>ConstraintChecker</code></td><td>硬规则裁决</td>
-        <td>规则引擎（规则表驱动）：选科匹配、单科要求、体检限报、性别限制、批次、学费上限</td>
-      </tr>
-      <tr>
-        <td><code>WishlistOptimizer</code></td><td>志愿表排序与配比</td>
-        <td>约束满足 + 启发式搜索（贪心 + 局部搜索），最大化期望效用，约束冲稳保配比与梯度平滑</td>
-      </tr>
-      <tr>
-        <td><code>AdmissionSim</code></td><td>平行志愿投档模拟</td>
-        <td>按「分数优先、遵循志愿」规则模拟投档，验证方案可行性</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <div class="card hl">
-    <div class="title">LLM 与算法的分工契约</div>
-    <table style="margin:8px 0">
-      <thead><tr><th>交给 LLM</th><th>交给算法</th></tr></thead>
-      <tbody>
-        <tr><td>理解用户模糊偏好（「想离家近点」「偏工科」）</td><td>位次换算、概率数值</td></tr>
-        <tr><td>生成候选、写理由、写风险提示</td><td>规则合法性裁决</td></tr>
-        <tr><td>批评方案、发现语义冲突</td><td>志愿表排序与配比优化</td></tr>
-        <tr><td>把数值结果翻译成人话</td><td>投档可行性模拟</td></tr>
-      </tbody>
-    </table>
-    <strong>一句话：LLM 不许算数，算法不许编话。</strong>
-  </div>
-
-  <h3>为什么这层放 Go（以及它在什么情况下可以放 Python）</h3>
-
-  <div class="card hl">
-    <div class="title">先厘清原则：约束是「离 LLM」，不是「用 Go」</div>
-    核心原则是<strong>「LLM 不许算数，算法不许编话」</strong>——即确定性代码必须与 LLM 分离。
-    它<strong>没有</strong>规定这层必须是什么语言。所以「算法必须 Go」是个过强的说法；真正被约束的是「算法不能躺在 LLM 里」。
-    （顺带：本章说的「护城河」是<strong>算法本身</strong>——位次法、概率模型、约束满足、投档模拟——与语言无关。）
-  </div>
-
-  <h4>放 Go 的四个理由</h4>
-  <table>
-    <thead><tr><th>理由</th><th>说明</th></tr></thead>
-    <tbody>
-      <tr><td><strong>性能（CPU 密集）</strong></td><td>WishlistOptimizer（约束满足 + 启发式搜索）、AdmissionSim（大规模模拟）是「循环密、分支多」的计算；Go 紧循环通常比 Python 纯循环快 10–100×。查表 + 插值这种轻活 Python 也够。</td></tr>
-      <tr><td><strong>并发扇出</strong></td><td>「对 N 个院校并行估概率 / 并行校验约束」用 goroutine 又便宜又简单；Python 在 CPU 密集下受 GIL 拖累，要上多进程，摩擦更大。</td></tr>
-      <tr><td><strong>解耦与可测试</strong></td><td>确定性代码单独成层，能与 LLM 层<strong>分开单测、分开回归、分开审计</strong>——正是「数值可解释、可复现」要的。</td></tr>
-      <tr><td><strong>用不上 Python 的生态</strong></td><td>算法只需「纯计算 + 读 SQL」，<strong>不需要</strong> LLM / 向量 / 数据科学生态——Python 的最大优势在这里发挥不出来，放 Python 无天然收益。（算法作为独立服务 svc-algo，只需「纯计算 + 读 SQL」，与 LLM 治理解耦。）</td></tr>
-    </tbody>
-  </table>
-
-  <h4>反方：Python 确实更强的地方（别装看不见）</h4>
-  <ul>
-    <li><strong>概率估计（ProbEstimator）</strong>：Python 的 <code>scipy.stats</code>（分布 / 分位数 / KDE）、sklearn 更厚。Go 侧是 gonum，够用但没那么顺手——<strong>这是唯一有正当理由放 Python 的模块</strong>。</li>
-    <li><strong>原型速度</strong>：约束表、启发式规则用 Python 迭代更快。</li>
-    <li><strong>少一跳</strong>：算法若在 svc-orchestrator 内部，就是本地函数调用，没有 gRPC 网络跳。</li>
-  </ul>
-
-  <div class="card ok">
-    <div class="title">结论与建议</div>
-    <ul style="margin:6px 0">
-      <li><strong>推荐（本方案）</strong>：算法统一放 Go——对最重的两块（优化 + 模拟）性能 / 并发优势真实，不需要 AI 生态，还能与后端经验对上。</li>
-      <li><strong>但承认这是选择</strong>：只做 MVP、算法还不重时，全放 Python 也成立，反而更快。</li>
-      <li><strong>可折中</strong>：只把 <code>ProbEstimator</code> 抽到 Python（用 scipy），其余留 Go——完全合理。</li>
-      <li><strong>不建议</strong>：为算法单起一个 Python 服务（多一个部署、多一份运维）；既然同语言，不如并入 svc-orchestrator 当内部模块。</li>
-    </ul>
-  </div>
-
-  <div class="card">
-    <div class="title">面试备答：算法为什么不用 Python？</div>
-    「原则是『确定性代码和 LLM 分离』，不是『算法必须 Go』。我放 Go 是因为这几类算法正好是 <strong>CPU 密集 + 高并发扇出 + 不需要 AI 生态</strong>，Go 在这三点都更合适，也和我的后端经验对得上。
-    统计部分（概率估计）我确实评估过——Python 的 <code>scipy/sklearn</code> 更顺手；但它不是瓶颈，为了一致性和可测试性我统一放 Go，后面若要上更复杂的统计模型，我会把那一块单独抽出去。」
-  </div>
-</section>
-
-<!-- ===== 9 ===== -->
-<section id="s9">
-  <h2><span class="num">9</span>数据存储设计</h2>
-  <h3>9.1 结构化表（PostgreSQL）</h3>
-  <pre><code>college(id, name, province, level, tags[], updated_at)
-major(id, college_id, code, name, category, subject_req)          -- subject_req: 选科要求(JSONB)
-admission_score(id, college_id, major_id, province, year, track,  -- track: 物理类/历史类/理科…
-                batch, min_score, min_rank, plan_count, source_uri)
-score_rank_map(province, year, track, score, rank)                 -- 一分一段表
-policy_doc(id, title, issuer, effective_year, region, source_uri, raw_path)
-policy_chunk(id, doc_id, section_path, text, meta JSONB, embedding vector(1024),
-             tsv tsvector)                                          -- pgvector + 全文索引
-plan_checkpoint(session_id, node, state JSONB, seq, created_at)     -- 编排检查点
-llm_call_log(trace_id, node, role, model, prompt_hash,
-             in_tokens, out_tokens, cost, latency_ms, created_at)    -- 成本与追踪
-eval_run(id, git_sha, metrics JSONB, passed, created_at)            -- 评测回归记录</code></pre>
-
-  <div class="card">
-    <div class="title">选型说明</div>
-    <ul style="margin:6px 0">
-      <li><strong>为什么一个 PostgreSQL 就够起步</strong>：结构化数据 + <code>pgvector</code>（向量）+ <code>tsvector</code>（倒排）三合一，运维成本最低，事务一致性好，最适合一个人做项目。<b>数据量到亿级或需独立扩缩容时，再把向量层拆到 Milvus/Milvus Lite。</b></li>
-      <li><strong>原始文件入对象存储</strong>：政策 PDF/HTML 原文必须留存，Verifier 比对与用户溯源都要用。</li>
-      <li><strong>成本日志单独建表</strong>：这是你做「成本优化」叙事的数据来源，别丢。</li>
-    </ul>
-  </div>
-
-  <h3>9.2 缓存与队列（Redis）</h3>
-  <ul>
-    <li><strong>检索缓存</strong>：<code>query_hash + filters</code> 为键，政策类 TTL 长、分数线类 TTL 短。</li>
-    <li><strong>LLM 结果缓存</strong>：相同 prompt_hash 直接命中，省钱且稳定。</li>
-    <li><strong>长任务队列</strong>：批量生成（如整班方案）走队列异步执行。</li>
-    <li><strong>限流与预算</strong>：令牌桶 + 每会话 token 计数器。</li>
-  </ul>
-
-  <h4>缓存失效策略（关键：政策数据更新时不能命中旧缓存）</h4>
-  <table>
-    <thead><tr><th>缓存类型</th><th>Cache Key 组成</th><th>TTL</th><th>失效触发</th></tr></thead>
-    <tbody>
-      <tr>
-        <td>检索结果</td>
-        <td><code>hash(query + filters + data_version)</code></td>
-        <td>结构化数据 24h；政策文本 7d</td>
-        <td>数据更新时 <code>data_version</code> 递增 → 旧 key 自然失效</td>
-      </tr>
-      <tr>
-        <td>LLM 输出</td>
-        <td><code>hash(role + model + prompt + data_version)</code></td>
-        <td>方案生成类 12h；解释类 24h</td>
-        <td>① data_version 变更 → 主动删除相关 key<br>② 模型版本切换 → 清空该 role 缓存</td>
-      </tr>
-      <tr>
-        <td>算法结果</td>
-        <td><code>hash(algo_type + params + data_version)</code></td>
-        <td>位次换算 30d；概率估计 7d</td>
-        <td>历史数据更新时失效</td>
-      </tr>
-    </tbody>
-  </table>
-  <div class="card warn">
-    <div class="title">⚠️ 为什么 cache key 必须带 data_version</div>
-    如果只用 prompt_hash 做 key，政策更新后（如某校新增选科要求），旧回答仍在缓存中被命中 → 推荐了不合规的志愿 → 事故。<br>
-    <strong>data_version</strong> 在每次 ETL 完成后递增，所有缓存 key 都带上它，数据更新时旧缓存自然无法命中。
-  </div>
-</section>
-
-<!-- ===== 10 ===== -->
-<section id="s10">
-  <h2><span class="num">10</span>服务契约（proto 草案）</h2>
-  <p>单一 <code>.proto</code> 事实来源，Go 与 Python 各自生成，避免接口漂移。</p>
-  <pre><code>// ============ 通用 ============
-message Trace {
-  string trace_id   = 1;
-  string session_id = 2;
-  string node       = 3;   // 哪个 Agent 节点发起
-}
-
-// ============ 检索服务（Python 侧实现） ============
-service RetrievalService {
-  rpc Retrieve (RetrieveRequest)  returns (RetrieveResponse);
-  rpc Index    (stream IndexChunk) returns (IndexAck);      // 离线写入
-}
-
-message QueryFilters {
-  string province      = 1;   // 必填，硬过滤
-  string year          = 2;
-  string subject_track = 3;   // 物理类/历史类…
-  string batch         = 4;
-  repeated string college_ids = 5;
-  repeated string major_codes = 6;
-}
-
-message RetrieveRequest {
-  Trace        trace       = 1;
-  string       query       = 2;
-  QueryFilters filters     = 3;
-  int32        top_k       = 4;
-  bool         with_rerank = 5;
-  bool         need_structured = 6;   // true=走 SQL 精确路径
-}
-
-message RetrievedChunk {
-  string chunk_id    = 1;
-  string doc_id      = 2;
-  string text        = 3;
-  double score       = 4;
-  string source_uri  = 5;
-  string source_type = 6;   // policy | admission | regulation
-  string effective_year = 7;
-  map&lt;string,string&gt; meta = 8;
-}
-
-message RetrieveResponse {
-  repeated RetrievedChunk chunks = 1;
-  repeated StructuredRow  rows   = 2;   // 结构化结果（分数线等）
-  string route = 3;                     // sql | rag | hybrid，便于调试
-}
-
-// ============ 推理服务（Python 侧实现） ============
-service InferenceService {
-  rpc Chat   (ChatRequest) returns (ChatResponse);
-  rpc Stream (ChatRequest) returns (stream ChatDelta);
-  rpc Embed  (EmbedRequest)  returns (EmbedResponse);
-  rpc Rerank (RerankRequest) returns (RerankResponse);
-}
-
-message ChatRequest {
-  Trace  trace      = 1;
-  string role       = 2;    // profile|strategy|critic|report|verify → Go 侧据此路由模型
-  repeated Msg msgs = 3;
-  string json_schema = 4;   // 非空则强制结构化输出
-  double temperature = 5;
-  int32  max_tokens  = 6;
-  int32  timeout_ms  = 7;
-}</code></pre>
-  <div class="card hl">
-    <div class="title">契约里的两个巧思</div>
-    <ul style="margin:6px 0">
-      <li><code>Trace</code> 全字段透传 → Go 与 Python 的 trace 能在同一棵树里合并，这是「跨语言可观测」的关键。</li>
-      <li><code>role</code> 由 <code>svc-llm-gateway</code> 指定模型 → 路由与成本控制在 svc-llm-gateway；svc-orchestrator 只负责「何时调、调什么内容」，不碰 key 与计费。</li>
-    </ul>
-  </div>
-
-  <h3>10.1 API 版本策略</h3>
-  <div class="card">
-    <div class="title">版本规则</div>
-    <ul style="margin:6px 0">
-      <li><strong>URL 路径版本</strong>：<code>/v1/plans</code>、<code>/v2/plans</code>——HTTP API 用路径前缀区分版本</li>
-      <li><strong>proto 包版本</strong>：<code>api/gateway/v1/</code>、<code>api/gateway/v2/</code>——gRPC 用包路径区分</li>
-      <li><strong>向后兼容</strong>：新增字段用新编号（不改已有字段编号）；废弃字段标 <code>deprecated</code> 但保留至少 2 个版本周期</li>
-      <li><strong>破坏性变更</strong>（删字段、改类型、改语义）→ 必须出新版本（v2），旧版本保留 ≥ 3 个月</li>
-    </ul>
-  </div>
-  <table>
-    <thead><tr><th>变更类型</th><th>是否破坏性</th><th>处理方式</th></tr></thead>
-    <tbody>
-      <tr><td>新增可选字段</td><td>否</td><td>直接改，升 minor 版本</td></tr>
-      <tr><td>废弃字段（标记 deprecated）</td><td>否</td><td>保留，下个版本移除</td></tr>
-      <tr><td>删除字段 / 改字段类型</td><td>是</td><td>新建 v2 目录，旧版本保留过渡期</td></tr>
-      <tr><td>改接口语义（如返回结构大变）</td><td>是</td><td>新建 v2，旧版本保留过渡期</td></tr>
-    </tbody>
-  </table>
-  <div class="card ok">
-    <div class="title">起步阶段</div>
-    当前全部在 <code>v1</code>，不需要过度设计。只需遵守一条纪律：<strong>新增字段永远用新编号，永远不删已有字段</strong>。等真正需要破坏性变更时，再拆 v2。
-  </div>
-  <div class="card warn">
-    <div class="title">与调用拓扑（4.9）保持一致</div>
-    拆成 DAG 后，<strong>云端 LLM 的 Chat / Stream 由 svc-llm-gateway（Go）实现</strong>并暴露 gRPC 供 svc-orchestrator 调用，key 只留在 svc-llm-gateway。<br>
-    因此 Python 的 <code>InferenceService</code> 收敛为<strong>本地模型</strong>的 Embed / Rerank（可选本地小模型），不再对外提供云 Chat——否则又会引入反向调用、破坏 DAG。
-  </div>
-
-  <h3>10.2 模型选型与成本预估</h3>
-
-  <h4>Role → 模型映射</h4>
-  <table>
-    <thead><tr><th>Role</th><th>用途</th><th>推荐模型</th><th>选型理由</th></tr></thead>
-    <tbody>
-      <tr>
-        <td><code>profile</code></td>
-        <td>画像抽取（结构化输出）</td>
-        <td>GPT-4o-mini / Qwen2.5-7B</td>
-        <td>任务简单、JSON Schema 约束、调用频繁 → 用便宜快速的</td>
-      </tr>
-      <tr>
-        <td><code>strategy</code></td>
-        <td>生成冲稳保候选</td>
-        <td>GPT-4o / Qwen2.5-72B</td>
-        <td>需要理解检索结果 + 生成高质量方案 → 用最强模型</td>
-      </tr>
-      <tr>
-        <td><code>critic</code></td>
-        <td>方案挑战与审查</td>
-        <td>GPT-4o / Qwen2.5-72B</td>
-        <td>需要发现细微冲突 → 用强模型，但可用 mini 做初筛</td>
-      </tr>
-      <tr>
-        <td><code>report</code></td>
-        <td>报告生成</td>
-        <td>GPT-4o-mini / Qwen2.5-14B</td>
-        <td>模板化程度高、主要是组织已有内容 → 中等模型即可</td>
-      </tr>
-      <tr>
-        <td><code>verify</code></td>
-        <td>幻觉校验</td>
-        <td>GPT-4o-mini</td>
-        <td>比对任务相对机械 → 便宜模型足够</td>
-      </tr>
-      <tr>
-        <td><code>embed</code></td>
-        <td>文本向量化</td>
-        <td>bge-large-zh-v1.5（本地）</td>
-        <td>1024 维、中文效果好、本地推理无成本</td>
-      </tr>
-      <tr>
-        <td><code>rerank</code></td>
-        <td>检索结果重排</td>
-        <td>bge-reranker-v2-m3（本地）</td>
-        <td>cross-encoder 精度高、本地推理</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <h4>单次会话成本预估（粗估）</h4>
-  <table>
-    <thead><tr><th>环节</th><th>调用次数</th><th>平均 Token</th><th>单价（以 GPT-4o 为例）</th><th>小计</th></tr></thead>
-    <tbody>
-      <tr><td>Profile（mini）</td><td>2~3 次</td><td>~800 in + 200 out</td><td>$0.15 / $0.60 per 1M</td><td>~$0.001</td></tr>
-      <tr><td>Strategy</td><td>1~2 次</td><td>~3000 in + 1500 out</td><td>$2.50 / $10.00 per 1M</td><td>~$0.023</td></tr>
-      <tr><td>Critic（循环 1~3 次）</td><td>1~3 次</td><td>~2000 in + 500 out</td><td>$2.50 / $10.00 per 1M</td><td>~$0.015</td></tr>
-      <tr><td>Report（mini）</td><td>1 次</td><td>~2000 in + 1000 out</td><td>$0.15 / $0.60 per 1M</td><td>~$0.001</td></tr>
-      <tr><td>Verify（mini）</td><td>1~2 次</td><td>~1500 in + 300 out</td><td>$0.15 / $0.60 per 1M</td><td>~$0.001</td></tr>
-      <tr><td>Embed / Rerank</td><td>本地</td><td>—</td><td>电费</td><td>~$0</td></tr>
-    </tbody>
-  </table>
-  <div class="card hl">
-    <div class="title">成本总结</div>
-    <ul style="margin:6px 0">
-      <li><strong>正常情况</strong>（Critic 1 轮、Verify 1 轮）：单次会话 ≈ <strong>$0.03~$0.05</strong>（约 ¥0.2~¥0.4）</li>
-      <li><strong>最坏情况</strong>（Critic 3 轮 + Verify 2 轮）：单次会话 ≈ <strong>$0.08~$0.12</strong>（约 ¥0.6~¥0.9）</li>
-      <li><strong>Budget Guard 上限</strong>：单会话 token 预算 ≤ 50K，成本上限 ≤ $0.15；超限自动截断</li>
-      <li><strong>国产模型替代</strong>：若全用 Qwen2.5 系列，成本可降至 1/10（约 ¥0.02~¥0.05/会话）</li>
-    </ul>
-  </div>
-  <div class="card">
-    <div class="title">本地模型资源占用</div>
-    <table style="margin:8px 0">
-      <thead><tr><th>模型</th><th>内存/显存</th><th>推理延迟</th></tr></thead>
-      <tbody>
-        <tr><td>bge-large-zh-v1.5</td><td>~1.3 GB</td><td>单条 ~5ms（CPU）</td></tr>
-        <tr><td>bge-reranker-v2-m3</td><td>~1.1 GB</td><td>单条 ~20ms（CPU）</td></tr>
-      </tbody>
-    </table>
-    两个本地模型合计 ~2.5 GB 内存，svc-orchestrator 容器分配 4 GB 足够。
-  </div>
-</section>
-
-<!-- ===== 11 ===== -->
-<section id="s11">
-  <h2><span class="num">11</span>可观测与评测</h2>
-  <h3>11.1 三层指标</h3>
-  <table>
-    <thead><tr><th>层</th><th>指标</th><th>采集点</th></tr></thead>
-    <tbody>
-      <tr><td>检索质量</td><td>recall@k、MRR、citation accuracy、时效命中率</td><td>RetrievalService + golden set</td></tr>
-      <tr><td>生成质量</td><td>faithfulness、幻觉率、引用覆盖率、Critic 提出问题数</td><td>Verifier + LLM 日志</td></tr>
-      <tr><td>系统性能</td><td>端到端 P50/P99、各节点耗时、错误率、重试率</td><td>OTel span</td></tr>
-      <tr><td>成本</td><td>单会话 token、单会话成本、缓存命中率、循环轮次分布</td><td>llm_call_log</td></tr>
-    </tbody>
-  </table>
-
-  <h3>11.2 评测门禁</h3>
-  <pre><code>PR 提交
-  → CI 跑 golden set（检索 + 端到端）
-  → 比对基线：recall 不许降、幻觉率不许升、P99 不许超阈值
-  → 不通过 → 阻断合并并输出 diff 报告
-  → 通过   → 记录 eval_run（git_sha + metrics）</code></pre>
-  <div class="card ok">
-    <div class="title">为什么评测体系是「亮点」</div>
-    大多数候选人的项目<b>没有评测</b>，只有「我试了试效果还行」。
-    你能拿出一条可回归、可对比、带基线的流水线，面试观感直接上一个档次——
-    而且它是你后续所有优化的<b>唯一可信依据</b>。
-  </div>
-
-  <h3>11.3 测试分层策略</h3>
-  <div class="card hl">
-    <div class="title">测试金字塔：四层覆盖，从快到慢</div>
-    评测（11.2）是「业务质量门禁」；本节是「工程质量保障」。两者互补，不替代。
-  </div>
-
-  <table>
-    <thead><tr><th>层级</th><th>范围</th><th>工具</th><th>频率</th><th>覆盖目标</th></tr></thead>
-    <tbody>
-      <tr>
-        <td><strong>L1 · 单元测试</strong></td>
-        <td>单个函数/方法：算法模块、校验函数、工具函数</td>
-        <td>Go: <code>go test</code>；Python: <code>pytest</code></td>
-        <td>每次提交</td>
-        <td>算法正确性、边界条件、纯函数可复现</td>
-      </tr>
-      <tr>
-        <td><strong>L2 · 契约测试</strong></td>
-        <td>proto 接口兼容性：请求/响应格式不变</td>
-        <td><code>protoc-gen-go</code> + <code>grpcio-tools</code> 生成后编译检查；可选 <code>buf breaking</code></td>
-        <td>proto 变更时</td>
-        <td>接口向后兼容、不破坏已实现的 client/server</td>
-      </tr>
-      <tr>
-        <td><strong>L3 · 集成测试</strong></td>
-        <td>单服务 + 依赖（DB/Redis）：API 端到端、gRPC 调用链</td>
-        <td><code>docker-compose.test</code> 起依赖 + 测试容器</td>
-        <td>每次 PR</td>
-        <td>服务能启动、DB 迁移正确、gRPC 调用通</td>
-      </tr>
-      <tr>
-        <td><strong>L4 · 端到端评测</strong></td>
-        <td>全链路：用户输入 → 最终方案</td>
-        <td>golden set + 指标计算（recall、faithfulness、幻觉率）</td>
-        <td>每次 PR（CI 门禁）</td>
-        <td>业务质量不回归（见 11.2）</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <h4>各层示例</h4>
-  <pre><code># L1 · 单元测试（Go）
-func TestRankConverter_Normalize(t *testing.T) {
-    // 位次 2000, 总人数 100000 → 百分位 0.02
-    got := rank.Normalize(2000, 100000)
-    assert.Equal(t, 0.02, got)
-}
-
-# L1 · 单元测试（Python）
-def test_prob_estimator_normal_distribution():
-    samples = [Sample(q=0.025, year=2023), Sample(q=0.022, year=2024), ...]
-    result = prob.Estimate(user_q=0.02, samples=samples)
-    assert 0.7 &lt; result.prob &lt; 0.9  # 大概率能录
-
-# L2 · 契约测试
-# CI 中：make api → 确认生成代码无变化（除非有意修改 proto）
-# 可选：buf breaking --against .git/main api/
-
-# L3 · 集成测试
-# docker-compose -f deploy/docker-compose.test.yml up --abort-on-container-exit
-
-# L4 · 端到端评测
-# python -m services.orchestrator.eval.run --golden-set data/golden/v1.json</code></pre>
-
-  <div class="card ok">
-    <div class="title">CI 流水线顺序</div>
-    <pre style="margin:8px 0"><code>PR 提交
-  → L1 单元测试（&lt; 30s）
-  → L2 契约检查（&lt; 10s）
-  → L3 集成测试（&lt; 2min，含 DB 启动）
-  → L4 端到端评测（&lt; 5min）
-  → 全部通过 → 允许合并</code></pre>
-    L1~L3 是「代码对不对」，L4 是「效果好不好」。四层都过才能合并。
-  </div>
-</section>
-
-<!-- ===== 12 ===== -->
-<section id="s12">
-  <h2><span class="num">12</span>部署拓扑</h2>
-  <pre><code>                    ┌──────────────────┐
-   Client ─────────►│  svc-gateway (Go) │  无状态 × N
-                    └────────┬─────────┘
-                             │ gRPC（StartGraph / ResumeGraph）
-                             ▼
-                    ┌──────────────────────┐
-                    │   svc-orchestrator    │  无状态 × N（状态在 PG）
-                    │ (Python · LangGraph)  │
-                    └───┬────────────────┬─┘
-         gRPC（LLM）     │                │ gRPC（算法）
-                        ▼                ▼
-             ┌─────────────────┐  ┌─────────────────┐
-             │ svc-llm-gateway  │  │    svc-algo      │
-             │ (Go · 路由/记账)  │  │ (Go · 位次/概率) │
-             └────────┬─────────┘  └────────┬─────────┘
-                      │ HTTP                 │ SQL
-                      ▼                      ▼
-              ┌───────────┐        ┌────────────────────────────────┐
-              │ 模型 API   │        │ PostgreSQL(+pgvector) │ Redis │ 对象存储 │
-              └───────────┘        └────────────────────────────────┘
-
-  （svc-orchestrator 另经 SQL / 向量 直连 PG）
-  观测旁路：四个服务 → OTel Collector → Prometheus → Grafana / LLM Tracing</code></pre>
-
-  <h3>环境策略</h3>
-  <table>
-    <thead><tr><th>环境</th><th>编排</th><th>LLM</th><th>向量</th></tr></thead>
-    <tbody>
-      <tr><td>本地开发</td><td>docker-compose 一键起</td><td>可切本地小模型 / 云端 API</td><td>pgvector</td></tr>
-      <tr><td>演示/面试</td><td>单机 compose + 预置数据</td><td>云端 API（可控成本）</td><td>pgvector</td></tr>
-      <tr><td>生产演练</td><td>k8s + HPA</td><td>多模型路由 + 降级</td><td>pgvector → Milvus（按需）</td></tr>
-    </tbody>
-  </table>
-  <div class="card">
-    <div class="title">演练要点（面试会被问到）</div>
-    <ul style="margin:6px 0">
-      <li><b>svc-gateway / svc-llm-gateway / svc-algo / svc-orchestrator 全部无状态</b>，状态只存在 PG/Redis → 可水平扩容、可滚动发布。</li>
-      <li>调用链是<b>单向 DAG</b>（gateway → orchestrator → { llm-gateway, algo }），下游不回连上游，无循环依赖 / 无死锁环。</li>
-      <li>网关（svc-gateway）设<b>并发闸门</b>，防止后端 LLM 打爆；超限返回排队而非 500。</li>
-      <li>给出一组真实压测数据：QPS、P99、错误率、单会话成本。</li>
-    </ul>
-  </div>
-
-  <h3>部署阶梯：L0 → L3（OrbStack 属于哪一级）</h3>
-  <div class="card hl">
-    <div class="title">先纠正一个概念</div>
-    <strong>OrbStack 不是「部署目标」，它是本机上的「本地容器运行时」</strong>（比 Docker Desktop 快、省资源，还能开 Linux 机器）。
-    「部署到 OrbStack」准确说是<strong>「用容器在本地把整套跑起来」</strong>——属于 dev / 验收，<strong>不等于对外发布</strong>。
-  </div>
-  <table>
-    <thead><tr><th>级别</th><th>环境</th><th>目的</th><th>里程碑</th></tr></thead>
-    <tbody>
-      <tr><td><strong>L0</strong></td><td>本地直跑（<code>go run</code> / <code>uvicorn</code> + 本机 PG/Redis）</td><td>开发最快，免反复 build</td><td>打通一条链</td></tr>
-      <tr><td><strong>L1</strong></td><td><strong>OrbStack + docker-compose</strong></td><td>验证「整套能一起跑」、环境一致、可复现</td><td>一条命令起全栈</td></tr>
-      <tr><td><strong>L2</strong></td><td>单台云 VPS + docker-compose</td><td>公网演示、面试可点链接</td><td>有可用 URL</td></tr>
-      <tr><td><strong>L3</strong></td><td>k8s（可选）</td><td>展示 HPA / 滚动发布（平台岗才需要）</td><td>非必需</td></tr>
-    </tbody>
-  </table>
-  <div class="card">
-    <div class="title">和「环境策略」的对应</div>
-    L1 ≈ 本地开发；L2 ≈ 演示 / 面试；L3 ≈ 生产演练。
-    对求职项目：<strong>做到 L1 + 一个 L2 最小演示就够</strong>，L3 看岗位。要点是<strong>尽早写 compose</strong>——「能一键起」是让别人复现的门槛，也是面试加分。
-  </div>
-
-  <h3>云上最小方案（L2）</h3>
-  <ul>
-    <li>1 台 VPS（Ubuntu，<strong>≥ 4GB RAM</strong>）→ 装 docker + compose</li>
-    <li>同一份 compose（<code>compose.prod</code> 变体）→ <code>docker compose up -d</code></li>
-    <li>最前面加 <strong>Caddy</strong>：自动 HTTPS + 域名 + <strong>SSE 不缓冲</strong></li>
-    <li>数据用<strong>子集</strong>（1–2 省 × 2–3 年），别塞 11M 行</li>
-    <li>入口加<strong>限流 + Budget Guard</strong>——公网暴露一个能烧 LLM 预算的接口很危险，正好用你自己的成本闸门挡</li>
-    <li>云 LLM 用 API，别在云上跑本地模型（云 GPU 贵）</li>
-  </ul>
-  <div class="card warn">
-    <div class="title">部署踩坑清单</div>
-    <ul style="margin:6px 0">
-      <li><strong>SSE 被代理缓冲</strong>：Caddy/nginx 必须关响应缓冲，否则流式被「攒着一次吐」。Caddy 默认 flush；nginx 要 <code>proxy_buffering off</code>。</li>
-      <li><strong>PG 镜像要带 pgvector + 中文分词</strong>：用 <code>pgvector/pgvector</code> 镜像拿 pgvector；<strong>zhparser / pg_jieba 要自定义镜像</strong>（早做，最容易卡）。</li>
-      <li><strong>数据子集</strong>：镜像小、启动快。</li>
-      <li><strong>密钥不入库</strong>：<code>.env</code> / secrets 注入；公网必须限流防刷。</li>
-      <li><strong>内存</strong>：sentence-transformers（bge）+ PG + 观测都吃内存；svc-orchestrator 镜像里预下载模型。</li>
-    </ul>
-  </div>
-
-  <h3>可观测：L2 就能做（不必等 k8s）</h3>
-  <p><strong>能，而且应该做</strong>——第 <a href="#s11">11</a> 章把可观测当亮点，L2 正是把它落地的地方。三种方式，按资源选：</p>
-  <table>
-    <thead><tr><th>方式</th><th>做法</th><th>取舍</th></tr></thead>
-    <tbody>
-      <tr><td><strong>A · 全自托管</strong></td><td>compose 里加 OTel Collector + Prometheus + Grafana（+ Tempo/Loki）</td><td>可控、全在内网；但吃内存、要自己维护</td></tr>
-      <tr><td><strong>B · 混合（推荐）</strong></td><td>本地跑 OTel Collector，把 metrics / traces <strong>push 到 Grafana Cloud 免费层</strong>（OTLP 端点）</td><td>省资源、有公网面板可分享 / 截图</td></tr>
-      <tr><td><strong>C · 极简</strong></td><td>只暴露 <code>/metrics</code> + 一个 Grafana；或全用 Grafana Cloud 托管</td><td>最省，但面板自由度、自建叙事弱一些</td></tr>
-    </tbody>
-  </table>
-  <div class="card">
-    <div class="title">映射到本架构（第 11 章）</div>
-    <ul style="margin:6px 0">
-      <li><strong>指标</strong>：Go 用 prometheus client、Python 用 prometheus_client → Prometheus / Grafana Mimir。</li>
-      <li><strong>追踪</strong>：OTel SDK（Go + Python）+ <code>trace_id</code> 透传（第 <a href="#s10">10</a> 章 proto 的 <code>Trace</code>）→ OTel Collector → Tempo / Jaeger。</li>
-      <li><strong>成本曲线</strong>：<code>llm_call_log</code> 表 → <strong>Grafana 的 Postgres 数据源</strong>直接读 → 单会话成本 / 缓存命中 / 循环轮次。这项甚至不需要 Prometheus。</li>
-      <li><strong>省资源技巧</strong>：追踪<strong>采样</strong>（演示 10–20%）、Prometheus 短保留期，或换更省内存的 VictoriaMetrics。</li>
-    </ul>
-  </div>
-  <div class="card ok">
-    <div class="title">面试价值</div>
-    L2 上你能亮出一张真的 Grafana 面板：<strong>真实 QPS / P99 / 单会话成本 / 幻觉率</strong>——正是第 <a href="#s11">11</a> 章说的「大多数人只有『我试了试效果还行』」的落差所在。
-  </div>
-
-  <h3>12.3 灾备与数据备份</h3>
-  <div class="card warn">
-    <div class="title">单人项目也要有备份方案</div>
-    数据丢了不是「以后再说」的事——尤其是一分一段表、录取线这类<strong>手工难以重建</strong>的数据。
-  </div>
-
-  <table>
-    <thead><tr><th>数据</th><th>备份方式</th><th>频率</th><th>保留期</th><th>恢复 RTO</th></tr></thead>
-    <tbody>
-      <tr>
-        <td>PostgreSQL（结构化 + 向量 + 检查点）</td>
-        <td><code>pg_dump</code> 全量 + WAL 增量（可选）</td>
-        <td>每日凌晨全量</td>
-        <td>最近 7 天</td>
-        <td>&lt; 30 min</td>
-      </tr>
-      <tr>
-        <td>Redis（缓存、限流、会话）</td>
-        <td>RDB 快照</td>
-        <td>每 6 小时</td>
-        <td>最近 2 天</td>
-        <td>&lt; 5 min（缓存可重建）</td>
-      </tr>
-      <tr>
-        <td>对象存储（政策原件）</td>
-        <td>本地 + 异地副本（或云 S3 跨区域）</td>
-        <td>实时同步</td>
-        <td>永久</td>
-        <td>&lt; 1 hour</td>
-      </tr>
-      <tr>
-        <td>配置文件 / .env</td>
-        <td>Git 仓库（不含密钥）+ 密钥管理器</td>
-        <td>随代码提交</td>
-        <td>永久</td>
-        <td>&lt; 5 min</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <h4>最小可行备份脚本（L1/L2 环境）</h4>
-  <pre><code>#!/bin/bash
-# deploy/backup.sh — 每日 cron 执行
-BACKUP_DIR="/data/backups/$(date +%Y%m%d)"
-mkdir -p "$BACKUP_DIR"
-
-# PG 全量备份
-docker exec postgres pg_dump -U gaokao -F c gaokao_db &gt; "$BACKUP_DIR/pg_dump.sql.gz"
-
-# Redis RDB 拷贝
-docker exec redis redis-cli BGSAVE
-sleep 5
-docker cp redis:/data/dump.rdb "$BACKUP_DIR/redis.rdb"
-
-# 清理 7 天前的备份
-find /data/backups -maxdepth 1 -mtime +7 -exec rm -rf {} \;
-
-echo "[$(date)] Backup completed: $BACKUP_DIR"</code></pre>
-
-  <div class="card hl">
-    <div class="title">恢复流程</div>
-    <ol style="margin:6px 0">
-      <li>新建 PG 容器 → <code>pg_restore</code> 导入最近备份</li>
-      <li>新建 Redis 容器 → 加载 RDB</li>
-      <li>对象存储从异地副本同步</li>
-      <li><code>docker compose up -d</code> 启动全部服务</li>
-      <li>验证健康检查 → 恢复完成</li>
-    </ol>
-    全程目标 <strong>RTO &lt; 1 小时</strong>（单机环境）。
-  </div>
-</section>
-
-<!-- ===== 13 ===== -->
-<section id="s13">
-  <h2><span class="num">13</span>仓库目录结构（monorepo）</h2>
-
-  <div class="card hl">
-    <div class="title">一句话</div>
-    <strong>单仓，但不是一个糊成一团的仓。</strong>它是「Go 半区（Kratos）+ Python 半区（LangGraph）+ 契约区（proto）」：四个服务在同一仓库里，靠 <code>api/</code> 契约强制边界。
-  </div>
-
-  <pre><code>agent-college/
-├── api/                            # 契约区：proto 单一事实来源（Kratos 惯例 api/{svc}/v1/*.proto）
-│   ├── common/v1/common.proto      # Trace / QueryFilters 等共享类型
-│   ├── gateway/v1/*.proto          # 对外 HTTP API（带 google.api.http 注解）—— Go 实现
-│   ├── orchestrator/v1/*.proto     # StartGraph / ResumeGraph —— Python 实现
-│   ├── llmgw/v1/*.proto            # Chat / Stream —— Go 实现
-│   └── algo/v1/*.proto             # Rank / Prob / Constraint … —— Go 实现
-├── third_party/google/api/         # Kratos HTTP 注解依赖（annotations.proto 等）
-│
-├── cmd/                            # Go 半区：3 个 Kratos 入口 = 3 个角色
-│   ├── gateway/main.go             # svc-gateway      HTTP/SSE server
-│   ├── llm-gateway/main.go         # svc-llm-gateway  gRPC server
-│   └── algo/main.go                # svc-algo         gRPC server
-├── internal/                       # Go 半区：实现
-│   ├── gateway/{server,service,biz,data,conf}
-│   ├── llmgw/                      # LLM 网关：路由 / 缓存 / 预算 / 记账
-│   ├── algo/                       # 领域算法（可独立单测）
-│   │   ├── rank/  prob/  constraint/  optimize/  sim/
-│   └── pkg/                        # 三角色共享「基建」：store / obs / middleware / errors
-│
-├── services/orchestrator/          # Python 半区：一个服务
-│   ├── app/                        # grpc.aio 服务入口（实现 orchestrator.proto）
-│   ├── graph/                      # LangGraph 图与节点（编排主干）
-│   │   ├── build.py  state.py  nodes/
-│   ├── rag/                        # 切分、embedding、rerank、RRF 融合
-│   ├── pipeline/                   # 离线索引管线
-│   ├── eval/                       # golden set、指标计算、回归脚本
-│   ├── pb/                         # 由同一份 proto 生成的 Python stub
-│   └── pyproject.toml
-│
-├── configs/                        # 每角色一份 Kratos 配置
-│   ├── gateway.yaml  llm-gateway.yaml  algo.yaml
-├── migrations/                     # SQL 迁移
-├── deploy/                         # docker-compose.yml / Caddyfile / k8s
-├── data/golden/                    # 标注问答集（版本管理）
-├── Makefile                        # make api / build / up
-├── go.mod                          # 一个 Go module（不是三个！）
-└── docs/                           # 架构、ADR、复盘</code></pre>
-
-  <h3>目录 ↔ 服务 ↔ 职责（一张表看懂边界）</h3>
-  <table>
-    <thead><tr><th>服务</th><th>入口</th><th>语言 / 框架</th><th>契约（api/）</th></tr></thead>
-    <tbody>
-      <tr><td><code>svc-gateway</code></td><td><code>cmd/gateway</code></td><td>Go · Kratos HTTP</td><td>实现 <code>gateway/v1</code>（对外）</td></tr>
-      <tr><td><code>svc-orchestrator</code></td><td><code>services/orchestrator</code></td><td>Python · LangGraph</td><td>实现 <code>orchestrator/v1</code></td></tr>
-      <tr><td><code>svc-llm-gateway</code></td><td><code>cmd/llm-gateway</code></td><td>Go · Kratos gRPC</td><td>实现 <code>llmgw/v1</code></td></tr>
-      <tr><td><code>svc-algo</code></td><td><code>cmd/algo</code></td><td>Go · Kratos gRPC</td><td>实现 <code>algo/v1</code></td></tr>
-    </tbody>
-  </table>
-
-  <h3>边界铁律（让「单仓」看起来是「干净」而不是「揉在一起」）</h3>
-  <ul>
-    <li><strong>契约是唯一的缝</strong>：服务之间只经 <code>api/</code> 生成的 client / server 通信。</li>
-    <li><strong>禁止跨服务 import</strong>：<code>cmd/gateway</code> 不能 import <code>internal/llmgw</code> 或 <code>internal/algo</code>；只能调它们的生成 client。</li>
-    <li><strong>共享层只放基建</strong>：<code>internal/pkg</code> 只有 store / obs / middleware / errors，<strong>不放跨服务的业务逻辑</strong>。</li>
-    <li><strong>目录名 = 服务名</strong>：四个位置一眼可数，且与第 <a href="#s4">4</a> 章的架构图一一对应。</li>
-    <li>可选加固：CI 里用 <code>go-arch-lint</code> / <code>depguard</code> 把「禁止跨服务 import」变成机器保证。</li>
-  </ul>
-
-  <div class="card hl">
-    <div class="title">ADR：为什么用 monorepo（而不是 4 个仓）</div>
-    <ul style="margin:6px 0">
-      <li><strong>proto 单一来源</strong>：契约要 Go/Python 同时生成，单仓才能一次改、两边同步，不会契约漂移。</li>
-      <li><strong>原子提交</strong>：一个需求常同时动契约 + 两端，单仓一个 PR 完成；多仓要各自发版对齐。</li>
-      <li><strong>单人可复现</strong>：一次 <code>git clone</code> 即可 <code>docker compose up</code>；对面试官是最低门槛。</li>
-      <li><strong>边界靠契约强制，不靠仓库隔离</strong>：服务数 ≠ 仓库数；仓库跟着「团队 / 发布边界」走，单人项目就是 1 个。</li>
-    </ul>
-    <span style="color:var(--muted)">多仓只在「多团队、独立发布节奏、权限隔离、超大代码库」时才划算——本项目都不成立。</span>
-  </div>
-
-  <div class="card ok">
-    <div class="title">面试话术（若被问「为什么不用多仓 / 会不会揉在一起」）</div>
-    「项目单人维护，多仓的收益（团队隔离、独立发布）我用不上，成本（版本对齐、契约漂移）却实打实。所以我用<strong>单仓，但用 <code>api/</code> 把一个仓切成 4 个边界清晰的服务</strong>——边界靠契约强制，不靠仓库隔离。<br>
-    判断『揉没揉』看的是<strong>契约清不清、边界硬不硬、目录对不对得上架构图</strong>，不是仓库数量。」
-  </div>
-</section>
-
-<!-- ===== 14 ===== -->
-<section id="s14">
-  <h2><span class="num">14</span>关键设计决策与权衡（ADR 摘要）</h2>
-  <table>
-    <thead><tr><th>决策</th><th>选择</th><th>理由</th><th>代价 / 何时改</th></tr></thead>
-    <tbody>
-      <tr>
-        <td><strong>编排引擎</strong></td><td><strong>LangGraph（Python）承载图与状态</strong></td>
-        <td><strong>岗位入场券；持久化/中断恢复/重放/流式全部开箱可用，省下 4–8 周引擎工时，把时间投到检索与评测</strong></td>
-        <td><strong>编排逻辑落在 Python，Go 不在核心执行路径上；当出现框架无法覆盖的调度需求且有基准数据时，再用 Go 自研替换（见第 14 章）</strong></td>
-      </tr>
-      <tr>
-        <td>数值数据获取</td><td>SQL 精确查询，不走 RAG</td>
-        <td>数值零容错，RAG 召回不可靠</td>
-        <td>要多维护一份结构化表；数据源格式变动时需改 ETL</td>
-      </tr>
-      <tr>
-        <td>多 Agent 引入时机</td><td>先用单 Agent 打通 RAG + 评测，再加多 Agent</td>
-        <td>多 Agent 会放大调试与成本；没有评测基线时无法判断好坏</td>
-        <td>—（这是纪律，不是取舍）</td>
-      </tr>
-      <tr>
-        <td>向量存储</td><td>起步用 pgvector</td>
-        <td>与主库同事务、运维简单</td>
-        <td>亿级向量或高 QPS 时迁 Milvus/专用向量库</td>
-      </tr>
-      <tr>
-        <td>概率估计</td><td>统计方法（分位数/核密度）起步</td>
-        <td>可解释、可复现、无需训练数据量</td>
-        <td>样本足够后再考虑学习模型，并保留统计法作为基线</td>
-      </tr>
-      <tr>
-        <td>跨语言边界</td><td>gRPC + proto 单一来源</td>
-        <td>强类型、低延迟、双端生成、契约稳定</td>
-        <td>调试略复杂 → 用 trace_id 打通</td>
-      </tr>
-      <tr>
-        <td>交互模式</td><td>SSE 流式 + HITL 暂停</td>
-        <td>长流程体验好，用户可中途修正</td>
-        <td>需要检查点支持，实现复杂度上升</td>
-      </tr>
-    </tbody>
-  </table>
-</section>
-
-<!-- ===== 15 ===== -->
-<section id="s15">
-  <h2><span class="num">15</span>决策记录：自研编排 vs 现成框架</h2>
-
-  <div class="card warn">
-    <div class="title">结论（TL;DR）</div>
-    编排主干用 <strong>LangGraph</strong>，不写通用状态机引擎。<br>
-    自研只投在<strong>框架之上的差异化切片</strong>：规则引擎、位次/概率算法、成本路由网关、检索分流器、验证器。
-  </div>
-
-  <h3>15.1 这是两个问题，答案相反</h3>
-  <p>「自研好还是用 LangGraph 好」实际是两个问题：</p>
-  <ul>
-    <li><strong>技术账</strong>：哪个更省事、更可靠？</li>
-    <li><strong>求职账</strong>：哪个更利于拿到「Agent 应用开发工程师」的 offer？</li>
-  </ul>
-  <p>这两个答案恰好相反，必须分开看——分开之后结论才清晰。</p>
-
-  <h3>15.2 技术账：框架白送你的 vs 你要亲手重造的</h3>
-  <table>
-    <thead><tr><th>LangGraph 开箱提供</th><th>自研的话你要自己写</th></tr></thead>
-    <tbody>
-      <tr><td>持久化检查点（Postgres / SQLite saver），进程挂了能续跑</td><td>状态快照原子写；并发节点写同一状态时的合并语义</td></tr>
-      <tr><td>interrupt / resume（人工介入的标准实现）</td><td>暂停时序列化整个运行态，恢复时精确还原</td></tr>
-      <tr><td>时间旅行：从任意检查点重放</td><td>恢复时哪些节点重跑、哪些跳过（幂等语义）</td></tr>
-      <tr><td>流式输出（token 级、节点级、自定义事件）</td><td>多节点并发时事件顺序的一致性与前端可消费性</td></tr>
-      <tr><td>节点级重试策略</td><td>重试与副作用的隔离（LLM 调用、写库不重复）</td></tr>
-      <tr><td>并行节点 + map-reduce</td><td>调度器与上下文取消</td></tr>
-      <tr><td>子图组合（subgraph）</td><td>子流程的状态隔离与传参</td></tr>
-      <tr><td>状态 reducer（并发写状态的合并语义）</td><td>自定义合并逻辑</td></tr>
-    </tbody>
-  </table>
-  <div class="card">
-    <div class="title">工时估算</div>
-    一个人把上表右列写到<strong>生产可用</strong>，保守估计 <strong>4–8 周</strong>，且是纯投入、不产出业务价值。这 4–8 周本可以用来把 RAG 质量、验证器、评测体系做扎实。
-  </div>
-  <blockquote>
-    编排引擎的难点集中在<strong>持久化 + 中断恢复 + 并发一致性</strong>——这三样恰恰是别人已经解决、你重造只会踩坑的东西。
-  </blockquote>
-  <div class="card hl">
-    <div class="title">如果你真正的诉求是 durable execution</div>
-    不要手搓。直接用 <strong>Temporal</strong>（Go 原生，重试 / 重放 / saga 成熟），在它上面套 Agent 循环。面试里说得出这句，比说「我自己写了个状态机」更显功力。LangGraph 的 checkpoint 也是同一思路的轻量版。
-  </div>
-
-  <h3>15.3 求职账：入场券 vs 加分项</h3>
-  <table>
-    <thead><tr><th></th><th>会 LangGraph</th><th>自研引擎</th></tr></thead>
-    <tbody>
-      <tr>
-        <td>岗位 JD 要求</td>
-        <td>大量 JD 直接写「熟悉 LangGraph / LangChain / AutoGen / CrewAI」——<strong>这是入场券</strong></td>
-        <td>几乎没有 JD 要求「自研过编排引擎」</td>
-      </tr>
-      <tr>
-        <td>缺失的后果</td>
-        <td>一面被问「LangGraph 用过吗」，答「我自己写了一个」，面试官第一反应是「他是不是不了解这个生态」→ <strong>可能直接出局</strong></td>
-        <td>只是不突出，<strong>不会出局</strong></td>
-      </tr>
-      <tr><td>投入产出比</td><td>必须拿</td><td>拿完入场券之后再争</td></tr>
-    </tbody>
-  </table>
-  <div class="card danger">
-    <div class="title">顺序不能反</div>
-    先自研 = 冒着<strong>没有入场券</strong>的风险去争加分项。正确顺序是：先拿入场券，再用差异化能力加分。
-  </div>
-
-  <h3>15.4 决定：分阶段，别一次定终身</h3>
-  <table>
-    <thead><tr><th>阶段</th><th>做什么</th><th>目标</th></tr></thead>
-    <tbody>
-      <tr>
-        <td><strong>M1–M3</strong></td>
-        <td>用 LangGraph 搭主干图（Profile→Retrieve→Strategy→Constraint→Risk→Critic→Optimize→Report→Verify）；把进阶用法用足：interrupt/resume 做 HITL、Postgres saver 做断点续跑、subgraph 做 Critic 循环、reducer 做状态合并</td>
-        <td>拿到入场券 + 能跑的系统 + 评测基线</td>
-      </tr>
-      <tr>
-        <td><strong>M4–M5</strong></td>
-        <td>自研「框架之上的差异化切片」：规则引擎、位次换算与概率估计、成本感知 LLM 路由网关、检索分流器、验证器</td>
-        <td>把 Go 优势落到项目里，形成护城河</td>
-      </tr>
-      <tr>
-        <td><strong>M6（可选）</strong></td>
-        <td>用 Go 写轻量编排器跑同一张图，与 LangGraph 做基准对比，产出博客</td>
-        <td>「两者都懂 + 有数据」的最强求职姿态；时间不够就砍</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <h3>15.5 两种落法（结合 Go + Python 架构）</h3>
-  <table>
-    <thead><tr><th>路线</th><th>分工</th><th>优点</th><th>缺点</th></tr></thead>
-    <tbody>
-      <tr>
-        <td><strong>A（推荐）</strong></td>
-        <td>Python：LangGraph 编排 + 推理；Go：Gateway/SSE、算法域、LLM 路由网关、验证器、评测触发</td>
-        <td>最快拿到入场券；Go 承担「框架之上」的工程，价值清晰</td>
-        <td>编排逻辑在 Python，Go 不在核心执行路径上——但差异化本来就不该靠「谁跑的图」</td>
-      </tr>
-      <tr>
-        <td>B（次选）</td>
-        <td>Go：自研编排；Python：只做推理</td>
-        <td>最大化 Go 主导权，叙事最完整</td>
-        <td>多花 4–8 周写引擎，且要自己兜住持久化 / 恢复 / 并发的坑</td>
-      </tr>
-    </tbody>
-  </table>
-  <blockquote>选 A。现在最缺的是时间，不是技术深度。</blockquote>
-
-  <h3>15.6 护城河应该投在哪（按优先级）</h3>
-  <ol>
-    <li>检索质量（召回、时效过滤、分流通路正确性）——决定系统靠不靠谱</li>
-    <li>验证器 + 引用溯源——决定幻觉率，本场景的生死线</li>
-    <li>评测体系（golden set + CI 门禁）——大多数人没有，你有就是碾压</li>
-    <li>成本与并发治理（路由、缓存、预算、闸门）——发挥 Go 优势的主场</li>
-    <li>领域算法（位次 / 概率 / 约束 / 优化）——别人做不出来的硬东西</li>
-    <li><s style="color:var(--muted)">编排引擎本身</s> —— 排最后，因为别人已经做得比你好</li>
-  </ol>
-  <div class="card warn">
-    <div class="title">提醒</div>
-    自研状态机排在优先级 <strong>6</strong>，而直觉常常想把它排到 1 或 2。这就是本章存在的意义。
-  </div>
-
-  <h3>15.7 什么情况下应该反过来选自研（边界条件）</h3>
-  <p>满足以下<strong>两条以上</strong>，自研才成立：</p>
-  <ul>
-    <li>目标岗位明确不要求主流框架（少见，部分基础架构岗如此）</li>
-    <li>有 4–8 周冗余时间，且愿意承担引擎出 bug 拖垮项目的风险</li>
-    <li>项目定位就是「编排引擎本身」（如要做开源框架），而非业务应用</li>
-    <li>已在真实项目里深度用过 LangGraph，能说清它的具体不足（「我觉得不够灵活」不构成理由，要能说出具体场景与复现路径）</li>
-  </ul>
-  <div class="card danger">
-    <div class="title">不符合以上条件，先自研就是拿求职时间去赌技术洁癖。</div>
-  </div>
-
-  <blockquote>
-    <strong>一句话记住：</strong>LangGraph 是你要买的入场券，自研是入场之后才争的奖杯。先把系统做对，再证明你能看懂框架的边界——后者靠的是成本治理、检索分流、验证器、评测体系，不是重写一遍状态机。
-  </blockquote>
-</section>
-
-<!-- ===== 16 ===== -->
-<section id="s16">
-  <h2><span class="num">16</span>降级与故障处理</h2>
-  <table>
-    <thead><tr><th>故障</th><th>检测</th><th>降级策略</th></tr></thead>
-    <tbody>
-      <tr><td>LLM 超时/限流</td><td>Gateway 超时计数</td><td>节点级重试（指数退避）→ 换备用模型 → 用规则模板兜底并标注「生成质量降级」</td></tr>
-      <tr><td>检索无结果</td><td>召回数为 0 或低于阈值</td><td>放宽元数据过滤 → 提升 top_k → 明确告知「无可靠数据，不予推荐」</td></tr>
-      <tr><td>Critic 循环不收敛</td><td>达最大轮次或无进展</td><td>强制进入优化阶段，输出方案并显式标注未解决问题</td></tr>
-      <tr><td>版本幻觉打回超限</td><td>Verify 失败次数 ≥ M</td><td>剥离无引用段落，仅输出可溯源内容 + 人工提示</td></tr>
-      <tr><td>成本超预算</td><td>Budget Guard</td><td>截断后续循环 → 返回当前最优结果 + 说明</td></tr>
-      <tr><td>下游 Python 服务不可用</td><td>gRPC 健康检查</td><td>熔断 + 缓存结果回放；无缓存则明确失败，不假装成功</td></tr>
-    </tbody>
-  </table>
-  <div class="card danger">
-    <div class="title">一条硬规则</div>
-    <strong>宁可明确报错，也不许编造数据。</strong>志愿场景里，「没有可靠数据」是一个合法且必须被明确表达的结论。
-    这种「不假装成功」的设计，本身就是面试里很好的技术品味证明。
-  </div>
-</section>
-
-<!-- ===== 17 ===== -->
-<section id="s17">
-  <h2><span class="num">17</span>安全与合规</h2>
-  <div class="row">
-    <div class="box warn" style="min-width:220px"><b>数据合规</b><span>仅采集公开数据；记录来源与抓取时间；遵守站点条款；不采集个人信息。</span></div>
-    <div class="box warn" style="min-width:220px"><b>隐私保护</b><span>用户输入最小化；日志脱敏；不持久化身份证/手机号等敏感字段。</span></div>
-    <div class="box warn" style="min-width:220px"><b>Prompt 注入</b><span>RAG 内容视为数据；显式分隔与转义；工具调用白名单；SQL 全参数化。</span></div>
-    <div class="box warn" style="min-width:220px"><b>输出安全</b><span>禁止承诺录取；强制风险提示与免责声明；敏感建议加人工确认。</span></div>
-  </div>
-  <blockquote>
-    在 README 中单列「合规与免责」章节，注明数据来源、使用边界与免责条款。
-    这既是法律要求，也是向面试官展示「你知道真实业务要面对什么」。
-  </blockquote>
-</section>
-
-<!-- ===== 18 ===== -->
-<section id="s18">
-  <h2><span class="num">18</span>演进路线</h2>
-  <table>
-    <thead><tr><th>阶段</th><th>架构增量</th><th>验证目标</th></tr></thead>
-    <tbody>
-      <tr><td>M1 · 地基</td><td>PG + pgvector + 离线索引管线 + RetrievalService</td><td>检索 recall@k 达标，结构/非结构化双路可用</td></tr>
-      <tr><td>M2 · 单链路</td><td>Gateway + 最小编排（Profile→Retrieve→Report）+ Verifier</td><td>端到端可跑，幻觉率可测并持续下降</td></tr>
-      <tr><td>M3 · 多 Agent</td><td>LangGraph 建图 + Postgres 检查点 + HITL（interrupt/resume）+ Critic 循环护栏</td><td>断点续跑可用，循环收敛可控</td></tr>
-      <tr><td>M4 · 算法层</td><td>位次换算 / 概率估计 / 规则引擎 / 志愿表优化 / 投档模拟</td><td>数值结果可复现、可审计，与 LLM 边界清晰</td></tr>
-      <tr><td>M5 · 工程化</td><td>OTel + 成本记账 + CI 评测门禁 + 压测 + k8s</td><td>P99/成本有数据，回归不通过即阻断</td></tr>
-      <tr><td>M6 · 扩展</td><td>接入第二场景（硬件售后诊断），复用同一套图与治理层；<em>可选</em>：用 Go 重写编排器做基准对比</td><td>证明「能力可复用」；产出与 LangGraph 的实测对比</td></tr>
-    </tbody>
-  </table>
-  <div class="card ok">
-    <div class="title">M6 是关键分水岭</div>
-    当你能把同一套<strong>治理层与算法能力</strong>复用到第二个完全不同的业务场景（如智能硬件售后诊断），
-    你讲的就从「我做了一个项目」变成了<strong>「我抽象并验证了一套 Agent 应用平台」</strong>——
-    这正是 Agent 应用开发工程师岗位最想听到的叙事。<br>
-    <span style="color:var(--muted)">（如果此时你有余力，再用 Go 重写编排器并与 LangGraph 做基准对比，那是加分项，不是必选项。）</span>
-  </div>
-</section>
-
-<footer>
-  架构设计文档 · 更新于 2026-10-16 · 配套：《AI Agent 转型项目规划》（agent-career-plan.html）<br>
-  文中框架与组件版本请以官方最新文档为准；数据采集须遵守合规要求。
-</footer>
+<main id="main">
+<h1 id="架构总览-高考志愿智能决策-agent-系统">架构总览 · 高考志愿智能决策 Agent 系统</h1>
+<blockquote>
+<p>⚠️ <strong>派生视图，非权威。</strong> 本文是 <a href="./prd.md">PRD v1.3</a> 的可视化总览，便于快速理解系统「做成什么样」。
+<strong>全部结论以 <code>docs/prd.md</code>（v1.3，目标态唯一权威）为准</strong>；代码现状见 <a href="./gap-analysis.md">gap-analysis.md</a>，决策理由见 <a href="./adr/">docs/adr/</a>。若本文与 PRD 冲突，以 PRD 为准。</p>
+<p>源文件：<code>docs/agent-architecture.md</code>（本文件）｜渲染产物：<code>agent-architecture.html</code>｜生成日期：2026-11-18。</p>
+</blockquote>
+<hr />
+<h2 id="1-系统定位与边界">1. 系统定位与边界</h2>
+<p>把考生自然语言画像转化为<strong>权威、可解释、可复核</strong>的高考志愿决策结果。LLM 只负责语义抽取与生成，<strong>数值计算一律交给确定性算法（svc-algo）</strong>。MVP 仅服务<strong>湖南省新高考 3+1+2</strong>。</p>
+<table>
+<thead>
+<tr>
+<th>本期做</th>
+<th>本期不做</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>自然语言转结构化画像并确认</td>
+<td>其他省份</td>
+</tr>
+<tr>
+<td>院校/专业双维筛选，生成冲/稳/保候选池</td>
+<td>旧高考、物理历史混算</td>
+</tr>
+<tr>
+<td>当年规则评估（资格/选科/体检/单科等）</td>
+<td>直接承诺录取</td>
+</tr>
+<tr>
+<td>约束校验 + 多目标优化排序出志愿表</td>
+<td>人工代填志愿</td>
+</tr>
+<tr>
+<td>报告生成，三类证据 100% 溯源</td>
+<td>无证据的数值生成</td>
+</tr>
+<tr>
+<td>任务级断点续跑 + HITL 确认</td>
+<td>永久免费/无预算治理</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>对应 PRD §1.2 / §4。核心原则「LLM 管语义、代码管数值」见 PRD §1.3。</p>
+</blockquote>
+<hr />
+<h2 id="2-四服务拓扑与数据所有权">2. 四服务拓扑与数据所有权</h2>
+<pre class="mermaid">
+flowchart LR
+  U(["客户端"]) --&gt;|"HTTP 命令/查询 · SSE"| GW["svc-gateway (Go)"]
+  GW --&gt;|"gRPC"| OR["svc-orchestrator (Python · LangGraph)"]
+  OR --&gt;|"gRPC"| AL["svc-algo (Go)"]
+  OR --&gt;|"gRPC"| LM["svc-llm-gateway (Go)"]
+  LM --&gt;|"HTTPS"| PV[("模型供应商 DeepSeek")]
+  AL --&gt;|"只读"| PG[("PostgreSQL 关系表 + pgvector + pg_trgm")]
+  OR --&gt;|"读写 run/状态/证据/结果/事件"| PG
+  OR -.-&gt;|"本地"| RAG["RAG / Embedding / Rerank"]
+  RAG --&gt;|"读已发布索引"| PG
+  OR -.-&gt;|"投影可重建"| RD[("Redis")]
+  ETL["离线 ETL / 规则审核"] --&gt;|"原子发布不可变 release"| PG
+</pre>
+<p><strong>单向 DAG，禁止任何反向或跨层依赖</strong>：<code>gateway → orchestrator → { llm-gateway, algo }</code>；<code>algo → 发布数据/规则</code>；<code>orchestrator → RAG → 已发布索引</code>。</p>
+<table>
+<thead>
+<tr>
+<th>服务/模块</th>
+<th>拥有并保证</th>
+<th><strong>不得承担</strong></th>
+<th>PRD</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>svc-gateway</td>
+<td>身份、命令入口、订阅投影</td>
+<td>不生成业务事件、不持久业务权威状态、不做志愿编排</td>
+<td>§8.3</td>
+</tr>
+<tr>
+<td>svc-orchestrator</td>
+<td>run/interrupt/检查点/候选/证据/结果/事件的<strong>唯一业务写入方</strong></td>
+<td>不自算概率·位次·约束·效用、不直连大模型、不在内存隐式保存任务</td>
+<td>§8.3</td>
+</tr>
+<tr>
+<td>svc-algo</td>
+<td>可复现数值与规则结果（概率/转换/约束/优化 + AuditBasis）</td>
+<td>不调用 LLM、不决定补问或发布</td>
+<td>§8.3</td>
+</tr>
+<tr>
+<td>svc-llm-gateway</td>
+<td>供应商适配、缓存、预占/结算、内容安全</td>
+<td>不理解志愿业务、不生成最终数值结论</td>
+<td>§8.3</td>
+</tr>
+<tr>
+<td>RAG 模块</td>
+<td>检索召回、rerank、证据投影</td>
+<td>不修改业务结果、不改写规则文本</td>
+<td>§8.3</td>
+</tr>
+<tr>
+<td>离线 ETL</td>
+<td>原始采集、清洗、哈希、规则审核、发布门禁</td>
+<td>不直接服务在线请求</td>
+<td>§8.3</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>PostgreSQL「一库三用」（关系表 + pgvector + pg_trgm）；Redis 投影可由 PG 重建。详见 PRD §8.1 / §8.3。</p>
+</blockquote>
+<hr />
+<h2 id="3-端到端时序-15-步主干">3. 端到端时序（15 步主干）</h2>
+<blockquote>
+<p>与 PRD §5.2 一致；下图为主干，按需补问/回算/有界修订等分支见 PRD §8.6。</p>
+</blockquote>
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant U as 用户
+  participant GW as gateway
+  participant OR as orchestrator(worker)
+  participant AL as algo
+  participant LM as llm-gateway
+  participant PG as PostgreSQL
+  U-&gt;&gt;GW: POST /v1/plans 创建任务
+  GW-&gt;&gt;OR: SubmitRun 身份·输入·幂等键
+  OR-&gt;&gt;PG: 持久受理, 状态 QUEUED, 返回 run_id
+  GW--&gt;&gt;U: accepted + 订阅地址
+  U-&gt;&gt;GW: 订阅 SSE
+  GW-&gt;&gt;OR: WatchRun(event_seq)
+  OR-&gt;&gt;LM: Chat(role=profile) 解析意图/画像
+  OR-&gt;&gt;PG: 保存画像, 缺项则创建 interrupt
+  OR--&gt;&gt;U: 补问 / 画像确认卡
+  U-&gt;&gt;GW: ResumeRun 回答/确认
+  GW-&gt;&gt;OR: 原子恢复, 状态回到 RUNNING
+  OR-&gt;&gt;AL: EstimateProb(确认画像 + release_id)
+  AL--&gt;&gt;OR: 分档候选池 + 录取概率 + AuditBasis
+  OR-&gt;&gt;AL: 当年规则评估 PASS/FAIL/UNKNOWN
+  OR-&gt;&gt;OR: RAG 双路检索三类证据
+  OR-&gt;&gt;AL: CheckConstraints → OptimizeWishlist
+  AL--&gt;&gt;OR: 合法志愿表 + 效用分解 + 保底告警
+  OR-&gt;&gt;LM: (可选) Chat(role=critic) 有界修订
+  OR-&gt;&gt;LM: Chat(role=report) 生成报告草稿
+  OR-&gt;&gt;OR: 三类证据校验 + 发布门禁
+  OR-&gt;&gt;PG: 原子发布 不可变结果, 状态 SUCCEEDED
+  PG--&gt;&gt;U: SSE/GET 呈现同一结果版本
+</pre>
+<p><strong>数据流转（PRD §5.1）</strong>：自然语言 → 结构化画像 →（+分数/位次）→ 检索证据 → 候选池 → 合法志愿表 → 可溯源报告。</p>
+<hr />
+<h2 id="4-run-生命周期状态机">4. run 生命周期状态机</h2>
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --&gt; QUEUED
+  QUEUED --&gt; RUNNING: worker 领取(租约)
+  RUNNING --&gt; WAITING_HITL: 需确认/补问
+  WAITING_HITL --&gt; QUEUED: ResumeRun 原子恢复
+  WAITING_HITL --&gt; EXPIRED: 人工等待超时
+  RUNNING --&gt; SUCCEEDED: 验证并发布成功
+  RUNNING --&gt; FAILED: 不可恢复错误/超时
+  QUEUED --&gt; CANCELLED: 用户取消
+  RUNNING --&gt; CANCELLED: 用户取消
+  WAITING_HITL --&gt; CANCELLED: 用户取消
+  EXPIRED --&gt; [*]
+  SUCCEEDED --&gt; [*]
+  FAILED --&gt; [*]
+  CANCELLED --&gt; [*]
+</pre>
+<ul>
+<li><strong>恢复入口</strong>：<code>POST /v1/runs/{run_id}:resume</code>；回答/确认必须<strong>原子</strong>完成「消费 interrupt + 保存命令 + 转回 QUEUED」，worker 再从持久 checkpoint 应用一次回答。</li>
+<li><strong>过期不原地复活</strong>：<code>EXPIRED</code> 的是 run，可在同一 session 派生新 run；历史 run 不可变。</li>
+<li>状态机与门禁详见 PRD §6.2 / FR-06。</li>
+</ul>
+<hr />
+<h2 id="5-治理与红线">5. 治理与红线</h2>
+<table>
+<thead>
+<tr>
+<th>机制</th>
+<th>要点</th>
+<th>PRD</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>任务级状态</td>
+<td>run/interrupt/state_version/profile_version/release_id；检查点用官方 <code>langgraph-checkpoint-postgres</code></td>
+<td>§6.2 / §8.4 / <a href="./adr/0002-langgraph-official-postgres-saver.md">ADR-0002</a></td>
+</tr>
+<tr>
+<td>权威状态</td>
+<td>PostgreSQL 是 run/事件/结果唯一权威；Redis 仅投影可重建</td>
+<td>§8.1 / §8.3</td>
+</tr>
+<tr>
+<td>数据版本</td>
+<td>不可变 <code>release</code> 表（内容哈希），<code>data_version</code> 过渡保留</td>
+<td>§8.4 / <a href="./adr/0004-immutable-content-hash-release-id.md">ADR-0004</a></td>
+</tr>
+<tr>
+<td>Budget Guard</td>
+<td><strong>原子预占 + 按实际 usage 结算</strong>；同一 <code>principal + session</code> 跨 run 累计 ≤50K token / $0.15，超限只返回已验证结果或失败</td>
+<td>FR-20</td>
+</tr>
+<tr>
+<td>图控制权</td>
+<td>归 orchestrator；补问必须创建 interrupt，禁止业务节点返回终态冒充补问</td>
+<td>§8.3 / FR-06</td>
+</tr>
+<tr>
+<td>循环上限</td>
+<td>补问 ≤6 / Critic ≤2 / 报告重写 ≤2 / 候选回算 ≤2</td>
+<td>§5.2 / FR-16</td>
+</tr>
+<tr>
+<td>发布门禁</td>
+<td>缺证据/规则 UNKNOWN/数值越界 → 阻断或显式 <code>BLOCKED_*</code>，不生成成功结果</td>
+<td>FR-19</td>
+</tr>
+<tr>
+<td>三类证据</td>
+<td>文档事实 / 结构化事实 / 算法派生事实，均可溯源到发布版本（policy_* 为活表，见 <a href="./adr/0006-consolidate-policy-tables-drop-charter.md">ADR-0006</a>）</td>
+<td>§8.5</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>8 条全局红线见 <code>AGENTS.md</code>「全局红线」节。</p>
+</blockquote>
+<hr />
+<h2 id="6-里程碑与部署阶梯">6. 里程碑与部署阶梯</h2>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>里程碑</th>
+<th>目标（浓缩）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A</td>
+<td>M1</td>
+<td>规格对齐：主链、画像/任务/事件 schema、proto/DB 与发布门禁定型</td>
+</tr>
+<tr>
+<td>B</td>
+<td>M2</td>
+<td>可靠任务底座：持久受理、官方 saver、interrupt、恢复、租约和 SSE</td>
+</tr>
+<tr>
+<td>C</td>
+<td>M3</td>
+<td>受控 ALGORITHM_PREVIEW：确认画像 → 四 RPC → 可审计结构化结果</td>
+</tr>
+<tr>
+<td>D</td>
+<td>M4</td>
+<td>生产资格与证据：检索、规则链、三类证据和 release 读取</td>
+</tr>
+<tr>
+<td>E</td>
+<td>M5</td>
+<td>模型治理与表达：llm-gateway、报告、失败模板和评测门禁</td>
+</tr>
+<tr>
+<td>F</td>
+<td>M6</td>
+<td>P1 智能增强：Strategy/Critic、政策问答、解释修订和可观测性</td>
+</tr>
+</tbody>
+</table>
+<pre class="mermaid">
+flowchart LR
+  L0["L0 本地 Compose 单节点"] --&gt; L1["L1 测试 单节点+对象存储+备份"]
+  L1 --&gt; L2["L2 预发布 多节点+监控"]
+  L2 --&gt; L3["L3 生产 K8s/VM+多副本+全门禁"]
+</pre>
+<blockquote>
+<p>里程碑详情见 PRD §9；部署阶梯见 PRD §8.1 / §10。</p>
+</blockquote>
+<hr />
+<h2 id="7-权威来源指向">7. 权威来源指向</h2>
+<table>
+<thead>
+<tr>
+<th>要了解</th>
+<th>去哪</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>目标态全部结论（需求/流程/契约/验收）</td>
+<td><a href="./prd.md">docs/prd.md</a> v1.3 —— <strong>唯一权威</strong></td>
+</tr>
+<tr>
+<td>代码现状与差距（活文档）</td>
+<td><a href="./gap-analysis.md">docs/gap-analysis.md</a></td>
+</tr>
+<tr>
+<td>关键决策理由</td>
+<td><a href="./adr/">docs/adr/</a> 0001~0006</td>
+</tr>
+<tr>
+<td>术语唯一定义</td>
+<td><a href="../GLOSSARY.md">GLOSSARY.md</a></td>
+</tr>
+<tr>
+<td>每次会话入口 / 红线</td>
+<td><a href="../AGENTS.md">AGENTS.md</a></td>
+</tr>
+<tr>
+<td>历史审查（存档，不再维护）</td>
+<td><a href="./agent-architecture-review.md">docs/agent-architecture-review.md</a></td>
+</tr>
+</tbody>
+</table>
 
 </main>
-</div>
-
-<script>
-(function(){
-  var links = Array.prototype.slice.call(document.querySelectorAll('nav a'));
-  var secs = links.map(function(a){ return document.querySelector(a.getAttribute('href')); });
-  function onScroll(){
-    var pos = window.scrollY + 120, idx = 0;
-    for (var i=0;i<secs.length;i++){ if (secs[i] && secs[i].offsetTop <= pos) idx = i; }
-    links.forEach(function(l,i){ l.classList.toggle('active', i===idx); });
-  }
-  window.addEventListener('scroll', onScroll, {passive:true});
-  onScroll();
-})();
-</script>
 </body>
 </html>

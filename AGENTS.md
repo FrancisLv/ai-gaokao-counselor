@@ -9,15 +9,15 @@
 - 核心原则：**LLM 管语义 / 生成，确定性代码管数值 / 规则**。
 - 技术栈：Go（以 `go.mod` 为准，当前 1.25）+ Kratos v2 + Wire + sqlc + pgx/v5；Python 3.11 + LangGraph；PostgreSQL（关系表 + pgvector + pg_trgm）+ Redis。
 
-## 施工事实来源（优先级从高到低）
+## 施工事实来源（按用途分工，各为其域的唯一权威）
 
-1. `docs/agent-architecture-review.md` —— 架构审查结论；**与任何文档冲突时以它为准**。
-2. `docs/prd.md`（v1.1）—— 24 条 FR 需求与验收标准（已按审查回填）。
-3. `docs/gap-analysis.md` —— FR × 代码现状矩阵、§4 阻塞缺口、**§6 已拍板 6 项决策**。
-4. `docs/algorithms.md` —— 算法口径。
-5. `docs/adr/`（`0001`~`0006`）—— 已拍板架构决策的正式记录；`GLOSSARY.md`（根）—— 领域术语单一来源，输出命名以它为准（约定见 `docs/agents/domain.md`）。
+1. `docs/prd.md`（**v1.3**）—— **目标态唯一权威**：24 条 FR + §5.2 端到端 15 步流程 + §8 服务职责/接口契约/表映射/证据包/旁路流程 + §13 20 条验收场景（已吸收审查报告全部目标态结论）。
+2. `docs/gap-analysis.md` —— **代码现状唯一权威**（活文档，随代码变）：FR × 现状矩阵、§4 阻塞缺口、**§6 已拍板 6 项决策**、§7 证据索引。
+3. `docs/adr/`（`0001`~`0006`）—— **决策理由权威**：为何这么定、否决了什么。
+4. `docs/algorithms.md` —— 算法口径；`GLOSSARY.md`（根）—— 领域术语单一来源，输出命名以它为准（约定见 `docs/agents/domain.md`）。
+5. `docs/agent-architecture-review.md` —— **历史审查存档**：结论已吸收进 PRD v1.3，不再单独维护，仅供溯源。
 
-冲突处理顺序：审查 > ADR > PRD > gap-analysis > 代码注释。发现文档与代码脱节，先按审查报告口径施工，并在 `docs/dev-log.md` 记录；若输出与某条 ADR 冲突，须显式指出而非静默覆盖（见 `domain.md`）。
+冲突裁决：**目标态以 PRD 为准；现状以 gap-analysis 实测为准；决策理由以 ADR 为准**（三者 > 代码注释 > review 存档）。发现文档与代码脱节，先按「PRD 目标态 + gap-analysis 现状」施工，并在 `docs/dev-log.md` 记录；若输出与某条 ADR 冲突，须显式指出而非静默覆盖（见 `domain.md`）。
 
 ## 工程红线（不可逾越）
 
