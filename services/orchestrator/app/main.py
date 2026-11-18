@@ -12,12 +12,18 @@ import os
 async def _serve() -> None:
     import grpc
 
+    from app.run_lifecycle import RunLifecycle
     from app.server import OrchestratorServicer
     from api.orchestrator.v1 import orchestrator_pb2_grpc
 
     addr = os.getenv("ORCHESTRATOR_ADDR", "[::]:9100")
+    dsn = os.getenv("ORCHESTRATOR_DSN") or os.getenv("DATABASE_URL")
+    lifecycle = RunLifecycle(dsn) if dsn else None
     server = grpc.aio.server()
-    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(OrchestratorServicer(), server)
+    orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
+        OrchestratorServicer(lifecycle=lifecycle),
+        server,
+    )
     server.add_insecure_port(addr)
     logging.info("svc-orchestrator listening on %s", addr)
     await server.start()

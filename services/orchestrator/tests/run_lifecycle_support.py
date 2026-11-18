@@ -1,0 +1,124 @@
+"""RunLifecycle PostgreSQL 集成测试夹具。
+
+仅在显式提供可写测试库时运行；库名必须包含 ``test``，避免误清业务数据库。
+测试断言通过 RunLifecycle seam，数据库操作只负责建 schema 和准备不可变 release。
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import unittest
+from uuid import uuid4
+
+import psycopg
+from psycopg.rows import dict_row
+
+
+TEST_DSN = os.getenv("ORCHESTRATOR_TEST_DSN")
+ROOT = Path(__file__).resolve().parents[3]
+BASE_SESSION_DDL = """
+CREATE TABLE chat_session (
+    id UUID PRIMARY KEY,
+    user_id VARCHAR(100),
+    profile JSONB,
+    status VARCHAR(20) DEFAULT 'active',
+    current_node VARCHAR(50),
+    token_budget INTEGER DEFAULT 50000,
+    token_used INTEGER DEFAULT 0,
+    call_budget INTEGER DEFAULT 30,
+    call_used INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    expired_at TIMESTAMPTZ
+)
+"""
+
+
+@unittest.skipUnless(TEST_DSN, "ORCHESTRATOR_TEST_DSN 未设置")
+class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
+    dsn = TEST_DSN or ""
+
+    async def asyncSetUp(self) -> None:
+        await self._reset_schema()
+
+    async def _connect(self):
+        return await psycopg.AsyncConnection.connect(
+            self.dsn,
+            row_factory=dict_row,
+            autocommit=True,
+        )
+
+    async def _reset_schema(self) -> None:
+        conn = await self._connect()
+        try:
+            database = (await (await conn.execute("SELECT current_database() AS name")).fetchone())["name"]
+            if "test" not in database.lower():
+                self.fail(f"拒绝清理非测试数据库: {database}")
+            await conn.execute(
+                "DROP TABLE IF EXISTS run_event, run_command_receipt, run, release, chat_session CASCADE"
+            )
+            await conn.execute(BASE_SESSION_DDL)
+            migration = ROOT / "migrations" / "08_release_and_run_foundation.sql"
+            for statement in migration.read_text(encoding="utf-8").split(";"):
+                statement = statement.strip()
+                if statement:
+                    await conn.execute(statement)
+        finally:
+            await conn.close()
+
+    async def _apply_sql_file(self, conn, relative_path: str) -> None:
+        sql = (ROOT / relative_path).read_text(encoding="utf-8")
+        for statement in sql.split(";"):
+            statement = statement.strip()
+            if statement:
+                await conn.execute(statement)
+
+    async def reset_to_fresh_schema(self) -> None:
+        conn = await self._connect()
+        try:
+            database = (await (await conn.execute("SELECT current_database() AS name")).fetchone())["name"]
+            if "test" not in database.lower():
+                self.fail(f"拒绝清理非测试数据库: {database}")
+            await conn.execute("DROP SCHEMA public CASCADE")
+            await conn.execute("CREATE SCHEMA public")
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+            await self._apply_sql_file(conn, "migrations/00_schema.sql")
+            await self._apply_sql_file(conn, "migrations/08_release_and_run_foundation.sql")
+        finally:
+            await conn.close()
+
+    async def seed_release(
+        self,
+        *,
+        status: str = "PUBLISHED",
+        release_id: str | None = None,
+    ) -> str:
+        value = release_id or f"rel-{uuid4().hex}"
+        conn = await self._connect()
+        try:
+            await conn.execute(
+                """
+                INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
+                VALUES (%s, %s, %s::jsonb, %s, CASE WHEN %s = 'PUBLISHED' THEN NOW() ELSE NULL END)
+                """,
+                (value, status, '{"components": {}}', "test-sha256", status),
+            )
+        finally:
+            await conn.close()
+        return value
+
+    async def age_events_outside_retention(self, run_id) -> None:
+        conn = await self._connect()
+        try:
+            await conn.execute(
+                """
+                UPDATE run_event
+                SET occurred_at = NOW() - INTERVAL '8 days'
+                WHERE run_id = %s
+                """,
+                (run_id,),
+            )
+        finally:
+            await conn.close()
+

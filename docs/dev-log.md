@@ -758,3 +758,28 @@ sqlc 的 `:many` 先收集类型化结果 slice，再映射领域对象，相较
 ### 未做与后续
 
 - 未接入 LangGraph `retrieve` 节点（该节点仍为 stub，接入属 M2 编排接线）；未建 golden set，recall@k/MRR 量化对比（vector vs hybrid）留待评测体系落地；cross-encoder 重排、zhparser 分词、charter_*/policy_* 表名收口、ETL 质检防线均未动。
+
+## 22. M2 ticket #2：RunLifecycle 持久受理与事件读侧
+
+**日期与范围**：2026-11-18。落地 issue #2 的 SubmitRun / GetRun / WatchRun / CancelRun 最小闭环；ResumeRun、interrupt、官方 saver、worker 租约与算法预览仍由后续 tickets 承担。
+
+### 实现要点
+
+- 新增 additive 迁移：`release`、`run`、`run_command_receipt`、`run_event`，并为 `chat_session` 增加服务端 principal 归属；未修改任何历史迁移。
+- `RunLifecycle` 成为唯一公开 seam，Profile/DB/transport 均不是调用方可见状态机。Submit 在单事务中绑定当前 PUBLISHED release、创建 session/run/首事件与 receipt；没有可用 release 时不创建 run。
+- Receipt 以 `principal + operation + scope + idempotency_key` 为幂等域，同键同内容重放、同键异内容冲突；并发同键通过事务级 advisory lock 串行化。
+- 事件按 run 内连续 `event_seq` 持久化；WatchRun 只轮询持久事件，不推进图，重连可重放，超过 7 天游标返回 `EVENT_CURSOR_EXPIRED`。
+- 查询、订阅和取消都校验 principal；未完成 run 的结果引用为 null。QUEUED run 取消产生唯一 `CANCELLED / CANCELLED_BY_USER` 终态，后续取消不回改终态。
+- gRPC 增加四个 RPC，仅做 metadata 身份提取、类型映射和稳定错误转换；`x-principal-id` 必须由服务间可信边界注入，不接受正文自称。
+
+### 测试与运行入口
+
+- 新增可写测试库集成夹具：`ORCHESTRATOR_TEST_DSN` 必须指向库名含 `test` 的隔离 PostgreSQL；测试会拒绝清理非测试库。生产运行 DSN 使用 `ORCHESTRATOR_DSN`，Compose 已接入。
+- fresh schema 验证覆盖 `00_schema.sql → 08_release_and_run_foundation.sql`；行为测试覆盖提交/重放/冲突、无 release、session 所有权、查询/订阅隔离、事件补发/保留窗口、取消幂等与并发裁决。
+- in-process aio gRPC 测试从真实传输调用 Submit/Get/Watch/Cancel，并验证缺失 principal 返回 `UNAUTHENTICATED / PRINCIPAL_REQUIRED`。
+- `make build`、`make test`、`make check`、`make py-check`、`make py-test` 通过；有 DSN 的 Python 全量测试 34 项通过（1 个既有语料测试跳过）。
+
+### 边界
+
+- 当前只支持 `GENERATE_PLAN` 的结构化画像输入；自然语言解析、ResumeRun、interrupt、官方 LangGraph saver、租约接管、四算法 RPC 和 ALGORITHM_PREVIEW 不做提前实现。
+- WatchRun 使用数据库短轮询；Redis/发布订阅仅可作为后续可重建通知投影，不是权威事件源。

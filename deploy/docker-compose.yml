@@ -55,6 +55,8 @@ services:
         PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim}
         TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
     ports: ["9100:9100"]
+    environment:
+      - ORCHESTRATOR_DSN=postgres://app:app@postgres:5432/gaokao?sslmode=disable
     depends_on: [postgres, redis]
 
   postgres:
