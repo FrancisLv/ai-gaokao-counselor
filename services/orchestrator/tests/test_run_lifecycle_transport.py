@@ -242,6 +242,8 @@ class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
         self.assertEqual(view.state, pb.SUCCEEDED)
         self.assertEqual(view.result.result_kind, "ALGORITHM_PREVIEW")
         self.assertEqual(view.result_preview.result_kind, "ALGORITHM_PREVIEW")
+        self.assertTrue(view.result_preview.internal_controlled_only)
+        self.assertFalse(view.result_preview.formal_recommendation)
         self.assertEqual(
             view.result_preview.stable_candidates[0].candidate.university_code,
             "U001",

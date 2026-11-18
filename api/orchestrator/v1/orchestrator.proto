@@ -231,6 +231,7 @@ message AlgorithmPreview {
   string disclaimer = 22;
   bool formal_recommendation = 23;
   string result_kind = 24;
+  bool internal_controlled_only = 25;
 }
 
 message RunViewReply {

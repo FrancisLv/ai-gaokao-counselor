@@ -1084,6 +1084,27 @@ class RunLifecycle:
                 *estimate.stable_candidates,
                 *estimate.safe_candidates,
             ]
+            if not estimate.HasField("basis"):
+                raise RunLifecycleError(
+                    "VALIDATION_FAILED",
+                    "EstimateProb 缺少 AuditBasis",
+                )
+            if rank.rank <= 0 or estimate.basis.user_rank != rank.rank:
+                raise RunLifecycleError(
+                    "VALIDATION_FAILED",
+                    "位次与 AuditBasis 不一致",
+                )
+            if not source_candidates:
+                raise RunLifecycleError("NO_RELIABLE_DATA", "算法未返回可用候选")
+            source_by_identity: dict[tuple[str, str], float] = {}
+            for item in source_candidates:
+                identity = self._candidate_identity(item)
+                if identity in source_by_identity:
+                    raise RunLifecycleError(
+                        "VALIDATION_FAILED",
+                        "EstimateProb 返回重复候选",
+                    )
+                source_by_identity[identity] = item.prob.probability
             checked = await self._algo_client.CheckConstraints(
                 algo_pb2.CheckConstraintsRequest(
                     trace=trace,
@@ -1094,6 +1115,43 @@ class RunLifecycle:
                     release_id=release_id,
                 )
             )
+            if not checked.kept:
+                raise RunLifecycleError(
+                    "NO_RELIABLE_DATA",
+                    "全部候选均被确定性约束过滤",
+                )
+            kept_by_identity: dict[tuple[str, str], float] = {}
+            for item in checked.kept:
+                identity = self._candidate_identity(item)
+                if identity in kept_by_identity:
+                    raise RunLifecycleError(
+                        "VALIDATION_FAILED",
+                        "CheckConstraints 返回重复候选",
+                    )
+                if (
+                    identity not in source_by_identity
+                    or source_by_identity[identity] != item.prob.probability
+                ):
+                    raise RunLifecycleError(
+                        "VALIDATION_FAILED",
+                        "约束过滤引入新候选或改写概率",
+                    )
+                kept_by_identity[identity] = item.prob.probability
+            rejected_identities: set[tuple[str, str]] = set()
+            for item in checked.rejected:
+                identity = self._candidate_identity(item.candidate)
+                if (
+                    identity in rejected_identities
+                    or identity in kept_by_identity
+                    or identity not in source_by_identity
+                    or source_by_identity[identity]
+                    != item.candidate.prob.probability
+                ):
+                    raise RunLifecycleError(
+                        "VALIDATION_FAILED",
+                        "约束拒绝结果引入新候选、重复候选或改写概率",
+                    )
+                rejected_identities.add(identity)
             optimized = await self._algo_client.OptimizeWishlist(
                 algo_pb2.OptimizeWishlistRequest(
                     trace=trace,
@@ -1108,31 +1166,22 @@ class RunLifecycle:
                 f"svc-algo 不可用: {exc.code().name}",
             ) from exc
 
-        if not estimate.HasField("basis"):
-            raise RunLifecycleError("VALIDATION_FAILED", "EstimateProb 缺少 AuditBasis")
-        if rank.rank <= 0 or estimate.basis.user_rank != rank.rank:
-            raise RunLifecycleError("VALIDATION_FAILED", "位次与 AuditBasis 不一致")
-        if not source_candidates or not checked.kept:
-            raise RunLifecycleError("NO_RELIABLE_DATA", "算法未返回可用候选")
         if not optimized.HasField("wishlist") or not optimized.wishlist.candidates:
             raise RunLifecycleError("NO_RELIABLE_DATA", "算法未返回可用志愿表")
 
-        kept_by_identity = {
-            self._candidate_identity(item): item.prob.probability
-            for item in checked.kept
-        }
-        for item in source_candidates:
-            identity = self._candidate_identity(item)
-            if identity not in kept_by_identity:
-                continue
-            if kept_by_identity[identity] != item.prob.probability:
-                raise RunLifecycleError("VALIDATION_FAILED", "约束过滤改写了概率")
+        optimized_identities: set[tuple[str, str]] = set()
         for item in optimized.wishlist.candidates:
             identity = self._candidate_identity(item.cwp)
-            if identity not in kept_by_identity:
-                raise RunLifecycleError("VALIDATION_FAILED", "优化输入含未通过约束的候选")
-            if kept_by_identity[identity] != item.cwp.prob.probability:
-                raise RunLifecycleError("VALIDATION_FAILED", "优化改写了概率")
+            if (
+                identity in optimized_identities
+                or identity not in kept_by_identity
+                or kept_by_identity[identity] != item.cwp.prob.probability
+            ):
+                raise RunLifecycleError(
+                    "VALIDATION_FAILED",
+                    "优化引入新候选、重复候选或改写概率",
+                )
+            optimized_identities.add(identity)
 
         result_version = uuid4()
         preview = self._algorithm_preview_payload(
@@ -1161,7 +1210,7 @@ class RunLifecycle:
         if (
             not all(identity)
             or not math.isfinite(probability)
-            or not 0.0 <= probability <= 1.0
+            or not 0.01 <= probability <= 0.99
         ):
             raise RunLifecycleError("VALIDATION_FAILED", "候选身份或概率非法")
         return identity
@@ -1279,6 +1328,7 @@ class RunLifecycle:
             "disclaimer": (
                 "结果仅供决策参考，不构成录取保证；不得作为正式志愿方案。"
             ),
+            "internal_controlled_only": True,
             "formal_recommendation": False,
             "result_kind": "ALGORITHM_PREVIEW",
         }
@@ -1347,6 +1397,11 @@ class RunLifecycle:
                         ).total_seconds()
                         * 1000
                     ),
+                )
+            if remaining <= 0:
+                raise RunLifecycleError(
+                    "EXECUTION_TIMEOUT",
+                    "主动执行额度在发布前耗尽",
                 )
             next_version = current["state_version"] + 1
             await conn.execute(
@@ -1459,12 +1514,16 @@ class RunLifecycle:
                 try:
                     await self._process_algorithm_preview(conn, row)
                 except RunLifecycleError as exc:
+                    if exc.reason == "RUN_STATE_CONFLICT":
+                        if await self._stop_if_cancelled(conn, row):
+                            return
                     if exc.reason not in {
                         "VALIDATION_FAILED",
                         "DEPENDENCY_UNAVAILABLE",
                         "PROFILE_NOT_CONFIRMED",
                         "RELEASE_REVOKED",
                         "NO_RELIABLE_DATA",
+                        "EXECUTION_TIMEOUT",
                     }:
                         raise
                     await self._park_claim(

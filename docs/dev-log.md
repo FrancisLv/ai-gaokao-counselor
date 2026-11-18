@@ -861,3 +861,27 @@ sqlc 的 `:many` 先收集类型化结果 slice，再映射领域对象，相较
 
 - 本票只发布 `ALGORITHM_PREVIEW`，不宣称完整资格、证据或正式报告已核验；ALGORITHM_PREVIEW 的完整失败矩阵、复现性回归与发布竞态由 issue #6 加固。
 - 当前 release_id 已贯穿四个请求；在线算法数据表按 release_id 实际选行仍依赖后续发布数据迁移，不在本票伪造完成。
+
+## 26. M3 ticket #6：预览失败门禁与可复现性
+
+**日期与范围**：2026-11-18。落地 issue #6：加固 `ALGORITHM_PREVIEW` 的完整 fail-closed 门禁、旧 epoch/取消/执行超时发布竞态和不可变 result 重放。唯一行为 seam 仍是 `RunLifecycle` 五操作。
+
+### 实现要点
+
+- 算法输出白名单收紧：概率必须处于 `[0.01, 0.99]`；EstimateProb 返回空候选时不再调用下游 RPC。
+- CheckConstraints 的 kept / rejected 必须来自 EstimateProb 原候选池，身份不可注入、不可重复、概率不可改写；全部候选被过滤时不得以空 kept 池调用 OptimizeWishlist。
+- OptimizeWishlist 结果必须来自 kept 候选，禁止新候选、重复候选和概率改写；空优化结果进入 `NO_RELIABLE_DATA`。
+- 算法调用后、结果发布前复核当前 owner/epoch、state_version、确认画像、cancel 请求、release 有效性和剩余主动执行时间。执行时间耗尽的迟到结果进入 `FAILED / EXECUTION_TIMEOUT`。
+- 发布事务遇到 cancel 请求时由当前 worker 在安全点提交 `CANCELLED`；旧 lease epoch 的迟到结果不能覆盖新 worker 已发布的 result。
+- `AlgorithmPreview` additive 增加 `internal_controlled_only`，与 `formal_recommendation=false`、风险提示和免责声明一起构成机器可读的受控预览边界。
+
+### 测试
+
+- 新增 14 项 RunLifecycle PostgreSQL 行为测试：非法概率、候选/拒绝候选注入、空候选池、全过滤、空优化、缺审计依据、unsupported scope、未确认画像、release 中途撤销、执行超时、取消/发布竞争、旧 epoch 迟到发布、同输入可复现、GET/重连 Watch 单版本重放和受控文案门禁。
+- gRPC 契约测试同步断言 `internal_controlled_only=true` 且 `formal_recommendation=false`。
+- 全部行为断言只通过 RunLifecycle 五操作观察；数据库仅用于隔离夹具和不可变 release 准备。
+
+### 边界
+
+- 本票只加固 `ALGORITHM_PREVIEW` 的内部安全出口，不实现在线 RAG、完整资格规则、真实 LLM Gateway、Strategy、Critic 或正式报告。
+- 预览成功仍不代表当年资格已完整核验，也不得转换为正式志愿方案。
