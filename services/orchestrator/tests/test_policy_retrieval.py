@@ -182,6 +182,9 @@ class PolicyRetrievalTests(unittest.TestCase):
         rerank_model=None,
         rerank_config_version=None,
         rerank_timeout_ms=None,
+        relevance_policy_version=None,
+        min_vector_similarity=None,
+        min_keyword_similarity=None,
         vector_rows=None,
         keyword_rows=None,
     ):
@@ -193,6 +196,14 @@ class PolicyRetrievalTests(unittest.TestCase):
                     "rerank_model": rerank_model,
                     "rerank_config_version": rerank_config_version,
                     "rerank_timeout_ms": rerank_timeout_ms,
+                }
+            )
+        if relevance_policy_version is not None:
+            release.update(
+                {
+                    "relevance_policy_version": relevance_policy_version,
+                    "min_vector_similarity": min_vector_similarity,
+                    "min_keyword_similarity": min_keyword_similarity,
                 }
             )
         return FakeConnection(
@@ -307,6 +318,153 @@ class PolicyRetrievalTests(unittest.TestCase):
         self.assertEqual(result.evidence[0].document.excerpt, row["text"])
         self.assertEqual(result.diagnostics.vector_candidates, 1)
         self.assertEqual(result.diagnostics.keyword_candidates, 0)
+
+    def test_vector_top_k_is_an_upper_bound_after_relevance_filtering(self):
+        strong = self.evidence_row("chunk-strong")
+        strong["vector_distance"] = 0.1
+        weak = self.evidence_row("chunk-weak")
+        weak["vector_distance"] = 0.8
+        result = RetrievePolicy(
+            FakeConnection(
+                {
+                    "status": "PUBLISHED",
+                    "revoked_at": None,
+                    "relevance_policy_version": "relevance-v1",
+                    "min_vector_similarity": 0.5,
+                    "min_keyword_similarity": 0.1,
+                },
+                {
+                    "embedding_model": "deterministic-test",
+                    "embedding_dim": 1024,
+                    "index_version": "idx-v1",
+                },
+                [],
+                [strong, weak],
+            ),
+            embedder=DeterministicEmbedder(),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(self.query(mode="vector", top_k=5))
+
+        self.assertEqual(result.status, "FOUND")
+        self.assertEqual(
+            [item.document.chunk_id for item in result.evidence],
+            ["chunk-strong"],
+        )
+        self.assertEqual(result.diagnostics.relevance_filtered_candidates, 1)
+        self.assertEqual(
+            result.diagnostics.relevance_policy_version,
+            "relevance-v1",
+        )
+
+    def test_keyword_relevance_filtering_discards_weak_similarity_matches(self):
+        strong = self.evidence_row("chunk-strong")
+        strong["keyword_similarity"] = 0.7
+        weak = self.evidence_row("chunk-weak")
+        weak["keyword_similarity"] = 0.05
+        result = RetrievePolicy(
+            FakeConnection(
+                {
+                    "status": "PUBLISHED",
+                    "revoked_at": None,
+                    "relevance_policy_version": "relevance-v1",
+                    "min_vector_similarity": 0.5,
+                    "min_keyword_similarity": 0.1,
+                },
+                [strong, weak],
+            ),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(self.query(mode="keyword", top_k=5))
+
+        self.assertEqual(result.status, "FOUND")
+        self.assertEqual(
+            [item.document.chunk_id for item in result.evidence],
+            ["chunk-strong"],
+        )
+        self.assertEqual(result.diagnostics.relevance_filtered_candidates, 1)
+
+    def test_invalid_relevance_policy_is_a_config_mismatch(self):
+        with self.assertRaises(PolicyRetrievalError) as raised:
+            RetrievePolicy(
+                FakeConnection(
+                    {
+                        "status": "PUBLISHED",
+                        "revoked_at": None,
+                        "relevance_policy_version": "relevance-v1",
+                        "min_vector_similarity": -0.1,
+                        "min_keyword_similarity": 0.1,
+                    }
+                )
+            ).retrieve(self.query(mode="keyword"))
+
+        self.assertEqual(
+            raised.exception.reason,
+            "RETRIEVAL_CONFIG_MISMATCH",
+        )
+
+    def test_vector_relevance_filtering_can_result_in_no_evidence(self):
+        weak_one = self.evidence_row("chunk-weak-1")
+        weak_one["vector_distance"] = 0.8
+        weak_two = self.evidence_row("chunk-weak-2")
+        weak_two["vector_distance"] = 0.9
+        result = RetrievePolicy(
+            FakeConnection(
+                {
+                    "status": "PUBLISHED",
+                    "revoked_at": None,
+                    "relevance_policy_version": "relevance-v1",
+                    "min_vector_similarity": 0.5,
+                    "min_keyword_similarity": 0.1,
+                },
+                {
+                    "embedding_model": "deterministic-test",
+                    "embedding_dim": 1024,
+                    "index_version": "idx-v1",
+                },
+                [],
+                [weak_one, weak_two],
+            ),
+            embedder=DeterministicEmbedder(),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(self.query(mode="vector", top_k=5))
+
+        self.assertEqual(result.status, "NO_EVIDENCE")
+        self.assertEqual(result.evidence, ())
+        self.assertEqual(result.diagnostics.vector_candidates, 2)
+        self.assertEqual(result.diagnostics.relevance_filtered_candidates, 2)
+        self.assertEqual(
+            result.diagnostics.relevance_policy_version,
+            "relevance-v1",
+        )
+
+    def test_hybrid_filters_each_channel_before_rrf(self):
+        vector_strong = self.evidence_row("chunk-vector-strong")
+        vector_strong["vector_distance"] = 0.1
+        vector_weak = self.evidence_row("chunk-vector-weak")
+        vector_weak["vector_distance"] = 0.8
+        keyword_weak = self.evidence_row("chunk-keyword-weak")
+        keyword_weak["keyword_similarity"] = 0.05
+        result = RetrievePolicy(
+            self.hybrid_connection(
+                relevance_policy_version="relevance-v1",
+                min_vector_similarity=0.5,
+                min_keyword_similarity=0.1,
+                vector_rows=[vector_strong, vector_weak],
+                keyword_rows=[keyword_weak],
+            ),
+            embedder=DeterministicEmbedder(),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(self.query(mode="hybrid", top_k=5))
+
+        self.assertEqual(result.status, "FOUND")
+        self.assertEqual(
+            [item.document.chunk_id for item in result.evidence],
+            ["chunk-vector-strong"],
+        )
+        self.assertEqual(result.diagnostics.relevance_filtered_candidates, 2)
+        self.assertEqual(
+            result.diagnostics.relevance_policy_version,
+            "relevance-v1",
+        )
 
     def test_vector_mode_rejects_a_chunk_set_outside_the_release_index_identity(self):
         embedder = DeterministicEmbedder()
@@ -1038,6 +1196,7 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             "migrations/16_policy_vector_release_identity.sql",
             "migrations/17_policy_rerank_release_identity.sql",
             "migrations/18_policy_retrieval_config_identity.sql",
+            "migrations/20_policy_relevance_policy.sql",
         ):
             self._apply_sql_file(migration)
 
@@ -1178,6 +1337,30 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             VALUES (%s, %s, %s, %s, %s)
             """,
             (release_id, enabled, model_name, config_version, timeout_ms),
+        )
+
+    def _seed_release_relevance(
+        self,
+        release_id,
+        *,
+        policy_version="relevance-v1",
+        min_vector_similarity=0.5,
+        min_keyword_similarity=0.1,
+    ):
+        self.conn.execute(
+            """
+            INSERT INTO release_policy_relevance (
+                release_id, policy_version,
+                min_vector_similarity, min_keyword_similarity
+            )
+            VALUES (%s, %s, %s, %s)
+            """,
+            (
+                release_id,
+                policy_version,
+                min_vector_similarity,
+                min_keyword_similarity,
+            ),
         )
 
     @staticmethod
@@ -1652,7 +1835,49 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             [item.document.doc_id for item in result.evidence],
             ["doc-match"],
         )
-        self.assertEqual(result.diagnostics.vector_candidates, 1)
+
+    def test_vector_mode_uses_release_relevance_policy_before_top_k(self):
+        release_id = self._seed_release("rel-vector-relevance-test")
+        self._seed_release_relevance(release_id)
+        self._seed_policy_document(
+            release_id,
+            "doc-strong",
+            embedding_axis=0,
+        )
+        self._seed_policy_document(
+            release_id,
+            "doc-weak",
+            embedding_axis=1,
+        )
+        result = RetrievePolicy(
+            self.conn,
+            embedder=DeterministicEmbedder(vector=[1.0] + [0.0] * 1023),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(
+            PolicyRetrievalQuery(
+                principal_id="principal-test",
+                query_text="转专业政策",
+                scope=ApplicabilityScope("湖南", 2025, "物理类", "本科批"),
+                release_id=release_id,
+                mode="vector",
+                top_k=5,
+            )
+        )
+
+        self.assertEqual(result.status, "FOUND")
+        self.assertEqual(
+            [item.document.doc_id for item in result.evidence],
+            ["doc-strong"],
+        )
+        self.assertEqual(
+            result.diagnostics.relevance_policy_version,
+            "relevance-v1",
+        )
+        self.assertEqual(
+            result.diagnostics.relevance_filtered_candidates,
+            1,
+        )
+        self.assertEqual(result.diagnostics.vector_candidates, 2)
 
     def test_hybrid_uses_the_same_hard_filter_base_for_both_routes(self):
         release_id = self._seed_release("rel-hybrid-scope-test")

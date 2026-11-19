@@ -178,13 +178,15 @@ func TestGetRunReturnsPolicyEvidenceThroughHTTP(t *testing.T) {
 				ResultKind:    "POLICY_EVIDENCE",
 			},
 			PolicyEvidence: &orchestratorv1.PolicyEvidenceResult{
-				ResultVersion:     "00000000-0000-0000-0000-000000000003",
-				ResultKind:        "POLICY_EVIDENCE",
-				RunId:             "00000000-0000-0000-0000-000000000001",
-				ReleaseId:         "rel-policy",
-				RetrievalStatus:   "FOUND",
-				VectorCandidates:  1,
-				KeywordCandidates: 1,
+				ResultVersion:               "00000000-0000-0000-0000-000000000003",
+				ResultKind:                  "POLICY_EVIDENCE",
+				RunId:                       "00000000-0000-0000-0000-000000000001",
+				ReleaseId:                   "rel-policy",
+				RetrievalStatus:             "FOUND",
+				VectorCandidates:            1,
+				KeywordCandidates:           1,
+				RelevanceFilteredCandidates: 3,
+				RelevancePolicyVersion:      "m4a-relevance-v1",
 				Evidence: []*orchestratorv1.PolicyEvidenceItem{
 					{
 						EvidenceId: "evidence-policy",
@@ -227,6 +229,18 @@ func TestGetRunReturnsPolicyEvidenceThroughHTTP(t *testing.T) {
 	}
 	if policyEvidence["retrievalStatus"] != "FOUND" {
 		t.Fatalf("retrievalStatus = %#v", policyEvidence["retrievalStatus"])
+	}
+	if policyEvidence["relevanceFilteredCandidates"] != float64(3) {
+		t.Fatalf(
+			"relevanceFilteredCandidates = %#v",
+			policyEvidence["relevanceFilteredCandidates"],
+		)
+	}
+	if policyEvidence["relevancePolicyVersion"] != "m4a-relevance-v1" {
+		t.Fatalf(
+			"relevancePolicyVersion = %#v",
+			policyEvidence["relevancePolicyVersion"],
+		)
 	}
 }
 

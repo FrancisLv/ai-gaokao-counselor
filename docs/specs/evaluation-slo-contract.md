@@ -70,6 +70,7 @@ RetrievalCase
   expected_chunk_ids: list<string>
   expected_doc_ids: list<string>
   must_exclude_sources: list<doc_id or school_id>
+  must_exclude_chunk_ids: optional list<chunk_id>
   tags: policy / charter / physical_exam / no_evidence / scope_conflict
   criticality: CRITICAL | NORMAL
 ```
@@ -174,6 +175,20 @@ scope_leak_rate =
 ```
 
 必须为 `0`，不是可容忍的观测项。
+
+### 4.4 Evidence Precision@5
+
+```text
+evidence_precision@5 =
+  count(top-5 evidence items marked acceptable)
+  / count(returned top-5 evidence items)
+```
+
+若没有返回证据，则该用例 precision 记 `0`。`irrelevant_evidence_rate =
+1 - evidence_precision@5`。
+
+`must_exclude_chunk_ids` 命中必须逐例失败，不能用 recall 平均值掩盖。正式质量门槛
+必须使用 owner `SIGNED_OFF` 的数据集校准；草稿/fixture 只报告指标和 diff。
 
 ## 5. 生成与事实指标
 

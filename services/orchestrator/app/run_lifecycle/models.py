@@ -140,6 +140,8 @@ class PolicyEvidencePayload(TypedDict, total=False):
     rerank_model: str | None
     rerank_config_version: str | None
     rerank_timeout_ms: int | None
+    relevance_filtered_candidates: int
+    relevance_policy_version: str | None
     evidence: list[PolicyEvidenceItemPayload]
 
 

@@ -20,6 +20,13 @@
     >
       检索降级：{{ degradedMessage }}
     </p>
+    <p
+      v-if="result.relevanceFilteredCandidates > 0"
+      class="muted"
+      data-testid="policy-relevance-filtered"
+    >
+      已过滤 {{ result.relevanceFilteredCandidates }} 条低于相关性阈值的候选。
+    </p>
 
     <div v-if="result.evidence.length" class="evidence-grid">
       <article

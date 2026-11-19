@@ -1306,6 +1306,12 @@ class RunLifecycle:
                 result.diagnostics.rerank_config_version
             ),
             "rerank_timeout_ms": result.diagnostics.rerank_timeout_ms,
+            "relevance_filtered_candidates": (
+                result.diagnostics.relevance_filtered_candidates
+            ),
+            "relevance_policy_version": (
+                result.diagnostics.relevance_policy_version
+            ),
             "evidence": [
                 {
                     "evidence_id": item.evidence_id,

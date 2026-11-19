@@ -225,9 +225,13 @@ make m4a-real-policy-import \
 首次真实装载结果：
 
 ```text
+release_id=rel_real_2025_8b7c08a71dc6d68a375284ad
 documents=2856
 chunks=23453
 skipped_documents_without_valid_chunks=3
+relevance_policy_version=m4a-relevance-v1
+min_vector_similarity=0.5
+min_keyword_similarity=0.1
 ```
 
 主库有 2,093 个超过 M4a 600 字符证据上限的旧 chunk。这些 chunk 不进入测试
@@ -258,7 +262,11 @@ query_text=转专业政策
 真实 vector 验收应返回：
 
 - `retrievalStatus=FOUND`
-- `vectorCandidates>0`
+- `vectorCandidates=8`
+- `relevanceFilteredCandidates=7`
+- `relevancePolicyVersion=m4a-relevance-v1`
+- 只返回 `doc_2025_8e5671c9b62d_c0004` 一条转专业证据，不再用同文档其他
+  低相关 chunk 补满 5 条
 - `degradedReason` 为空
 - 证据来源为 `gaokao.cn` 的真实院校章程
 

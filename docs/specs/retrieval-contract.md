@@ -129,7 +129,7 @@ PolicyRetrievalQuery
   document_types: list<string>      # 可为空
   release_id: string
   mode: hybrid | vector | keyword
-  top_k: int32                      # 默认 5
+  top_k: int32                      # 最多返回数量，默认 5
   pool_k: int32                     # 默认 20
 ```
 
@@ -146,6 +146,8 @@ diagnostics:
   rerank_model: string | null
   rerank_config_version: string | null
   rerank_timeout_ms: int32 | null
+  relevance_filtered_candidates: int32
+  relevance_policy_version: string | null
   degraded_reason: string | null
 ```
 
@@ -165,15 +167,19 @@ profile revision 或 `POLICY_QA` task input 构造 `RetrievalRunBinding`；调�
    语句之间产生不一致视图。
 2. 按 `document_type / school_id / regions / categories / batches / valid interval` 做 SQL 硬过滤。
 3. 在同一过滤结果内分别执行向量和关键词召回。
-4. 使用 RRF 融合：`score = Σ 1/(60 + rank)`。
-5. 在融合池内执行可选 rerank；rerank 只调整顺序，不能引入范围外 chunk。
-6. 按最终得分和稳定 tie-break 取 `top_k`。
-7. 为每个结果创建不可变 `EvidenceRef`。
+4. 按 release 绑定的 relevance policy 在各路内做绝对相关性资格判断。
+5. 使用 RRF 融合：`score = Σ 1/(60 + rank)`；RRF 名次不能替代绝对相关性。
+6. 在融合池内执行可选 rerank；rerank 只调整顺序，不能引入范围外 chunk。
+7. 按最终得分和稳定 tie-break 取最多 `top_k` 条合格证据。
+8. 为每个结果创建不可变 `EvidenceRef`。
 
 默认 tie-break：
 
 1. 最终得分降序；
 2. `chunk_id` 升序。
+
+`top_k` 是上限而不是配额。合格候选不足时返回实际数量；没有候选通过
+relevance policy 时返回 `NO_EVIDENCE`，不得用低相关尾部补满。
 
 ### 5.1 向量路
 
@@ -185,6 +191,7 @@ profile revision 或 `POLICY_QA` task input 构造 `RetrievalRunBinding`；调�
 - `release.rrf_k` 持久化融合常数，当前 schema 约束必须等于 `60`；缺失或不一致时
   返回 `RETRIEVAL_CONFIG_MISMATCH`；
 - `release_policy_index` 记录 release 的 embedding 模型、向量维度和 index version；查询 embedding 必须由该模型生成；
+- `release_policy_relevance` 记录 release 级 relevance policy 版本、最低 vector cosine similarity 和最低 keyword similarity；
 - release 映射的 `policy_chunk_set` 及其 chunk 身份必须与该 release 声明完全一致；
 - 模型或维度不匹配时返回 `INDEX_MODEL_MISMATCH`，不得降级混读；
 - `mode=vector` 时模型不可用或查询执行失败返回 `VECTOR_UNAVAILABLE`，不能返回 `NO_EVIDENCE`；
@@ -249,6 +256,7 @@ profile revision 或 `POLICY_QA` task input 构造 `RetrievalRunBinding`；调�
 | release 不存在/撤销 | `RELEASE_UNAVAILABLE`，不查询 |
 | 省年科批不在支持范围 | `UNSUPPORTED_SCOPE`，不放宽 |
 | 硬过滤后为空 | `NO_EVIDENCE`，不扩大范围 |
+| 硬过滤后有候选，但均未通过 relevance policy | `NO_EVIDENCE`，不返回低相关尾部 |
 | release 声明的模型/维度或 chunk/chunk set 索引身份不一致 | `INDEX_MODEL_MISMATCH`，零混读 |
 | vector-only 的模型不可用、查询执行失败 | `VECTOR_UNAVAILABLE`，不伪装为 `NO_EVIDENCE` |
 | hybrid 的向量模型不可用 | 同范围关键词检索，`degraded_reason=VECTOR_UNAVAILABLE` |

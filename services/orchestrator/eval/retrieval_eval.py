@@ -27,6 +27,8 @@ class RetrievalMetrics:
     recall_at_20: float
     mrr: float
     scope_leak_rate: float
+    evidence_precision_at_5: float
+    irrelevant_evidence_rate: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +42,7 @@ class RetrievalCaseResult:
     expected_doc_ids: tuple[str, ...]
     actual_evidence: tuple
     scope_leaks: tuple[dict, ...]
+    hard_negative_chunk_leaks: tuple[str, ...]
     first_diff: dict | None
 
 
@@ -66,6 +69,7 @@ _CRITICALITIES = frozenset({"CRITICAL", "NORMAL"})
 _OWNER_STATUSES = frozenset({"DRAFT", "PENDING_SIGNOFF", "SIGNED_OFF"})
 _RECALL_AT_5_MIN = 0.80
 _MRR_MIN = 0.65
+_EVIDENCE_PRECISION_AT_5_MIN = 0.20
 _REQUIRED_MANIFEST_FIELDS = (
     "dataset_version",
     "dataset_sha256",
@@ -189,7 +193,10 @@ def _validate_case(case: dict) -> None:
         "expected_chunk_ids",
         "expected_doc_ids",
         "must_exclude_sources",
+        "must_exclude_chunk_ids",
     ):
+        if field not in case and field == "must_exclude_chunk_ids":
+            continue
         if (
             not isinstance(case[field], list)
             or not all(
@@ -197,6 +204,13 @@ def _validate_case(case: dict) -> None:
             )
         ):
             raise ValueError(f"{case_id}: {field} must be a string list")
+    if set(case["expected_chunk_ids"]) & set(
+        case.get("must_exclude_chunk_ids", ())
+    ):
+        raise ValueError(
+            f"{case_id}: expected chunk ids overlap "
+            "must_exclude_chunk_ids"
+        )
     if (
         "no_evidence" in case["tags"]
         and (case["expected_chunk_ids"] or case["expected_doc_ids"])
@@ -211,6 +225,14 @@ def _validate_case(case: dict) -> None:
     ):
         raise ValueError(
             f"{case_id}: non-NO_EVIDENCE cases require expected evidence"
+        )
+    if (
+        "same_document_hard_negative" in case["tags"]
+        and not case.get("must_exclude_chunk_ids")
+    ):
+        raise ValueError(
+            f"{case_id}: same_document_hard_negative requires "
+            "must_exclude_chunk_ids"
         )
     document_types = case.get("document_types", [])
     if (
@@ -351,6 +373,8 @@ def evaluate_retrieval(
     no_evidence_failed = 0
     cases_with_evidence = 0
     cases_with_scope_leak = 0
+    relevant_evidence_at_5 = 0
+    returned_evidence_at_5 = 0
 
     for case in dataset.cases:
         scope = case["scope"]
@@ -393,6 +417,20 @@ def evaluate_retrieval(
         expected_ids = set(case["expected_chunk_ids"]) | set(
             case["expected_doc_ids"]
         )
+        top_5_evidence = result.evidence[:5]
+        acceptable_chunks = set(case["expected_chunk_ids"])
+        acceptable_docs = set(case["expected_doc_ids"])
+        if acceptable_chunks:
+            relevant_evidence_at_5 += sum(
+                item.document.chunk_id in acceptable_chunks
+                for item in top_5_evidence
+            )
+        else:
+            relevant_evidence_at_5 += sum(
+                item.document.doc_id in acceptable_docs
+                for item in top_5_evidence
+            )
+        returned_evidence_at_5 += len(top_5_evidence)
         expected_ranks = [
             rank
             for rank, item in enumerate(result.evidence, start=1)
@@ -407,6 +445,12 @@ def evaluate_retrieval(
             expected_release_id=release_id,
             result_release_id=result.release_id,
             as_of=as_of,
+        )
+        excluded_chunks = set(case.get("must_exclude_chunk_ids", ()))
+        hard_negative_chunk_leaks = tuple(
+            item.document.chunk_id
+            for item in result.evidence
+            if item.document.chunk_id in excluded_chunks
         )
         if result.evidence:
             cases_with_evidence += 1
@@ -456,6 +500,12 @@ def evaluate_retrieval(
                 "expected": [],
                 "actual": list(scope_leaks),
             }
+        elif hard_negative_chunk_leaks:
+            first_diff = {
+                "field": "hard_negative_chunk",
+                "expected": [],
+                "actual": list(hard_negative_chunk_leaks),
+            }
         elif (
             ("no_evidence" in case["tags"] and result.status != "NO_EVIDENCE")
             or (
@@ -501,6 +551,7 @@ def evaluate_retrieval(
                 expected_doc_ids=tuple(case["expected_doc_ids"]),
                 actual_evidence=tuple(result.evidence),
                 scope_leaks=scope_leaks,
+                hard_negative_chunk_leaks=hard_negative_chunk_leaks,
                 first_diff=first_diff,
             )
         )
@@ -513,6 +564,11 @@ def evaluate_retrieval(
         recall_at_5 = recall_at_5_hits / eligible_case_count
         recall_at_20 = recall_at_20_hits / eligible_case_count
         mrr = reciprocal_rank_sum / eligible_case_count
+    evidence_precision_at_5 = (
+        relevant_evidence_at_5 / returned_evidence_at_5
+        if returned_evidence_at_5
+        else 0.0
+    )
     metrics = RetrievalMetrics(
         recall_at_5=recall_at_5,
         recall_at_20=recall_at_20,
@@ -522,6 +578,8 @@ def evaluate_retrieval(
             if cases_with_evidence
             else 0.0
         ),
+        evidence_precision_at_5=evidence_precision_at_5,
+        irrelevant_evidence_rate=1.0 - evidence_precision_at_5,
     )
     gate_status = (
         "PASS"
@@ -529,6 +587,10 @@ def evaluate_retrieval(
             eligible_case_count > 0
             and recall_at_5 >= _RECALL_AT_5_MIN
             and (not authoritative_quality or mrr >= _MRR_MIN)
+            and (
+                not authoritative_quality
+                or evidence_precision_at_5 >= _EVIDENCE_PRECISION_AT_5_MIN
+            )
             and no_evidence_failed == 0
             and metrics.scope_leak_rate == 0
             and all(case.first_diff is None for case in case_results)
@@ -697,12 +759,15 @@ def build_baseline(
                     for item in case_result.actual_evidence
                 ],
                 "scope_leaks": list(case_result.scope_leaks),
+                "hard_negative_chunk_leaks": list(
+                    case_result.hard_negative_chunk_leaks
+                ),
                 "first_diff": case_result.first_diff,
             }
         )
 
     payload = {
-        "schema_version": "retrieval-eval-baseline-v2",
+        "schema_version": "retrieval-eval-baseline-v3",
         "generated_at": generated_at,
         "dataset": {
             "version": dataset.manifest["dataset_version"],
@@ -726,6 +791,7 @@ def build_baseline(
         "thresholds": {
             "recall_at_5_min": _RECALL_AT_5_MIN,
             "mrr_min": _MRR_MIN,
+            "evidence_precision_at_5_min": _EVIDENCE_PRECISION_AT_5_MIN,
             "scope_leak_rate_max": 0.0,
         },
         "metrics": {
@@ -733,6 +799,12 @@ def build_baseline(
             "retrieval_recall_at_20": report.metrics.recall_at_20,
             "retrieval_mrr": report.metrics.mrr,
             "retrieval_scope_leak_rate": report.metrics.scope_leak_rate,
+            "retrieval_evidence_precision_at_5": (
+                report.metrics.evidence_precision_at_5
+            ),
+            "retrieval_irrelevant_evidence_rate": (
+                report.metrics.irrelevant_evidence_rate
+            ),
         },
         "eligible_case_count": report.eligible_case_count,
         "no_evidence_passed": report.no_evidence_passed,

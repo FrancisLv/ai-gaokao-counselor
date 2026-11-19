@@ -1,0 +1,13 @@
+{
+  "dataset_version": "retrieval-hunan-2025-v0.3.0-draft",
+  "retrieval_cases_file": "qa.jsonl",
+  "retrieval_cases_sha256": "340634798696e7ffe317e9e92f9ddc51b5f2d1eae5f61abe0501a7976777c23e",
+  "dataset_sha256": "340634798696e7ffe317e9e92f9ddc51b5f2d1eae5f61abe0501a7976777c23e",
+  "case_count": 31,
+  "created_at": "2026-11-19T17:30:00+08:00",
+  "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+  "owner": "Francis",
+  "owner_status": "PENDING_SIGNOFF",
+  "immutable": true,
+  "notes": "Agent 草稿 v0.3：在 v0.2 基础上增加同文档 hard-negative 与 relevance precision 用例；新增湖南国防工业职业技术学院真实转专业案例，仅 c0004 为 expected chunk，其余同文档 chunk 明确标为必须排除。全国/省级长期政策用例仍待正式 release 绑定。Francis 签字前不得宣称正式质量门禁。"
+}

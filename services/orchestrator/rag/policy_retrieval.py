@@ -175,6 +175,8 @@ class PolicyRetrievalDiagnostics:
     rerank_model: str | None = None
     rerank_config_version: str | None = None
     rerank_timeout_ms: int | None = None
+    relevance_filtered_candidates: int = 0
+    relevance_policy_version: str | None = None
     degraded_reason: str | None = None
 
 
@@ -282,10 +284,15 @@ class RetrievePolicy:
                         rr.model_name AS rerank_model,
                         rr.config_version AS rerank_config_version,
                         rr.timeout_ms AS rerank_timeout_ms,
+                        rp.policy_version AS relevance_policy_version,
+                        rp.min_vector_similarity,
+                        rp.min_keyword_similarity,
                         r.rrf_k
                     FROM release r
                     LEFT JOIN release_policy_rerank rr
                       ON rr.release_id = r.release_id
+                    LEFT JOIN release_policy_relevance rp
+                      ON rp.release_id = r.release_id
                     WHERE r.release_id = %s
                     """,
                     (query.release_id,),
@@ -316,6 +323,11 @@ class RetrievePolicy:
                 "RETRIEVAL_CONFIG_MISMATCH",
                 "the bound release has no compatible RRF retrieval config",
             )
+        (
+            relevance_policy_version,
+            min_vector_similarity,
+            min_keyword_similarity,
+        ) = self._relevance_policy(release)
 
         scope = query.scope
         if (
@@ -343,6 +355,7 @@ class RetrievePolicy:
         )
         vector_count = 0
         keyword_count = 0
+        relevance_filtered_count = 0
         degraded_reason = None
         if query.mode == "keyword":
             try:
@@ -353,6 +366,12 @@ class RetrievePolicy:
                     "keyword retrieval is temporarily unavailable",
                 ) from exc
             keyword_count = candidate_count
+            rows, relevance_filtered_count = (
+                self._filter_keyword_relevance(
+                    rows,
+                    min_keyword_similarity,
+                )
+            )
         elif query.mode == "vector":
             try:
                 rows, candidate_count = self._vector_candidates(query)
@@ -362,10 +381,23 @@ class RetrievePolicy:
                     "vector retrieval is temporarily unavailable",
                 ) from exc
             vector_count = candidate_count
+            rows, relevance_filtered_count = (
+                self._filter_vector_relevance(
+                    rows,
+                    min_vector_similarity,
+                )
+            )
         elif query.mode == "hybrid":
             vector_available = True
             try:
                 vector_rows, vector_count = self._vector_candidates(query)
+                vector_rows, vector_filtered = (
+                    self._filter_vector_relevance(
+                        vector_rows,
+                        min_vector_similarity,
+                    )
+                )
+                relevance_filtered_count += vector_filtered
             except PolicyRetrievalError as exc:
                 if exc.reason != "VECTOR_UNAVAILABLE":
                     raise
@@ -384,6 +416,14 @@ class RetrievePolicy:
                 keyword_rows = []
                 keyword_available = False
                 degraded_reason = "KEYWORD_UNAVAILABLE"
+            if keyword_available:
+                keyword_rows, keyword_filtered = (
+                    self._filter_keyword_relevance(
+                        keyword_rows,
+                        min_keyword_similarity,
+                    )
+                )
+                relevance_filtered_count += keyword_filtered
             if not vector_available and not keyword_available:
                 raise PolicyRetrievalError(
                     "RETRIEVAL_UNAVAILABLE",
@@ -413,6 +453,8 @@ class RetrievePolicy:
             rerank_model=rerank_model,
             rerank_config_version=rerank_config_version,
             rerank_timeout_ms=rerank_timeout_ms,
+            relevance_filtered_candidates=relevance_filtered_count,
+            relevance_policy_version=relevance_policy_version,
             degraded_reason=degraded_reason,
         )
         if not rows:
@@ -448,6 +490,75 @@ class RetrievePolicy:
             evidence=tuple(evidence),
             diagnostics=diagnostics,
         )
+
+    @staticmethod
+    def _relevance_policy(
+        release: dict,
+    ) -> tuple[str | None, float | None, float | None]:
+        version = release.get("relevance_policy_version")
+        minimums = (
+            release.get("min_vector_similarity"),
+            release.get("min_keyword_similarity"),
+        )
+        if version is None and all(value is None for value in minimums):
+            return None, None, None
+        if (
+            not isinstance(version, str)
+            or not version.strip()
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+                or value > 1
+                for value in minimums
+            )
+        ):
+            raise PolicyRetrievalError(
+                "RETRIEVAL_CONFIG_MISMATCH",
+                "the bound release has an invalid relevance policy",
+            )
+        return (
+            version,
+            float(minimums[0]),
+            float(minimums[1]),
+        )
+
+    @staticmethod
+    def _filter_vector_relevance(
+        rows: list[dict],
+        min_similarity,
+    ) -> tuple[list[dict], int]:
+        if min_similarity is None:
+            return rows, 0
+        threshold = float(min_similarity)
+        qualified = []
+        filtered = 0
+        for row in rows:
+            distance = row.get("vector_distance")
+            if distance is None or 1.0 - float(distance) < threshold:
+                filtered += 1
+                continue
+            qualified.append(row)
+        return qualified, filtered
+
+    @staticmethod
+    def _filter_keyword_relevance(
+        rows: list[dict],
+        min_similarity,
+    ) -> tuple[list[dict], int]:
+        if min_similarity is None:
+            return rows, 0
+        threshold = float(min_similarity)
+        qualified = []
+        filtered = 0
+        for row in rows:
+            similarity = row.get("keyword_similarity")
+            if similarity is None or float(similarity) < threshold:
+                filtered += 1
+                continue
+            qualified.append(row)
+        return qualified, filtered
 
     @staticmethod
     def _rrf_fuse(

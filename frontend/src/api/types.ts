@@ -123,6 +123,8 @@ export interface PolicyEvidenceResult {
   rerankModel?: string;
   rerankConfigVersion?: string;
   rerankTimeoutMs?: number;
+  relevanceFilteredCandidates: number;
+  relevancePolicyVersion?: string;
   evidence: PolicyEvidenceItem[];
 }
 

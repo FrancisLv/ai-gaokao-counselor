@@ -286,6 +286,8 @@ message PolicyEvidenceResult {
   string rerank_config_version = 11;
   repeated PolicyEvidenceItem evidence = 12;
   int32 rerank_timeout_ms = 13;
+  int32 relevance_filtered_candidates = 14;
+  string relevance_policy_version = 15;
 }
 
 message RunViewReply {

@@ -21,6 +21,9 @@ EMBEDDING_DIM = 1024
 INDEX_VERSION = "idx_bge_large_zh_v1_5_2025_v1"
 POLICY_YEAR = 2025
 MAX_CHUNK_CHARS = 600
+RELEVANCE_POLICY_VERSION = "m4a-relevance-v1"
+MIN_VECTOR_SIMILARITY = 0.5
+MIN_KEYWORD_SIMILARITY = 0.1
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -258,6 +261,11 @@ def load(
             "embedding_dim": EMBEDDING_DIM,
             "index_version": INDEX_VERSION,
             "max_chunk_chars": MAX_CHUNK_CHARS,
+            "relevance_policy": {
+                "policy_version": RELEVANCE_POLICY_VERSION,
+                "min_vector_similarity": MIN_VECTOR_SIMILARITY,
+                "min_keyword_similarity": MIN_KEYWORD_SIMILARITY,
+            },
             "document_count": len(release_entries),
             "chunk_count": total_chunks,
             "documents": release_entries,
@@ -311,6 +319,21 @@ def load(
                 INDEX_VERSION,
             ),
         )
+        target.execute(
+            """
+            INSERT INTO release_policy_relevance (
+                release_id, policy_version,
+                min_vector_similarity, min_keyword_similarity
+            )
+            VALUES (%s, %s, %s, %s)
+            """,
+            (
+                release_id,
+                RELEVANCE_POLICY_VERSION,
+                MIN_VECTOR_SIMILARITY,
+                MIN_KEYWORD_SIMILARITY,
+            ),
+        )
         _executemany(
             target,
             """
@@ -336,7 +359,14 @@ def load(
             )
             VALUES
                 (%s, 'policy_documents', 'policy-2025', %s, %s),
-                (%s, 'policy_embedding_index', 'bge-large-zh-v1.5', %s, %s)
+                (%s, 'policy_embedding_index', 'bge-large-zh-v1.5', %s, %s),
+                (
+                    %s,
+                    'policy_relevance',
+                    'm4a-relevance',
+                    %s,
+                    %s
+                )
             """,
             (
                 release_id,
@@ -346,6 +376,12 @@ def load(
                 INDEX_VERSION,
                 _sha256_text(
                     f"{EMBEDDING_MODEL}:{EMBEDDING_DIM}:{INDEX_VERSION}"
+                ),
+                release_id,
+                RELEVANCE_POLICY_VERSION,
+                _sha256_text(
+                    f"{RELEVANCE_POLICY_VERSION}:"
+                    f"{MIN_VECTOR_SIMILARITY}:{MIN_KEYWORD_SIMILARITY}"
                 ),
             ),
         )
@@ -363,6 +399,9 @@ def load(
     print(f"chunks={total_chunks}")
     print(f"skipped_documents_without_valid_chunks={skipped_docs}")
     print("retrieval_as_of=2025-11-19")
+    print(f"relevance_policy_version={RELEVANCE_POLICY_VERSION}")
+    print(f"min_vector_similarity={MIN_VECTOR_SIMILARITY}")
+    print(f"min_keyword_similarity={MIN_KEYWORD_SIMILARITY}")
 
 
 def main() -> None:

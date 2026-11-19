@@ -14,7 +14,10 @@ from policy_schema import reset_schema
 EMBEDDING_MODEL = "acceptance-keyword"
 INDEX_VERSION = "acceptance-index-v1"
 ACCEPTANCE_YEAR = datetime.now(ZoneInfo("Asia/Shanghai")).year
-SEED_VERSION = "m4a-frontend-v1"
+SEED_VERSION = "m4a-frontend-v2"
+RELEVANCE_POLICY_VERSION = "m4a-acceptance-relevance-v1"
+MIN_VECTOR_SIMILARITY = 0.0
+MIN_KEYWORD_SIMILARITY = 0.1
 
 
 def _sha256(value: str) -> str:
@@ -151,6 +154,11 @@ def seed(dsn: str, *, reset: bool = False) -> None:
         "application_year": ACCEPTANCE_YEAR,
         "embedding_model": EMBEDDING_MODEL,
         "index_version": INDEX_VERSION,
+        "relevance_policy": {
+            "policy_version": RELEVANCE_POLICY_VERSION,
+            "min_vector_similarity": MIN_VECTOR_SIMILARITY,
+            "min_keyword_similarity": MIN_KEYWORD_SIMILARITY,
+        },
     }
     manifest_text = json.dumps(
         manifest,
@@ -209,6 +217,21 @@ def seed(dsn: str, *, reset: bool = False) -> None:
                 VALUES (%s, %s, 1024, %s)
                 """,
                 (release_id, EMBEDDING_MODEL, INDEX_VERSION),
+            )
+            conn.execute(
+                """
+                INSERT INTO release_policy_relevance (
+                    release_id, policy_version,
+                    min_vector_similarity, min_keyword_similarity
+                )
+                VALUES (%s, %s, %s, %s)
+                """,
+                (
+                    release_id,
+                    RELEVANCE_POLICY_VERSION,
+                    MIN_VECTOR_SIMILARITY,
+                    MIN_KEYWORD_SIMILARITY,
+                ),
             )
             _insert_document(
                 conn,

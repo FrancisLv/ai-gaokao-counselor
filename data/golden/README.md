@@ -5,14 +5,14 @@
 评测集按不可变版本目录存放。当前检索集版本：
 
 ```text
-retrieval-hunan-2025-v0.2.0-draft/
+retrieval-hunan-2025-v0.3.0-draft/
   qa.jsonl
   manifest.json
 ```
 
 检索专用版本目录必须包含：
 
-- `qa.jsonl`：检索用例，至少包含 `case_id / query / scope / expected_chunk_ids / expected_doc_ids / must_exclude_sources / tags / criticality / interference`
+- `qa.jsonl`：检索用例，至少包含 `case_id / query / scope / expected_chunk_ids / expected_doc_ids / must_exclude_sources / tags / criticality / interference`；同一文档内的低相关 hard negative 可额外使用 `must_exclude_chunk_ids`
 - `manifest.json`：记录 `dataset_version`、dataset/Case 文件 SHA256、case count、release、标注人、owner 状态和创建时间
 
 只有包含端到端评测的版本才额外要求 `cases.jsonl`，至少包含
@@ -21,6 +21,10 @@ retrieval-hunan-2025-v0.2.0-draft/
 当前检索草稿的 `owner_status` 为 `PENDING_SIGNOFF`。在 Francis 完成定标前，只能用于
 harness 冒烟、diff 和待审阅基线，不能宣称正式检索质量门禁。全国/省级长期政策用例
 还明确标记为 `PENDING_RELEASE_BINDING`，须绑定正式 release 后才能运行真实 baseline。
+
+v0.3 在 v0.2 的 30 条用例上新增一条真实同文档 relevance precision 用例。评测除
+recall/MRR 外还报告 `evidence_precision@5` 与 `irrelevant_evidence_rate`；
+`must_exclude_chunk_ids` 命中会逐例失败，不能被 recall 平均值掩盖。
 
 首批规模为检索集 30 条、端到端集 10 条；本版本先交付检索集。后续检索集扩展目标
 为 100–200 条。修改任何用例都必须复制到新的版本目录并生成新 hash 与新
@@ -56,7 +60,7 @@ scripts/run_retrieval_eval.py \
 当前冻结 fixture baseline：
 
 ```text
-baselines/retrieval-hunan-2025-v0.2.0-draft.rerank-off.fixture-b291889.json
+baselines/retrieval-hunan-2025-v0.3.0-draft.rerank-off.fixture.json
 ```
 
 baseline 记录 dataset SHA、code identity、model route、price table、verifier、

@@ -35,14 +35,14 @@ DEFAULT_DATASET = (
     ROOT
     / "data"
     / "golden"
-    / "retrieval-hunan-2025-v0.2.0-draft"
+    / "retrieval-hunan-2025-v0.3.0-draft"
 )
 DEFAULT_OUTPUT = (
     ROOT
     / "data"
     / "golden"
     / "baselines"
-    / "retrieval-hunan-2025-v0.2.0-draft.rerank-off.fixture.json"
+    / "retrieval-hunan-2025-v0.3.0-draft.rerank-off.fixture.json"
 )
 SOURCE_FILES = (
     "services/orchestrator/eval/retrieval_eval.py",
@@ -219,6 +219,11 @@ def main():
         retriever = DeterministicGoldenFixture(dataset.cases)
         execution = "deterministic-contract-fixture"
         rrf_k = 60
+        relevance_policy = {
+            "policy_version": "fixture-relevance-v1",
+            "min_vector_similarity": 0.5,
+            "min_keyword_similarity": 0.1,
+        }
     else:
         if not args.dsn:
             raise SystemExit("real retrieval requires --dsn")
@@ -237,12 +242,18 @@ def main():
             from rag.embedder import Embedder
 
             embedder = Embedder(model_name=args.embedding_model)
-        conn = psycopg.connect(args.dsn)
+        conn = psycopg.connect(args.dsn, autocommit=True)
         release_config = conn.execute(
             """
-            SELECT rrf_k
-            FROM release
-            WHERE release_id = %s
+            SELECT
+                r.rrf_k,
+                rp.policy_version,
+                rp.min_vector_similarity,
+                rp.min_keyword_similarity
+            FROM release r
+            LEFT JOIN release_policy_relevance rp
+              ON rp.release_id = r.release_id
+            WHERE r.release_id = %s
             """,
             (args.release_id,),
         ).fetchone()
@@ -251,7 +262,17 @@ def main():
             raise SystemExit(
                 "retrieval release is missing the contract rrf_k=60"
             )
+        if release_config[1] is None:
+            conn.close()
+            raise SystemExit(
+                "retrieval release is missing its relevance policy"
+            )
         rrf_k = release_config[0]
+        relevance_policy = {
+            "policy_version": release_config[1],
+            "min_vector_similarity": release_config[2],
+            "min_keyword_similarity": release_config[3],
+        }
         retriever = RetrievePolicy(
             conn,
             embedder=embedder,
@@ -290,6 +311,7 @@ def main():
         "as_of": args.as_of,
         "top_k": 20,
         "pool_k": 20,
+        "relevance_policy": relevance_policy,
         "execution": execution,
         "authoritative_quality": authoritative_quality,
     }

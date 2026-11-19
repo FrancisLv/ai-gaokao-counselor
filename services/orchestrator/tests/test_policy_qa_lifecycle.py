@@ -144,6 +144,7 @@ class PolicyQaLifecycleTests(RunLifecyclePostgresTest):
             DocumentApplicability,
             DocumentEvidence,
             EvidenceRef,
+            PolicyRetrievalDiagnostics,
             PolicyRetrievalResult,
         )
 
@@ -189,6 +190,11 @@ class PolicyQaLifecycleTests(RunLifecyclePostgresTest):
                 status="FOUND",
                 release_id=release_id,
                 evidence=(evidence,),
+                diagnostics=PolicyRetrievalDiagnostics(
+                    vector_candidates=2,
+                    relevance_filtered_candidates=1,
+                    relevance_policy_version="m4a-relevance-v1",
+                ),
             )
         )
         lifecycle = RunLifecycle(
@@ -244,6 +250,14 @@ class PolicyQaLifecycleTests(RunLifecyclePostgresTest):
         self.assertEqual(
             view.result_payload["evidence"][0]["producer_version"],
             "policy-retrieval-v1",
+        )
+        self.assertEqual(
+            view.result_payload["relevance_filtered_candidates"],
+            1,
+        )
+        self.assertEqual(
+            view.result_payload["relevance_policy_version"],
+            "m4a-relevance-v1",
         )
         self.assertEqual(retriever.queries[0].release_id, release_id)
         self.assertEqual(retriever.queries[0].school_ids, ("1001",))

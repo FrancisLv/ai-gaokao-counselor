@@ -1299,7 +1299,8 @@ rerank 模型质量。
   `rerank_timeout_ms`；前端仅允许 http/https 来源链接；运行中任务刷新后会恢复 SSE。
 - 新增真实 2025 章程装载脚本：从主库复制 2,859 份文档和已有 1024 维 embedding，
   回填 school_id/hash/source/chunk set/applicability/release，发布
-  `rel_real_2025_c52bb419b1c0c5ffaf558cbc`。2,093 个超过 600 字符的旧 chunk
+  含 relevance policy 的 `rel_real_2025_8b7c08a71dc6d68a375284ad`。2,093 个
+  超过 600 字符的旧 chunk
   不进入 release；最终装载 2,856 份文档、23,453 个合规 chunk。
 - 生产入口改用 worker 异步执行，避免首次 BGE 模型加载阻塞 `SubmitRun` 并造成
   gateway 504；新增 `POLICY_RETRIEVAL_AS_OF`，旧 2025 数据验收固定
@@ -1309,3 +1310,32 @@ rerank 模型质量。
 
 - 当前只展示检索证据，不生成最终政策解释。
 - seed 只允许写入数据库名含 `test` / `acceptance` 的 DSN。
+
+## 41. M4a follow-up：相关性资格与 top_k 上限
+
+**日期与范围**：2026-11-19，对应 issue #14。修复 `top_k=5` 在单校、单份章程内
+用低相关同文档 chunk 补满结果的问题；不改变硬过滤和证据投影。
+
+### 实现
+
+- 迁移 20 新增 release 级 `release_policy_relevance`，保存策略版本、最低 vector
+  cosine similarity 和最低 keyword similarity。
+- `RetrievePolicy` 在 RRF 前分别过滤两路低相关候选；`top_k` 明确为最多返回数量，
+  合格候选不足时返回实际数量，全部不合格时返回 `NO_EVIDENCE`。
+- diagnostics 增加 `relevance_filtered_candidates` 和
+  `relevance_policy_version`，经 proto additive 字段进入 GetRun/RESULT 和前端。
+- 真实 2025 release 升级为 `rel_real_2025_8b7c08a71dc6d68a375284ad`，初版策略为
+  `m4a-relevance-v1`、vector `0.50`、keyword `0.10`。该校验值来自真实 golden
+  set 初步分布，仍需 owner 在扩展数据上复核。
+- golden set 新增不可变 `v0.3.0-draft`：31 条，新增真实 2465 同文档 hard-negative
+  用例；harness 报告 `evidence_precision@5`、`irrelevant_evidence_rate`，并对
+  `must_exclude_chunk_ids` 命中逐例失败。
+
+### 验证
+
+- 真实 2465 查询：`vectorCandidates=8`，过滤 7 条，最终仅返回 `c0004`。
+- v0.3 fixture baseline：recall/MRR/precision 均为 1，仅证明 harness 与契约。
+- v0.3 真实 vector 评测：recall@5/MRR 为 0.931，relevance precision 仍只有
+  `0.064`，旧 30 条草稿中存在 expected chunk 已被 600 字符规则移除和
+  `NO_EVIDENCE` 标签与真实数据不一致的问题。新 2465 用例通过且无 hard-negative
+  leak；真实质量门禁继续 FAIL，不冒充 owner signoff。

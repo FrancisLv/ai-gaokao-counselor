@@ -263,6 +263,26 @@ class RetrievalDatasetTests(unittest.TestCase):
                 continue
             load_retrieval_dataset(dataset_dir)
 
+    def test_v03_golden_set_contains_same_document_hard_negatives(self):
+        dataset = load_retrieval_dataset(
+            ROOT
+            / "data"
+            / "golden"
+            / "retrieval-hunan-2025-v0.3.0-draft"
+        )
+
+        self.assertEqual(len(dataset.cases), 31)
+        case = next(
+            case
+            for case in dataset.cases
+            if case["case_id"] == "retrieval-031"
+        )
+        self.assertEqual(
+            case["expected_chunk_ids"],
+            ["doc_2025_8e5671c9b62d_c0004"],
+        )
+        self.assertEqual(len(case["must_exclude_chunk_ids"]), 7)
+
     def test_only_real_runs_with_a_signed_owner_are_authoritative(self):
         self.assertFalse(
             is_authoritative_quality(
@@ -711,6 +731,85 @@ class RetrievalDatasetTests(unittest.TestCase):
         )
         self.assertEqual(report.cases[0].first_diff["field"], "scope_leaks")
 
+    def test_same_document_hard_negative_fails_the_case_and_gate(self):
+        case = self.valid_case()
+        case.update(
+            expected_chunk_ids=["chunk-relevant"],
+            expected_doc_ids=["doc-1"],
+            must_exclude_chunk_ids=["chunk-irrelevant"],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_dataset(root, case)
+            dataset = load_retrieval_dataset(root)
+
+        retriever = DeterministicRetriever(
+            {
+                case["query"]: PolicyRetrievalResult(
+                    "FOUND",
+                    "rel-test",
+                    (
+                        evidence("chunk-relevant", "doc-1"),
+                        evidence("chunk-irrelevant", "doc-1"),
+                    ),
+                )
+            }
+        )
+        report = evaluate_retrieval(
+            dataset,
+            retriever,
+            mode="vector",
+            as_of=AS_OF,
+        )
+
+        self.assertEqual(report.gate_status, "FAIL")
+        self.assertEqual(
+            report.cases[0].first_diff["field"],
+            "hard_negative_chunk",
+        )
+
+    def test_evidence_precision_detects_relevance_tail_filling(self):
+        case = self.valid_case()
+        case.update(
+            expected_chunk_ids=["chunk-relevant"],
+            expected_doc_ids=["doc-1"],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_dataset(root, case)
+            dataset = load_retrieval_dataset(root)
+
+        retriever = DeterministicRetriever(
+            {
+                case["query"]: PolicyRetrievalResult(
+                    "FOUND",
+                    "rel-test",
+                    (
+                        evidence("chunk-relevant", "doc-1"),
+                        evidence("chunk-tail-1", "doc-1"),
+                        evidence("chunk-tail-2", "doc-1"),
+                        evidence("chunk-tail-3", "doc-1"),
+                        evidence("chunk-tail-4", "doc-1"),
+                    ),
+                )
+            }
+        )
+        report = evaluate_retrieval(
+            dataset,
+            retriever,
+            mode="vector",
+            as_of=AS_OF,
+        )
+
+        self.assertAlmostEqual(
+            report.metrics.evidence_precision_at_5,
+            0.2,
+        )
+        self.assertAlmostEqual(
+            report.metrics.irrelevant_evidence_rate,
+            0.8,
+        )
+
     def test_result_release_mismatch_fails_even_when_evidence_is_otherwise_valid(self):
         case = self.valid_case()
         case.update(
@@ -975,6 +1074,7 @@ class RetrievalEvaluationPostgresTests(unittest.TestCase):
             "migrations/16_policy_vector_release_identity.sql",
             "migrations/17_policy_rerank_release_identity.sql",
             "migrations/18_policy_retrieval_config_identity.sql",
+            "migrations/20_policy_relevance_policy.sql",
         ):
             self.apply_sql_file(migration)
         self.seed_release()

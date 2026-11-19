@@ -15,11 +15,18 @@ from test_run_lifecycle_algorithm_preview import FakeAlgoClient
 
 class NoEvidencePolicyRetriever:
     async def retrieve(self, query):
-        from rag.policy_retrieval import PolicyRetrievalResult
+        from rag.policy_retrieval import (
+            PolicyRetrievalDiagnostics,
+            PolicyRetrievalResult,
+        )
 
         return PolicyRetrievalResult(
             status="NO_EVIDENCE",
             release_id=query.release_id,
+            diagnostics=PolicyRetrievalDiagnostics(
+                relevance_filtered_candidates=2,
+                relevance_policy_version="m4a-relevance-v1",
+            ),
         )
 
 
@@ -109,6 +116,14 @@ class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
             view.policy_evidence.retrieval_status,
             "NO_EVIDENCE",
         )
+        self.assertEqual(
+            view.policy_evidence.relevance_filtered_candidates,
+            2,
+        )
+        self.assertEqual(
+            view.policy_evidence.relevance_policy_version,
+            "m4a-relevance-v1",
+        )
         self.assertEqual(len(view.policy_evidence.evidence), 0)
         events = client.WatchRun(
             pb.WatchRunRequest(
@@ -126,6 +141,14 @@ class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
         self.assertEqual(
             result_event.policy_evidence.retrieval_status,
             "NO_EVIDENCE",
+        )
+        self.assertEqual(
+            result_event.policy_evidence.relevance_filtered_candidates,
+            2,
+        )
+        self.assertEqual(
+            result_event.policy_evidence.relevance_policy_version,
+            "m4a-relevance-v1",
         )
         self.assertEqual(
             result_event.policy_evidence,

@@ -173,6 +173,20 @@ describe("Run verification console", () => {
     );
   });
 
+  it("shows how many low-relevance policy candidates were filtered", async () => {
+    vi.stubEnv("VITE_PRINCIPAL_ID", "principal-policy");
+    history.replaceState({}, "", "/?run=run-policy");
+    const run = policyEvidenceRunView();
+    run.policyEvidence.relevanceFilteredCandidates = 4;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(run)));
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(
+      wrapper.get('[data-testid="policy-relevance-filtered"]').text(),
+    ).toContain("已过滤 4 条");
+  });
+
   it("keeps NO_EVIDENCE distinct from no restriction", async () => {
     vi.stubEnv("VITE_PRINCIPAL_ID", "principal-policy");
     history.replaceState({}, "", "/?run=run-policy");
@@ -801,6 +815,8 @@ function policyEvidenceRunView() {
       vectorCandidates: 2,
       keywordCandidates: 1,
       rerankEnabled: false,
+      relevanceFilteredCandidates: 0,
+      relevancePolicyVersion: "m4a-relevance-v1",
       evidence: [
         {
           evidenceId: "evidence-policy",
