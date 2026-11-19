@@ -27,6 +27,8 @@ func toKratosErr(err error) error {
 		return kerrors.New(400, "INVALID_QUERY", "仅支持湖南本科批、合法科类与报考年份")
 	case errors.Is(err, errs.ErrInvalidSubjects):
 		return kerrors.New(400, "INVALID_SUBJECTS", "请提供与科类一致的一门首选和两门不同再选科目")
+	case errors.Is(err, errs.ErrProfileNotConfirmed):
+		return kerrors.New(400, "PROFILE_NOT_CONFIRMED", "资格评估只接受已确认画像")
 	case errors.Is(err, errs.ErrInvalidCandidate):
 		return kerrors.New(400, "INVALID_CANDIDATE", "候选标识、分档或效用数据无效")
 	case errors.Is(err, errs.ErrDuplicateCandidate):

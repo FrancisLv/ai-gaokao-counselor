@@ -16,11 +16,12 @@ import (
 )
 
 // ProviderSet 是 data 层的 wire provider 集。
-var ProviderSet = wire.NewSet(NewData, NewAdmissionRepo, NewRankRepo)
+var ProviderSet = wire.NewSet(NewData, NewAdmissionRepo, NewRankRepo, NewEligibilityRepo)
 
 // Data 提供绑定到 pgx 连接池的类型化查询；连接池由 cleanup 统一关闭。
 type Data struct {
 	queries *dbgen.Queries
+	pool    *pgxpool.Pool
 }
 
 // NewData 读 bc.Data.Database.Dsn 建 pgxpool（wire 注入；返回 cleanup 关池）。
@@ -46,5 +47,5 @@ func NewData(bc *conf.Bootstrap) (*Data, func(), error) {
 		return nil, nil, errors.New("数据库连接失败，请检查服务状态、网络与凭据")
 	}
 	cleanup := func() { pool.Close() }
-	return &Data{queries: dbgen.New(pool)}, cleanup, nil
+	return &Data{queries: dbgen.New(pool), pool: pool}, cleanup, nil
 }

@@ -20,12 +20,14 @@ import (
 	"math"
 	"net"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	kerrors "github.com/go-kratos/kratos/v2/errors"
 	kgrpc "github.com/go-kratos/kratos/v2/transport/grpc"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -61,7 +63,128 @@ func setupService(t testing.TB) *Service {
 	rankUc := biz.NewRankUsecase(data.NewRankRepo(d))
 	recUc := biz.NewRecommendUsecase(data.NewAdmissionRepo(d), rankUc, bc)
 	optUc := biz.NewOptimizeUsecase(bc)
-	return NewAlgo(rankUc, recUc, optUc)
+	eligibilityUc := biz.NewEligibilityUsecase(data.NewEligibilityRepo(d))
+	return NewAlgo(rankUc, recUc, optUc, eligibilityUc)
+}
+
+func publishEligibilityRuleFixtureScoped(
+	t testing.TB,
+	pool *pgxpool.Pool,
+	releaseID string,
+	ruleID string,
+	ruleKey string,
+	ruleType string,
+	requiredFieldsJSON string,
+	expressionJSON string,
+	expressionVersion int,
+	scopeJSON string,
+	coverageTypes ...string,
+) {
+	t.Helper()
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM rule_version WHERE rule_id = $1`, ruleID)
+	})
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE release
+		SET status = 'STAGING', published_at = NULL
+		WHERE release_id = $1`, releaseID,
+	); err != nil {
+		t.Fatalf("stage eligibility release: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO release_scope (
+			release_id, province, application_year, category, batch
+		) VALUES ($1, '湖南', 2025, '物理类', '本科批')
+		ON CONFLICT DO NOTHING`,
+		releaseID,
+	); err != nil {
+		t.Fatalf("insert eligibility release scope: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO rule_version (
+			rule_id, version, rule_key, rule_type, scope, required_profile_fields,
+			expression, expression_version, outcome_when_true, reason_code,
+			review_status, valid_from, source_evidence, created_by
+		) VALUES (
+			$1, 1, $2, $3, $8::jsonb, $4::jsonb,
+			$5::jsonb, $6, 'FAIL', 'TEST_RULE', 'DRAFT', NOW(),
+			jsonb_build_array(jsonb_build_object(
+				'evidence_id', 'ev-' || $1,
+				'evidence_type', 'DOCUMENT',
+				'release_id', $7::text,
+				'content_sha256', 'sha256:' || $1
+			)), 'test-suite'
+		)`, ruleID, ruleKey, ruleType, requiredFieldsJSON, expressionJSON,
+		expressionVersion, releaseID, scopeJSON,
+	); err != nil {
+		t.Fatalf("insert draft eligibility rule: %v", err)
+	}
+	for _, coverageType := range coverageTypes {
+		if _, err := pool.Exec(context.Background(), `
+			INSERT INTO rule_coverage (
+				release_id, rule_type, scope, status, covered_data_sources, notes
+			) VALUES (
+				$1, $2, '{}'::jsonb, 'FULL', '["major_admission"]'::jsonb, 'test fixture'
+			)
+			ON CONFLICT ON CONSTRAINT rule_coverage_release_type_scope_key_key DO NOTHING`,
+			releaseID, coverageType,
+		); err != nil {
+			t.Fatalf("insert eligibility coverage: %v", err)
+		}
+	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE rule_version
+		SET review_status = 'REVIEWED',
+		    reviewed_by = 'test-suite',
+		    reviewed_at = clock_timestamp()
+		WHERE rule_id = $1 AND version = 1`, ruleID,
+	); err != nil {
+		t.Fatalf("review eligibility rule: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE rule_version
+		SET review_status = 'PUBLISHED',
+		    release_id = $2,
+		    published_by = 'test-suite',
+		    published_at = clock_timestamp()
+		WHERE rule_id = $1 AND version = 1`, ruleID, releaseID,
+	); err != nil {
+		t.Fatalf("publish eligibility rule: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE release
+		SET status = 'PUBLISHED', published_at = clock_timestamp()
+		WHERE release_id = $1`, releaseID,
+	); err != nil {
+		t.Fatalf("publish eligibility release: %v", err)
+	}
+}
+
+func publishEligibilityRuleFixture(
+	t testing.TB,
+	pool *pgxpool.Pool,
+	releaseID string,
+	ruleID string,
+	ruleKey string,
+	ruleType string,
+	requiredFieldsJSON string,
+	expressionJSON string,
+	expressionVersion int,
+	coverageTypes ...string,
+) {
+	publishEligibilityRuleFixtureScoped(
+		t,
+		pool,
+		releaseID,
+		ruleID,
+		ruleKey,
+		ruleType,
+		requiredFieldsJSON,
+		expressionJSON,
+		expressionVersion,
+		"{}",
+		coverageTypes...,
+	)
 }
 
 type errorRankRepo struct{ err error }
@@ -82,11 +205,11 @@ func TestIntegration_Bufconn_ExtendedErrors(t *testing.T) {
 		{errs.ErrInvalidConfig, codes.Internal, "INVALID_CONFIG"},
 		{errors.New("私有错误"), codes.Internal, "INTERNAL"},
 	} {
-		client := setupBufconnClient(t, NewAlgo(biz.NewRankUsecase(errorRankRepo{tc.err}), nil, nil))
+		client := setupBufconnClient(t, NewAlgo(biz.NewRankUsecase(errorRankRepo{tc.err}), nil, nil, nil))
 		_, err := client.RankConvert(context.Background(), &algov1.RankConvertRequest{ReleaseId: integrationRelease, Province: "湖南", Category: "物理类", Year: "2025", Score: 600})
 		assertBufconnError(t, err, tc.code, tc.reason)
 	}
-	client := setupBufconnClient(t, NewAlgo(nil, biz.NewRecommendUsecase(nil, nil, nil), biz.NewOptimizeUsecase(nil)))
+	client := setupBufconnClient(t, NewAlgo(nil, biz.NewRecommendUsecase(nil, nil, nil), biz.NewOptimizeUsecase(nil), nil))
 	for _, p := range []float64{math.NaN(), math.Inf(1), 1.1, .001} {
 		_, err := client.OptimizeWishlist(context.Background(), &algov1.OptimizeWishlistRequest{Candidates: []*algov1.CandidateWithProb{pbCWP("A", "1", "保", p)}})
 		assertBufconnError(t, err, codes.InvalidArgument, "INVALID_PROBABILITY")
@@ -280,6 +403,604 @@ func TestIntegration_Service_FourRPCs(t *testing.T) {
 		if c.GetUtility().GetScore() <= 0 {
 			t.Errorf("Candidates[%d].utility.score = %v, want >0（效用分应注入）", i, c.GetUtility().GetScore())
 		}
+	}
+}
+
+func TestIntegration_EvaluateEligibility_SubjectRule(t *testing.T) {
+	dsn := os.Getenv("ALGO_TEST_DSN")
+	if dsn == "" {
+		t.Skip("ALGO_TEST_DSN 未设置，跳过集成测试")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	releaseID := fmt.Sprintf("rel_m4b_test_%d", time.Now().UnixNano())
+	ruleID := "rule-subject-test-" + releaseID
+	secondRuleID := "rule-subject-test-second-" + releaseID
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
+		 VALUES ($1, 'STAGING', '{}'::jsonb, 'sha256:m4b', NULL)`, releaseID); err != nil {
+		t.Fatalf("insert release: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
+	})
+	t.Cleanup(func() {
+		_, _ = pool.Exec(
+			context.Background(),
+			`DELETE FROM rule_version WHERE rule_id = ANY($1::text[])`,
+			[]string{ruleID, secondRuleID},
+		)
+	})
+
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO rule_version (
+			rule_id, version, rule_key, rule_type, scope, required_profile_fields,
+			expression, outcome_when_true, reason_code, review_status,
+			valid_from, source_evidence, created_by
+		) VALUES (
+			$2, 1, 'subject-requirement', 'SUBJECT_REQUIREMENT',
+			'{"major_code":"080901"}'::jsonb, '["subjects","category"]'::jsonb,
+			'{"op":"NOT","child":{"op":"SUBJECT_MATCH","subject_req":"首选物理，再选化学"}}'::jsonb, 'FAIL',
+			'SUBJECT_NOT_MATCHED', 'DRAFT', NOW(),
+			jsonb_build_array(jsonb_build_object(
+				'evidence_id', 'ev-subject',
+				'evidence_type', 'DOCUMENT',
+				'release_id', $1::text,
+				'content_sha256', 'sha256:subject'
+			)),
+			'test-suite'
+		)`, releaseID, ruleID); err != nil {
+		t.Fatalf("insert rule_version: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO rule_version (
+			rule_id, version, rule_key, rule_type, scope, required_profile_fields,
+			expression, outcome_when_true, reason_code, review_status,
+			valid_from, source_evidence, created_by
+		) VALUES (
+			$2, 1, 'subject-requirement', 'SUBJECT_REQUIREMENT',
+			'{"major_code":"080902"}'::jsonb, '["subjects","category"]'::jsonb,
+			'{"op":"NOT","child":{"op":"SUBJECT_MATCH","subject_req":"首选物理，再选思想政治"}}'::jsonb, 'FAIL',
+			'SUBJECT_NOT_MATCHED', 'DRAFT', NOW(),
+			jsonb_build_array(jsonb_build_object(
+				'evidence_id', 'ev-subject-second',
+				'evidence_type', 'DOCUMENT',
+				'release_id', $1::text,
+				'content_sha256', 'sha256:subject-second'
+			)),
+			'test-suite'
+		)`, releaseID, secondRuleID); err != nil {
+		t.Fatalf("insert second rule_version: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO release_scope (
+			release_id, province, application_year, category, batch
+		) VALUES ($1, '湖南', 2025, '物理类', '本科批')
+		ON CONFLICT DO NOTHING`, releaseID,
+	); err != nil {
+		t.Fatalf("insert release scope: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO rule_coverage (
+			release_id, rule_type, scope, status, covered_data_sources, notes
+		) VALUES (
+			$1, 'SUBJECT_REQUIREMENT', '{}'::jsonb, 'FULL',
+			'["major_admission"]'::jsonb, 'test fixture'
+		)`, releaseID); err != nil {
+		t.Fatalf("insert rule_coverage: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE rule_version
+		 SET review_status = 'REVIEWED',
+		     reviewed_by = 'test-suite',
+		     reviewed_at = clock_timestamp()
+		 WHERE rule_id = ANY($1::text[]) AND version = 1`,
+		[]string{ruleID, secondRuleID},
+	); err != nil {
+		t.Fatalf("review rule_version: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE rule_version
+		 SET review_status = 'PUBLISHED',
+		     release_id = $1,
+		     published_by = 'test-suite',
+		     published_at = clock_timestamp()
+		WHERE rule_id = ANY($2::text[]) AND version = 1`,
+		releaseID, []string{ruleID, secondRuleID},
+	); err != nil {
+		t.Fatalf("publish rule_version: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE release SET status = 'PUBLISHED', published_at = clock_timestamp()
+		 WHERE release_id = $1`, releaseID,
+	); err != nil {
+		t.Fatalf("publish release: %v", err)
+	}
+
+	t.Setenv("ALGO_DATA_DSN", dsn)
+	bc := &conf.Bootstrap{Data: &conf.Data{Database: &conf.Data_Database{Dsn: dsn}}}
+	d, cleanup, err := data.NewData(bc)
+	if err != nil {
+		t.Fatalf("NewData: %v", err)
+	}
+	t.Cleanup(cleanup)
+	svc := NewAlgo(nil, nil, nil, biz.NewEligibilityUsecase(data.NewEligibilityRepo(d)))
+	client := setupBufconnClient(t, svc)
+
+	req := &algov1.EvaluateEligibilityRequest{
+		ReleaseId: releaseID, ConfirmedProfileVersion: "profile-v1",
+		ProfileLifecycle: algov1.EligibilityProfileLifecycle_ELIGIBILITY_PROFILE_LIFECYCLE_CONFIRMED,
+		Scope:            &algov1.EligibilityScope{Province: "湖南", ApplicationYear: 2025, Category: "物理类", Batch: "本科批"},
+		ProfileFacts: []*algov1.EligibilityProfileFact{
+			{
+				FieldKey: "subjects", State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+				StringValues: []string{"物理", "化学", "生物"},
+			},
+			{
+				FieldKey: "category", State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+				StringValue: "物理类",
+			},
+		},
+		CandidateGroups: []*algov1.EligibilityCandidateGroup{
+			{
+				UniversityId: 1, UniversityCode: "1001", UniversityName: "测试大学", MajorGroup: "01",
+				Majors: []*algov1.EligibilityCandidateMajor{{
+					MajorCode: "080901", MajorName: "计算机科学与技术",
+					SubjectRequirement: "首选物理，再选化学", InCurrentPlan: true,
+				}},
+			},
+			{
+				UniversityId: 2, UniversityCode: "1002", UniversityName: "测试大学二", MajorGroup: "02",
+				Majors: []*algov1.EligibilityCandidateMajor{{
+					MajorCode: "080902", MajorName: "软件工程",
+					SubjectRequirement: "首选物理，再选思想政治", InCurrentPlan: true,
+				}},
+			},
+		},
+	}
+	setEligibilityProfileDigest(req)
+	reply, err := client.EvaluateEligibility(context.Background(), req)
+	if err != nil {
+		t.Fatalf("EvaluateEligibility: %v", err)
+	}
+	if reply.GetStatus() != algov1.EligibilityResultStatus_ELIGIBILITY_RESULT_STATUS_COMPLETE {
+		t.Fatalf("status = %v, want COMPLETE", reply.GetStatus())
+	}
+	if got := reply.GetGroups()[0].GetMajors()[0].GetStatus(); got != algov1.MajorEligibilityStatus_MAJOR_ELIGIBILITY_STATUS_PASS {
+		t.Fatalf("matched major = %v, want PASS", got)
+	}
+	if got := reply.GetGroups()[1].GetMajors()[0].GetStatus(); got != algov1.MajorEligibilityStatus_MAJOR_ELIGIBILITY_STATUS_FAIL {
+		t.Fatalf("unmatched major = %v, want FAIL", got)
+	}
+	if got := reply.GetGroups()[1].GetMajors()[0].GetEvidenceRefs(); len(got) != 1 ||
+		got[0].GetEvidenceId() != "ev-subject-second" {
+		t.Fatalf("evidence refs = %+v", got)
+	}
+
+	if _, err := pool.Exec(context.Background(), `UPDATE release SET status='REVOKED', revoked_at=NOW() WHERE release_id=$1`, releaseID); err != nil {
+		t.Fatalf("revoke release: %v", err)
+	}
+	blocked, err := client.EvaluateEligibility(context.Background(), req)
+	if err != nil {
+		t.Fatalf("EvaluateEligibility after revoke: %v", err)
+	}
+	if blocked.GetStatus() != algov1.EligibilityResultStatus_ELIGIBILITY_RESULT_STATUS_BLOCKED {
+		t.Fatalf("revoked status = %v, want BLOCKED", blocked.GetStatus())
+	}
+}
+
+func TestIntegration_EvaluateEligibility_TypedAST(t *testing.T) {
+	dsn := os.Getenv("ALGO_TEST_DSN")
+	if dsn == "" {
+		t.Skip("ALGO_TEST_DSN 未设置，跳过集成测试")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := time.Now().UnixNano()
+	releaseID := fmt.Sprintf("rel_m4b_ast_test_%d", suffix)
+	ruleID := fmt.Sprintf("rule-ast-test-%d", suffix)
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
+		 VALUES ($1, 'PUBLISHED', '{}'::jsonb, 'sha256:m4b-ast', NOW())`, releaseID); err != nil {
+		t.Fatalf("insert release: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
+	})
+
+	publishEligibilityRuleFixture(
+		t, pool, releaseID, ruleID, "score-and-category",
+		"OTHER_HARD", `["category","score"]`,
+		`{"op":"AND","left":{"op":"GTE","field":"score","value":600},"right":{"op":"EQ","field":"category","value":"物理类"}}`,
+		1, "SUBJECT_REQUIREMENT", "OTHER_HARD",
+	)
+
+	t.Setenv("ALGO_DATA_DSN", dsn)
+	bc := &conf.Bootstrap{Data: &conf.Data{Database: &conf.Data_Database{Dsn: dsn}}}
+	d, cleanup, err := data.NewData(bc)
+	if err != nil {
+		t.Fatalf("NewData: %v", err)
+	}
+	t.Cleanup(cleanup)
+	svc := NewAlgo(nil, nil, nil, biz.NewEligibilityUsecase(data.NewEligibilityRepo(d)))
+	client := setupBufconnClient(t, svc)
+
+	request := &algov1.EvaluateEligibilityRequest{
+		ReleaseId: releaseID, ConfirmedProfileVersion: "profile-ast-v1",
+		ProfileLifecycle: algov1.EligibilityProfileLifecycle_ELIGIBILITY_PROFILE_LIFECYCLE_CONFIRMED,
+		Scope:            &algov1.EligibilityScope{Province: "湖南", ApplicationYear: 2025, Category: "物理类", Batch: "本科批"},
+		ProfileFacts: []*algov1.EligibilityProfileFact{
+			{
+				FieldKey: "subjects", State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+				StringValues: []string{"物理", "化学", "生物"},
+			},
+			{
+				FieldKey: "category", State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+				StringValue: "物理类",
+			},
+			{
+				FieldKey: "score", State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+				IntValue: 630,
+			},
+		},
+		CandidateGroups: []*algov1.EligibilityCandidateGroup{{
+			UniversityId: 1, UniversityCode: "1001", UniversityName: "测试大学", MajorGroup: "01",
+			Majors: []*algov1.EligibilityCandidateMajor{{
+				MajorCode: "080901", MajorName: "计算机科学与技术",
+				SubjectRequirement: "首选物理，再选化学", InCurrentPlan: true,
+			}},
+		}},
+	}
+	setEligibilityProfileDigest(request)
+	first, err := client.EvaluateEligibility(context.Background(), request)
+	if err != nil {
+		t.Fatalf("EvaluateEligibility typed AST: %v", err)
+	}
+	second, err := client.EvaluateEligibility(context.Background(), request)
+	if err != nil {
+		t.Fatalf("EvaluateEligibility typed AST repeat: %v", err)
+	}
+	if !proto.Equal(first, second) {
+		t.Fatal("同一 typed AST 输入未得到逐项一致结果")
+	}
+	if got := first.GetGroups()[0].GetMajors()[0].GetStatus(); got != algov1.MajorEligibilityStatus_MAJOR_ELIGIBILITY_STATUS_FAIL {
+		t.Fatalf("typed AST major status = %v, want FAIL", got)
+	}
+
+	invalidReleaseID := releaseID + "_invalid"
+	invalidRuleID := fmt.Sprintf("rule-ast-invalid-%d", suffix)
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
+		 VALUES ($1, 'PUBLISHED', '{}'::jsonb, 'sha256:m4b-ast-invalid', NOW())`, invalidReleaseID); err != nil {
+		t.Fatalf("insert invalid release: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, invalidReleaseID)
+	})
+	publishEligibilityRuleFixture(
+		t, pool, invalidReleaseID, invalidRuleID, "dangerous-expression",
+		"OTHER_HARD", `["category"]`,
+		`{"op":"EQ","field":"category","value":"物理类","sql":"SELECT secret"}`,
+		1, "SUBJECT_REQUIREMENT", "OTHER_HARD",
+	)
+
+	request.ReleaseId = invalidReleaseID
+	blocked, err := client.EvaluateEligibility(context.Background(), request)
+	if err != nil {
+		t.Fatalf("EvaluateEligibility invalid AST returned transport error: %v", err)
+	}
+	if blocked.GetStatus() != algov1.EligibilityResultStatus_ELIGIBILITY_RESULT_STATUS_BLOCKED {
+		t.Fatalf("invalid AST status = %v, want BLOCKED", blocked.GetStatus())
+	}
+	reasons := blocked.GetGroups()[0].GetMajors()[0].GetUnknownReasons()
+	if len(reasons) != 1 || reasons[0] != "RULE_EXPRESSION_INVALID" {
+		t.Fatalf("invalid AST reasons = %v", reasons)
+	}
+}
+
+func TestIntegration_EvaluateEligibility_ProfileFieldCatalogIsAuthoritative(t *testing.T) {
+	dsn := os.Getenv("ALGO_TEST_DSN")
+	if dsn == "" {
+		t.Skip("ALGO_TEST_DSN 未设置，跳过集成测试")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := time.Now().UnixNano()
+	releaseID := fmt.Sprintf("rel_m4b_field_catalog_%d", suffix)
+	ruleID := fmt.Sprintf("rule-field-catalog-%d", suffix)
+	fieldKey := fmt.Sprintf("single_subject_scores.技术%d", suffix)
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
+		 VALUES ($1, 'STAGING', '{}'::jsonb, 'sha256:m4b-field-catalog', NULL)`,
+		releaseID,
+	); err != nil {
+		t.Fatalf("insert release: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
+	})
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO eligibility_profile_field (
+			release_id, field_key, value_type, allowed_values, description
+		 ) VALUES ($1, $2, 'INT', ARRAY[]::TEXT[], 'integration fixture')`,
+		releaseID, fieldKey,
+	); err != nil {
+		t.Fatalf("insert profile field contract: %v", err)
+	}
+	publishEligibilityRuleFixture(
+		t,
+		pool,
+		releaseID,
+		ruleID,
+		"technical-subject-min",
+		"SINGLE_SUBJECT_MIN",
+		fmt.Sprintf(`[%q]`, fieldKey),
+		fmt.Sprintf(`{"op":"NOT","child":{"op":"GTE","field":%q,"value":80}}`, fieldKey),
+		1,
+		"SUBJECT_REQUIREMENT",
+		"SINGLE_SUBJECT_MIN",
+	)
+
+	t.Setenv("ALGO_DATA_DSN", dsn)
+	bc := &conf.Bootstrap{Data: &conf.Data{Database: &conf.Data_Database{Dsn: dsn}}}
+	d, cleanup, err := data.NewData(bc)
+	if err != nil {
+		t.Fatalf("NewData: %v", err)
+	}
+	t.Cleanup(cleanup)
+	svc := NewAlgo(nil, nil, nil, biz.NewEligibilityUsecase(data.NewEligibilityRepo(d)))
+	client := setupBufconnClient(t, svc)
+
+	fieldRequest := &algov1.EvaluateEligibilityRequest{
+		ReleaseId: releaseID, ConfirmedProfileVersion: "profile-field-catalog",
+		ProfileLifecycle: algov1.EligibilityProfileLifecycle_ELIGIBILITY_PROFILE_LIFECYCLE_CONFIRMED,
+		Scope:            &algov1.EligibilityScope{Province: "湖南", ApplicationYear: 2025, Category: "物理类", Batch: "本科批"},
+		ProfileFacts: []*algov1.EligibilityProfileFact{
+			{
+				FieldKey: "subjects", State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+				StringValues: []string{"物理", "化学", "生物"},
+			},
+			{
+				FieldKey: "category", State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+				StringValue: "物理类",
+			},
+			{
+				FieldKey: fieldKey, State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+				IntValue: 90,
+			},
+		},
+		CandidateGroups: []*algov1.EligibilityCandidateGroup{{
+			UniversityId: 1, UniversityCode: "1001", UniversityName: "测试大学", MajorGroup: "01",
+			Majors: []*algov1.EligibilityCandidateMajor{{
+				MajorCode: "080901", MajorName: "计算机科学与技术",
+				SubjectRequirement: "首选物理，再选化学", InCurrentPlan: true,
+			}},
+		}},
+	}
+	setEligibilityProfileDigest(fieldRequest)
+	reply, err := client.EvaluateEligibility(context.Background(), fieldRequest)
+	if err != nil {
+		t.Fatalf("EvaluateEligibility: %v", err)
+	}
+	if got := reply.GetStatus(); got != algov1.EligibilityResultStatus_ELIGIBILITY_RESULT_STATUS_COMPLETE {
+		t.Fatalf("status = %v, want COMPLETE; reasons=%v",
+			got, reply.GetGroups()[0].GetMajors()[0].GetUnknownReasons())
+	}
+	if got := reply.GetGroups()[0].GetMajors()[0].GetStatus(); got != algov1.MajorEligibilityStatus_MAJOR_ELIGIBILITY_STATUS_PASS {
+		t.Fatalf("major status = %v, want PASS", got)
+	}
+}
+
+func TestIntegration_EvaluateEligibility_ConditionalFacts(t *testing.T) {
+	dsn := os.Getenv("ALGO_TEST_DSN")
+	if dsn == "" {
+		t.Skip("ALGO_TEST_DSN 未设置，跳过集成测试")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := time.Now().UnixNano()
+	releaseID := fmt.Sprintf("rel_m4b_conditional_%d", suffix)
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
+		 VALUES ($1, 'PUBLISHED', '{}'::jsonb, 'sha256:m4b-conditional', NOW())`,
+		releaseID,
+	); err != nil {
+		t.Fatalf("insert release: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
+	})
+
+	publishRule := func(
+		ruleKey string,
+		ruleType string,
+		requiredFields string,
+		expression string,
+		coverageTypes ...string,
+	) {
+		t.Helper()
+		ruleID := fmt.Sprintf("%s-%d", ruleKey, suffix)
+		publishEligibilityRuleFixture(
+			t,
+			pool,
+			releaseID,
+			ruleID,
+			ruleKey,
+			ruleType,
+			requiredFields,
+			expression,
+			1,
+			coverageTypes...,
+		)
+	}
+	publishRule(
+		"math-min",
+		"SINGLE_SUBJECT_MIN",
+		`["single_subject_scores.数学"]`,
+		`{"op":"NOT","child":{"op":"GTE","field":"single_subject_scores.数学","value":120}}`,
+		"SUBJECT_REQUIREMENT",
+		"SINGLE_SUBJECT_MIN",
+	)
+	publishRule(
+		"color-vision",
+		"PHYSICAL_RESTRICTION",
+		`["physical_exam.color_vision"]`,
+		`{"op":"EQ","field":"physical_exam.color_vision","value":"COLOR_BLIND"}`,
+		"PHYSICAL_RESTRICTION",
+	)
+	publishRule(
+		"gender",
+		"GENDER_RESTRICTION",
+		`["gender"]`,
+		`{"op":"EQ","field":"gender","value":"FEMALE"}`,
+		"GENDER_RESTRICTION",
+	)
+	publishRule(
+		"household",
+		"OTHER_HARD",
+		`["household_province"]`,
+		`{"op":"NEQ","field":"household_province","value":"湖南"}`,
+		"OTHER_HARD",
+	)
+	publishRule(
+		"school-registration",
+		"OTHER_HARD",
+		`["school_registration_province"]`,
+		`{"op":"NEQ","field":"school_registration_province","value":"湖南"}`,
+	)
+
+	t.Setenv("ALGO_DATA_DSN", dsn)
+	bc := &conf.Bootstrap{Data: &conf.Data{Database: &conf.Data_Database{Dsn: dsn}}}
+	d, cleanup, err := data.NewData(bc)
+	if err != nil {
+		t.Fatalf("NewData: %v", err)
+	}
+	t.Cleanup(cleanup)
+	svc := NewAlgo(nil, nil, nil, biz.NewEligibilityUsecase(data.NewEligibilityRepo(d)))
+	client := setupBufconnClient(t, svc)
+
+	baseFacts := []*algov1.EligibilityProfileFact{
+		{
+			FieldKey: "subjects", State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+			StringValues: []string{"物理", "化学", "生物"},
+		},
+		{
+			FieldKey: "category", State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+			StringValue: "物理类",
+		},
+	}
+	evaluate := func(extra ...*algov1.EligibilityProfileFact) *algov1.EvaluateEligibilityReply {
+		t.Helper()
+		request := &algov1.EvaluateEligibilityRequest{
+			ReleaseId: releaseID, ConfirmedProfileVersion: "profile-conditional",
+			ProfileLifecycle: algov1.EligibilityProfileLifecycle_ELIGIBILITY_PROFILE_LIFECYCLE_CONFIRMED,
+			Scope:            &algov1.EligibilityScope{Province: "湖南", ApplicationYear: 2025, Category: "物理类", Batch: "本科批"},
+			ProfileFacts:     append(append([]*algov1.EligibilityProfileFact{}, baseFacts...), extra...),
+			CandidateGroups: []*algov1.EligibilityCandidateGroup{{
+				UniversityId: 1, UniversityCode: "1001", UniversityName: "测试大学", MajorGroup: "01",
+				Majors: []*algov1.EligibilityCandidateMajor{{
+					MajorCode: "080901", MajorName: "计算机科学与技术",
+					SubjectRequirement: "首选物理，再选化学", InCurrentPlan: true,
+				}},
+			}},
+		}
+		setEligibilityProfileDigest(request)
+		reply, err := client.EvaluateEligibility(context.Background(), request)
+		if err != nil {
+			t.Fatalf("EvaluateEligibility: %v", err)
+		}
+		return reply
+	}
+	provided := func(fieldKey string, value any) *algov1.EligibilityProfileFact {
+		fact := &algov1.EligibilityProfileFact{
+			FieldKey: fieldKey,
+			State:    algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+		}
+		switch value := value.(type) {
+		case int:
+			fact.IntValue = int32(value)
+		case string:
+			fact.StringValue = value
+		default:
+			t.Fatalf("unsupported fact value %T", value)
+		}
+		return fact
+	}
+	allClear := evaluate(
+		provided("single_subject_scores.数学", 130),
+		provided("physical_exam.color_vision", "NORMAL"),
+		provided("gender", "MALE"),
+		provided("household_province", "湖南"),
+		provided("school_registration_province", "湖南"),
+	)
+	if got := allClear.GetGroups()[0].GetMajors()[0].GetStatus(); got != algov1.MajorEligibilityStatus_MAJOR_ELIGIBILITY_STATUS_PASS {
+		t.Fatalf("all-clear status = %v, want PASS; reasons=%v",
+			got, allClear.GetGroups()[0].GetMajors()[0].GetUnknownReasons())
+	}
+
+	missing := evaluate()
+	major := missing.GetGroups()[0].GetMajors()[0]
+	if got := major.GetStatus(); got != algov1.MajorEligibilityStatus_MAJOR_ELIGIBILITY_STATUS_MISSING_REQUIRED_FACT {
+		t.Fatalf("missing status = %v, want MISSING_REQUIRED_FACT", got)
+	}
+	wantMissing := []string{
+		"gender",
+		"household_province",
+		"physical_exam.color_vision",
+		"school_registration_province",
+		"single_subject_scores.数学",
+	}
+	if got := major.GetMissingFields(); !slices.Equal(got, wantMissing) {
+		t.Fatalf("missing fields = %v, want %v", got, wantMissing)
+	}
+
+	declined := evaluate(
+		provided("single_subject_scores.数学", 130),
+		provided("physical_exam.color_vision", "NORMAL"),
+		&algov1.EligibilityProfileFact{
+			FieldKey: "gender",
+			State:    algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_DECLINED,
+		},
+		provided("household_province", "湖南"),
+		provided("school_registration_province", "湖南"),
+	)
+	declinedMajor := declined.GetGroups()[0].GetMajors()[0]
+	if got := declinedMajor.GetStatus(); got != algov1.MajorEligibilityStatus_MAJOR_ELIGIBILITY_STATUS_MISSING_REQUIRED_FACT {
+		t.Fatalf("declined status = %v, want MISSING_REQUIRED_FACT", got)
+	}
+	if got := declinedMajor.GetMissingFields(); !slices.Equal(got, []string{"gender"}) {
+		t.Fatalf("declined missing fields = %v", got)
+	}
+
+	restricted := evaluate(
+		provided("single_subject_scores.数学", 130),
+		provided("physical_exam.color_vision", "COLOR_BLIND"),
+		provided("gender", "MALE"),
+		provided("household_province", "湖南"),
+		provided("school_registration_province", "湖南"),
+	)
+	restrictedMajor := restricted.GetGroups()[0].GetMajors()[0]
+	if got := restrictedMajor.GetStatus(); got != algov1.MajorEligibilityStatus_MAJOR_ELIGIBILITY_STATUS_FAIL {
+		t.Fatalf("restricted status = %v, want FAIL", got)
+	}
+	if got := restrictedMajor.GetFailureRuleKeys(); !slices.Equal(got, []string{"color-vision"}) {
+		t.Fatalf("failure rules = %v, want [color-vision]", got)
 	}
 }
 

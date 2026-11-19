@@ -236,9 +236,53 @@
 | 某校今年突然大幅扩招/缩招 | 用计划修正因子调整；数据波动大，前端可提示"仅供参考" |
 | 找不到足够的"保底"学校 | 建议放宽地域或专业偏好，或直接告知"保底不足" |
 
+## 10. 资格规则与覆盖声明
+
+资格不是概率模型的一部分，而是候选进入优化的硬门禁。`EvaluateEligibility` 在固定
+`release_id` 内读取 PUBLISHED 规则和覆盖声明：规则 TRUE 表示明确限报，FALSE 表示
+该规则未命中，无法求值则为 UNKNOWN。任何 UNKNOWN 都不能被解释为通过。
+
+覆盖声明按 `rule_type + scope` 独立发布。同一专业的适用声明取 scope 最具体者：
+专业级优先于组级、院校级和省级；同具体度出现多个不同声明时无法得到唯一事实，
+整体结果阻断。FULL 才允许专业 PASS，PARTIAL、NONE 或没有声明都保持 UNKNOWN。
+覆盖在 release 发布后冻结，因此同一 run 不会因后续配置修改得到另一套结果。
+
+专业级结果为 `PASS / FAIL / UNKNOWN / NOT_APPLICABLE / MISSING_REQUIRED_FACT`：
+明确限报优先为 FAIL；当前计划外专业为 NOT_APPLICABLE；规则所需画像事实缺失为
+MISSING_REQUIRED_FACT；其他无法裁决情况为 UNKNOWN。组级只汇总为
+`PASS / PASS_PARTIAL / FAIL / UNKNOWN`：全部专业 PASS 才是 PASS；至少一个专业
+PASS 且其余仅为 FAIL/NOT_APPLICABLE 时为 PASS_PARTIAL；没有专业 PASS 时为 FAIL；
+任一专业 UNKNOWN 或 MISSING_REQUIRED_FACT 时整组 UNKNOWN，不能被其他 PASS 掩盖。
+PASS_PARTIAL 必须保留受限专业明细，不得宣称整组可报。
+
+候选身份也属于资格输入完整性的一部分。空专业组、组主键重复、专业代码为空或同一
+组内专业代码重复时，`EvaluateEligibility` 返回 BLOCKED，并使用
+`CANDIDATE_GROUP_EMPTY`、`CANDIDATE_GROUP_DUPLICATE`、`CANDIDATE_GROUP_INVALID`
+或 `CANDIDATE_MAJOR_INVALID / CANDIDATE_MAJOR_DUPLICATE` 等稳定原因。请求缺少省、
+报考年、科类或批次时返回 `ELIGIBILITY_SCOPE_INVALID` 并阻断，不得形成 PASS。
+组、专业和规则最终均按稳定键排序，保证同输入重复评估逐项一致。
+
+RunLifecycle 在确认画像后，以 run 绑定的 `release_id`、CONFIRMED revision 的不可变
+事实快照和 `EstimateProb` 返回的当前候选组调用 `EvaluateEligibility`。只有
+`PASS` 或 `PASS_PARTIAL` 候选组可以进入 `OptimizeWishlist`；UNKNOWN、
+MISSING_REQUIRED_FACT、FAIL、BLOCKED 和未被资格结果覆盖的候选均不得进入正式资格
+集合。COMPLETE 才表示资格事实没有 UNKNOWN，可作为正式资格输入；PARTIAL 保留为
+诊断结果并明确 `formal_eligibility_ready=false`。PASS_PARTIAL 可以进入优化，但必须
+在结果中保留受限专业。资格结果不修改候选身份、概率或优化顺序。
+
+`in_current_plan` 由 `EstimateProb` 的候选专业明细提供，取值来自报考年
+`enrollment_plan` 的专业代码成员检查；历史录取专业不因曾存在于上一年计划而自动成为
+当年可报专业。`SUBJECT_MATCH` 必须显式携带规则自身的 `subject_req`，不得回退到
+候选上一年文本。资格字段目录以 release 为边界冻结；规则审查/发布前执行与运行时相同的
+受限 AST、字段 allowlist、literal 类型和来源证据静态校验。请求还必须携带由
+`confirmed_profile_version + profile_facts` 生成的稳定 SHA-256 摘要，并由算法复核；
+省年科批不在绑定 release 的 `release_scope` 内时返回稳定阻断。任何声明的
+`RuleCoverage=NONE/PARTIAL` 都会阻止 `V1_FORMAL`；非本科批返回
+`BATCH_UNSUPPORTED`，缺来源规则返回 `RULE_SOURCE_MISSING`。
+
 ---
 
-## 10. 与代码的对应关系
+## 11. 与代码的对应关系
 
 本文各步对应 svc-algo 的算法模块：位次换算（`rank`）、概率估计（`prob`）、规则裁决（`constraint`）、效用打分（`utility`）、志愿表优化与保底检查（`optimize`）。
 

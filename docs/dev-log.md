@@ -1347,3 +1347,290 @@ rerank 模型质量。
 - v0.4 真实 vector 诊断：25 条 ACTIVE 全部进入分母，recall@5/MRR 为 1.0、
   scope leak 为 0，precision@5 为 0.149，另有 6 条已知缺口显式跳过。由于
   `quality_gate_applied=false` 且 owner 未签字，这不是正式质量通过结论。
+
+## 42. M4b-01：EvaluateEligibility 最小纵向闭环
+
+**日期与范围**：2026-11-19，对应 issue #16。建立结构化资格规则的第一条
+release-bound 路径；不实现完整规则生命周期、PARTIAL/NONE 覆盖、条件字段与
+RunLifecycle 接线。
+
+### 实现
+
+- proto additive 新增 `EvaluateEligibility`，请求携带 CONFIRMED 画像版本及不可变
+  事实快照、run 绑定的 `release_id`、适用域和院校专业组候选；响应包含专业
+  PASS/FAIL/UNKNOWN、覆盖、规则/来源证据、稳定原因和诊断计数。
+- 迁移 21 新增 `rule_version` 与 `rule_coverage`；规则内容、来源证据、release
+  与审查状态有数据库约束，FULL 覆盖必须声明来源和说明。
+- `svc-algo` 从 release 读取 PUBLISHED 且有效的规则快照，只有 FULL 选科覆盖允许
+  PASS；release 缺失/撤销返回 BLOCKED。规则选择、求值和汇总隐藏在唯一 seam 内。
+- 旧 `CheckConstraints` 保持原行为和协议；新路径不改候选身份、概率、分档或优化顺序。
+
+### 验证
+
+- 业务表驱动测试覆盖选科 PASS/FAIL、撤销 release、DRAFT 画像拒绝与缺失覆盖 UNKNOWN。
+- service DTO 测试与 bufconn 生成客户端测试覆盖新 RPC。
+- 真实 PostgreSQL 集成测试验证 release/rule/coverage 插入 → EvaluateEligibility →
+  PASS/FAIL/证据 → release 撤销 BLOCKED。
+- fresh-schema migration 测试通过；全量 Go 单测与 Python 离线测试通过。
+
+### 边界
+
+- 当前只验证 `SUBJECT_REQUIREMENT` 与 FULL 覆盖；完整 AST、PARTIAL/NONE、更多
+  条件字段、专业五态组汇总和正式 run 接线仍由 M4b-02~07 完成。
+
+## 43. M4b-04：受限表达式与三值逻辑
+
+**日期与范围**：2026-11-19，对应 issue #18。把规则条件收敛为 typed AST，
+实现字段 allowlist、Kleene 三值求值和资源上限；不实现 RuleVersion 生命周期、
+覆盖不足语义、条件字段接入、组级五态或 RunLifecycle 接线。
+
+### 实现
+
+- `RuleExpression` 增加 field/value/values/left/right 类型化节点，支持 `AND / OR / NOT / EQ / NEQ / IN / GTE / LTE / PRESENT / CONTAINS_ALL / CONTAINS_ANY / SUBJECT_MATCH`。
+- AST 使用 `expression_version=1`；字段必须同时属于 Profile allowlist 与规则的
+  `required_profile_fields`，声明集合必须与 AST 实际引用完全一致。
+- `AND` 在任一分支 NO_MATCH 时为 NO_MATCH，`OR` 在任一分支 MATCH 时为 MATCH；
+  已知 FAIL 优先于其他规则产生的缺失事实，避免结果被输入顺序覆盖。
+- 缺失、UNKNOWN、DECLINED 产生缺失字段；字段存在但类型错误产生 UNKNOWN，不做宽松转换。
+- 表达式 JSON 使用严格解码，拒绝未允许键；资源上限为深度 16、节点 64、
+  列表 32 项、单字符串 256 字节、JSON 32 KiB。
+- 迁移 23 新增 `expression_version` 与 32 KiB schema 约束；数据层把残留解析错误
+  归一为 `ValidationReason`，由唯一 `EvaluateEligibility` seam 返回 BLOCKED。
+
+### 验证
+
+- biz 表驱动测试覆盖 AND/OR/NOT 全三值组合、全部原子 operator、`PRESENT` 三态、
+  类型不匹配、FAIL 优先级、未知字段/operator、非法 arity、资源超限与确定性。
+- service seam 测试验证非法 AST 映射为 BLOCKED；真实 PostgreSQL + bufconn 测试验证
+  typed AST 重复调用逐项一致，以及含额外 SQL 键的持久化规则被稳定阻断。
+- storage contract 测试验证 `expression_version != 1` 与超过 32 KiB 的表达式被 schema 拒绝。
+- `00→23` fresh-schema 测试通过；新增迁移已加入 sqlc、RunLifecycle 测试迁移链与
+  policy acceptance schema helper。
+
+### 边界
+
+- 条件字段的实际画像快照接入、FULL/PARTIAL/NONE 覆盖、RuleVersion 生命周期、
+  专业五态汇总和 RunLifecycle 正式门禁仍由其他 M4b 票完成。
+
+## 44. M4b-02：RuleVersion 生命周期与发布生效门禁
+
+**日期与范围**：2026-11-19，对应 issue #17。实现规则版本生命周期、内容不可变、
+发布审计与冲突门禁；不扩展 PARTIAL/NONE 覆盖匹配、条件字段接入、组内五态汇总或
+RunLifecycle 接线。
+
+### 实现
+
+- 迁移 22 为 `rule_version` 增加创建/发布操作者与时间字段、已发布元数据约束和
+  精确 scope 唯一索引；新增 `rule_lifecycle_event` 追加式审计。
+- 数据库触发器只允许 `DRAFT -> REVIEWED -> PUBLISHED -> REVOKED`，禁止直接插入
+  PUBLISHED、跳级、回退、从 REVOKED 恢复以及修改已完成版本的内容字段。
+- DRAFT 不绑定 release；发布事务原子校验 release、同 release 证据引用、对应
+  RuleCoverage 和同 `rule_key` 的 applicable scope 唯一性。
+- `EvaluateEligibility` 防御残留重叠生效规则并返回 `BLOCKED / RULE_CONFLICT`；
+  REVOKED 规则不参与评估、不回退旧版本，并使未被新发布版本覆盖的规则类型失效为
+  UNKNOWN。
+- fresh-schema 迁移链更新到 23；现有 M4b service 集成夹具改为 DRAFT → REVIEWED →
+  PUBLISHED 的合法路径。
+
+### 验证
+
+- 真实 PostgreSQL 生命周期测试覆盖审计、非法转换、内容不可变、发布冲突、缺覆盖、
+  撤销原因、撤销后 UNKNOWN，以及新版本发布后恢复覆盖。
+- Eligibility 行为测试覆盖 DRAFT/REVIEWED 不改变已发布结果、重叠 scope 阻断、
+  非重叠同 key 共存，以及与 M4b-04 AST 校验共存。
+- RunLifecycle fresh-schema 迁移测试通过。
+
+### 边界
+
+- 撤销规则不自动发布替代规则或新 release；恢复完整覆盖必须发布新规则版本和
+  release。
+- 本票不从文本或 LLM 生成规则，也不提供审核 UI。
+
+## 45. M4b-03：RuleCoverage 与覆盖不足 UNKNOWN
+
+**日期与范围**：2026-11-19，对应 issue #19。实现覆盖声明的最具体 scope 匹配、
+FULL/PARTIAL/NONE/缺失覆盖语义和 release 发布后冻结；不接入条件字段、组内五态
+汇总或 RunLifecycle。
+
+### 实现
+
+- `EvaluateEligibility` 对每个专业按 `rule_type + scope` 选择最具体覆盖声明；
+  专业级声明覆盖组级、院校级和省级声明。同具体度出现多个适用声明时返回
+  `BLOCKED / RULE_CONFLICT`，不依赖查询返回顺序。
+- 仅 FULL 覆盖允许专业 PASS；PARTIAL、NONE 和无匹配声明均产生
+  `UNKNOWN / RULE_COVERAGE_MISSING`，整体结果为 PARTIAL。
+- 迁移 25 增加规范 scope key、未知/空 scope 校验、可追溯来源元素校验、命名化的
+  FULL 来源和 PARTIAL/NONE 缺口说明约束。
+- release 处于 STAGING 时允许准备覆盖；PUBLISHED/REVOKED 后禁止插入、更新或删除
+  `RuleCoverage`，保证绑定 run 读取的覆盖快照不会被后续配置替换。
+- 现有测试夹具调整为先以 STAGING 写入规则/覆盖，再发布 release；新增真实
+  PostgreSQL 冻结与规范化约束测试，以及经生成客户端进入 `EvaluateEligibility`
+  的覆盖行为测试。
+
+### 验证
+
+- biz 测试覆盖 PARTIAL/NONE、缺失覆盖、最具体 FULL/PARTIAL 覆盖、同具体度冲突和
+  非适用声明隔离。
+- service + PostgreSQL 测试覆盖 broad FULL + specific PARTIAL、broad NONE +
+  candidate FULL、同具体度冲突、NONE、缺失覆盖，以及发布后修改覆盖不影响重复评估。
+- data storage 测试覆盖规范 scope 唯一性、非法 scope、FULL 空来源、缺口说明和
+  PUBLISHED 后插入/更新/删除均失败。
+- `00→25` fresh-schema、Go build/check/test、Python check/test 与既有 M4b 集成
+  测试通过。
+
+### 边界
+
+- 本票不生成 coverage，也不从条款推断覆盖；发布者必须显式声明。
+- 条件字段接入、专业五态组汇总和正式 run 接线仍由 M4b-05~07 完成。
+
+## 46. M4b-05：条件事实字段与已确认画像快照
+
+**日期与范围**：2026-11-19，对应 issue #20。把单科成绩、色觉、性别、户籍和
+学籍接入结构化资格规则，并把 Profile 已确认 revision 投影为确定性事实快照；
+不实现覆盖不足、组级五态或 RunLifecycle 正式接线。
+
+### 实现
+
+- 迁移 24 新增 `eligibility_profile_field` 字段目录，声明稳定 field key、
+  `STRING / INT / STRING_LIST` 类型和枚举允许值；规则 allowlist 不再只依赖
+  编译期字符串列表。
+- `EvaluateEligibility` 从规则仓库加载字段目录，表达式字段、literal 类型和枚举
+  值均按目录校验。未登记字段返回 `RULE_UNKNOWN_FIELD`。
+- 单科规则使用 `single_subject_scores.<subject>`，覆盖语文、数学、英语、物理、
+  历史、化学、生物、思想政治和地理；色觉、性别、户籍与学籍使用 Profile 契约中
+  的稳定 flat key。
+- 缺失、UNKNOWN、DECLINED 在专业结果中成为 `MISSING_REQUIRED_FACT` 并返回规则
+  实际引用的缺失字段；类型或枚举非法产生 UNKNOWN，不宽松转换后 PASS。
+- Profile 内部新增已确认 revision 到资格事实的确定性投影。DRAFT revision
+  返回 `PROFILE_NOT_CONFIRMED`，事实按 field key 排序，不读取自由文本或历史数据。
+- 新迁移已加入 sqlc schema、RunLifecycle 测试迁移链和 policy acceptance schema
+  helper；fresh schema 名称更新为 `00→25`。
+
+### 验证
+
+- biz 表驱动测试覆盖单科 PASS/FAIL/缺失/UNKNOWN、色觉、性别 DECLINED、非法枚举、
+  户籍与学籍缺失，以及只返回适用规则所需字段。
+- service + 真实 PostgreSQL + bufconn 测试逐项覆盖五类条件事实；另验证字段目录
+  是运行时 allowlist 权威来源。
+- 字段目录 storage contract 验证关键字段、枚举值和非法 value type。
+- Python 测试验证 CONFIRMED facts 的稳定排序与 DRAFT 拒绝。
+- 合并后专用测试库 fresh schema `00→25` 与相关 integration tests 通过。
+
+### 边界
+
+- 仍不在本票实现 FULL/PARTIAL/NONE 的最具体 scope 覆盖、组内 `PASS_PARTIAL`
+  和 RunLifecycle 正式资格门禁。
+
+## 47. M4b-06：组内多专业五态与 PASS_PARTIAL
+
+**日期与范围**：2026-11-19，对应 issue #21。完成院校专业组内多专业资格汇总、
+候选身份完整性校验与稳定排序；不接 RunLifecycle。
+
+### 实现
+
+- 专业结果保持 `PASS / FAIL / UNKNOWN / NOT_APPLICABLE /
+  MISSING_REQUIRED_FACT` 五态。明确限报优先为 FAIL，当前计划外专业为
+  NOT_APPLICABLE，规则所需事实缺失为 MISSING_REQUIRED_FACT。
+- 组级汇总为 `PASS / PASS_PARTIAL / FAIL / UNKNOWN`：全部专业 PASS 才为 PASS；
+  至少一个 PASS 且其余仅为 FAIL/NOT_APPLICABLE 时为 PASS_PARTIAL；无 PASS 时为
+  FAIL；任一 UNKNOWN/MISSING_REQUIRED_FACT 使整组 UNKNOWN。
+- PASS_PARTIAL 保留每个专业状态、受限专业及其 failure rule keys；组证据按稳定
+  major/rule 顺序去重，不得把部分专业可报解释为整组可报。
+- 候选身份加入 fail-closed 校验：空组、重复组、空/重复专业代码、缺失学校或组
+  身份均返回 BLOCKED；请求 scope 缺省省、年、科类或批次返回
+  `ELIGIBILITY_SCOPE_INVALID`。
+- 结果按 group key、major code 和规则证据稳定排序；同输入重复评估逐项一致。
+- 本票无新增 schema：候选身份与专业状态属于 RPC 请求/响应，现有 21→25 表结构
+  已足够，无需为纯请求校验增加空白迁移。
+
+### 验证
+
+- biz 测试覆盖 PASS_PARTIAL、全 PASS、全 FAIL、UNKNOWN 支配 PASS、
+  MISSING_REQUIRED_FACT、NOT_APPLICABLE、空组、重复组/专业、缺失身份、
+  不完整 scope 和确定性排序。
+- service + 真实 PostgreSQL + bufconn 测试验证多专业 PASS_PARTIAL、受限专业
+  明细、重复请求逐项一致，以及空组/重复专业/不完整 scope 的稳定阻断。
+- 既有生命周期、AST、条件事实、覆盖、fresh schema 与 CheckConstraints 回归通过。
+
+### 边界
+
+- 本票不判断招生计划是否存在；`NOT_APPLICABLE` 依赖上游提供的
+  `in_current_plan=false`，仍不得从历史专业身份推断当年可报。
+- RunLifecycle 尚未消费该五态结果，V1_FORMAL 门禁仍由 M4b-07 完成。
+
+## 48. M4b-07：RunLifecycle 资格门禁与结果发布
+
+**日期与范围**：2026-11-19，对应 issue #22。把 `EvaluateEligibility` 接入真实
+`GENERATE_PLAN` run，发布资格事实并在优化前执行 fail-closed 门禁；不实现文本检索、
+报告 Verifier 或 LLM 规则生成。
+
+### 实现
+
+- RunLifecycle 从 run 记录读取不可变 `release_id` 和 CONFIRMED
+  `profile_version`，用 `ProfileRuntime.ToEligibilityFacts` 生成稳定排序的 typed
+  facts 快照，再将 `EstimateProb` 候选组映射为 `EligibilityCandidateGroup`。
+- 固定调用顺序改为 `RankConvert → EstimateProb → EvaluateEligibility →
+  OptimizeWishlist`。旧 `CheckConstraints` RPC 保持可调用，但正式资格链路不再调用
+  或选择其宽松结果。
+- 校验资格回复只包含原始候选组和专业，重复、缺失、注入组/专业、未定义状态均
+  fail-closed。COMPLETE 要求无 UNKNOWN；PARTIAL 要求存在 UNKNOWN 诊断。
+- 只有组状态 PASS/PASS_PARTIAL 的候选进入优化。PARTIAL 中已通过组可形成内部预览，
+  但 `formal_eligibility_ready=false`；UNKNOWN、MISSING_REQUIRED_FACT、FAIL、
+  BLOCKED 不进入正式资格集合。PASS_PARTIAL 组保留受限专业明细。
+- `AlgorithmPreview` additive 增加 typed `eligibility` 和 `eligibility_gate`，
+  GetRun/WatchRun 返回同一资格事实；`formal_recommendation` 仍固定为 false。
+- 发布前仍复验 lease、state_version、确认画像与 release；评估期间 release 撤销时
+  以 `RELEASE_REVOKED` 终止，不发布结果。
+
+### 验证
+
+- 新增 RunLifecycle 真实 PostgreSQL 端到端测试覆盖 COMPLETE、PARTIAL、
+  PASS_PARTIAL、资格 release 阻断和候选组注入；断言优化输入、资格门禁、受限专业
+  和 formal=false。
+- 既有 ALGORITHM_PREVIEW、失败门禁、lease、transport、migration 与检索回归全部
+  通过；生成 gRPC client 路径验证新增资格 proto 可往返。
+- `make api`、`make build && make check test`、`make sqlc-check`、
+  `make py-check py-test` 通过；完整 RunLifecycle 真实库套件 77 tests OK，
+  `ORCHESTRATOR_ALGO_ADDR` 未设置时真实 svc-algo TCP 用例按约定跳过。
+
+### 边界
+
+- `ALGORITHM_PREVIEW` 仍不是正式报告，`formal_recommendation=false`；COMPLETE 只
+  表示资格事实完整，不代表报告证据或全部发布门禁通过。
+- 当年招生计划身份、在线 RAG、三类证据 Verifier、LLM Gateway、Strategy、
+  Critic 和正式报告仍未完成，继续作为未核验条件与后续 milestone。
+
+## 49. M4b code review 修复：资格门禁与 release 快照收口
+
+**日期与范围**：2026-11-19。修复 M4b 双轴审查发现的正式门禁、历史专业身份、
+规则静态校验、release 字段目录和稳定原因缺口；不扩展文本检索、报告 Verifier 或
+LLM 规则生成。
+
+### 实现
+
+- 迁移 26 将画像字段目录改为 `release-scoped`：发布后冻结，新 release 从不可变模板
+  初始化；`EvaluateEligibility` 只读取 run 绑定 release 的字段快照。
+- 所有声明的 `RuleCoverage` 类型都进入候选覆盖检查；只要存在 PARTIAL/NONE 或缺失
+  声明，候选保持 UNKNOWN，结果不得成为 COMPLETE。RunLifecycle 还会独立校验
+  coverage 全为 FULL，防止错误回复把部分覆盖提升为正式资格。
+- `EstimateProb` 的候选专业新增 `in_current_plan`，由报考年 `enrollment_plan`
+  的专业代码成员查询产生。RunLifecycle 原样转交该事实，历史专业不再被无条件标为当年
+  可报。
+- `SUBJECT_MATCH` 必须显式携带规则 `subject_req`；评估不再回退到历史候选文本。
+- `EvaluateEligibilityRequest` 新增 `profile_snapshot_sha256`，由 confirmed profile
+  version 与排序后的 typed facts 生成跨语言一致摘要；算法拒绝缺失、重复字段或摘要不匹配。
+- `EligibilityRepo` 同时校验 `release_scope`，省年科批不受绑定 release
+  支持时返回 `PROFILE_UNSUPPORTED_SCOPE`。
+- `RuleVersion` 进入 REVIEWED/PUBLISHED 前执行与运行时共享的静态校验：受限 AST、
+  allowlist/required fields、literal 类型、来源证据、scope 和有效区间不合法时拒绝状态
+  转换。
+- 补齐 `RULE_SOURCE_MISSING` 与 `BATCH_UNSUPPORTED` 稳定原因；清理误导性的
+  group key 参数命名。
+
+### 验证
+
+- 新增覆盖缺口、非本科批、缺来源、字段目录 release 隔离、调用方错误标记 COMPLETE
+  覆盖、历史专业计划成员和非法规则审查的回归测试。
+- Go 纯逻辑与全部 M4b 真实 PostgreSQL 集成测试通过；fresh schema 从 00→26 通过。
+- Python 全量通过；完整 RunLifecycle 真实库套件 80 tests OK，仅真实
+  svc-algo TCP 用例因未设置地址按约定跳过。

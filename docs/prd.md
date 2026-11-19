@@ -323,7 +323,7 @@ run 生命周期状态：
 #### FR-13 硬约束校验（P0）
 
 - 确定性规则引擎（规则表驱动）过滤：选科不符、单科不达标、体检限报、性别限制、批次错配、学费上限；
-- **实现状态**：选科校验已实现（`CheckConstraints`）；单科 / 体检 / 性别 / 学费规则依赖「条款 → 规则 → 审核 → 生效 → 执行」生产发布链路（见 FR-10 与 `REVIEW-P1-01`），该链路完成前不得声称这些维度透出率 = 0；
+- **实现状态**：`EvaluateEligibility` 已实现 release-bound 规则版本、受限表达式、覆盖声明、专业五态与组级 `PASS_PARTIAL`；RunLifecycle 只把 PASS/PASS_PARTIAL 组送入优化，UNKNOWN/MISSING/BLOCKED/PARTIAL 不得进入 `V1_FORMAL`。旧 `CheckConstraints` 仅保留兼容；真实规则内容与覆盖范围仍须由发布链路逐类型证明，不能因接口存在而声称所有维度透出率 = 0；
 - 规则判定至少区分 `PASS / FAIL / UNKNOWN`，UNKNOWN 另带原因（用户字段缺失 / 规则覆盖不足 / 条款冲突），未知不得当通过放行；
 - 剔除必须记录原因，可审计。
 

@@ -138,18 +138,29 @@ SELECT
     COALESCE(ma.min_rank, 0)::int AS min_rank,
     COALESCE(ma.admit_count, 0)::int AS admit_count,
     COALESCE(m.duration, '') AS duration,
-    COALESCE(m.tuition, 0)::float8 AS tuition
+    COALESCE(m.tuition, 0)::float8 AS tuition,
+    EXISTS (
+        SELECT 1 FROM enrollment_plan ep
+        WHERE ep.university_code = ma.university_code
+          AND ep.major_group = ma.major_group
+          AND ep.major_code = ma.major_code
+          AND ep.release_id = $1::text
+          AND ep.province = $2::text
+          AND ep.category = $3::text
+          AND ep.batch = $4::text
+          AND ep.year = $5::int
+    ) AS in_current_plan
 FROM major_admission ma
 LEFT JOIN major m ON ma.major_id = m.id
 WHERE ma.release_id = $1::text
   AND ma.province = $2::text AND ma.category = $3::text AND ma.batch = $4::text
-  AND ma.year = $5::int
+  AND ma.year = $6::int
   AND EXISTS (
       SELECT 1 FROM enrollment_plan ep
       WHERE ep.university_code = ma.university_code AND ep.major_group = ma.major_group
         AND ep.release_id = $1::text
         AND ep.province = $2::text AND ep.category = $3::text
-        AND ep.batch = $4::text AND ep.year = $6::int
+        AND ep.batch = $4::text AND ep.year = $5::int
   )
 ORDER BY ma.university_code, ma.major_group, ma.min_rank, ma.major_code, ma.id
 `
@@ -159,8 +170,8 @@ type ListCandidateMajorsParams struct {
 	Province    string
 	Category    string
 	Batch       string
-	HistoryYear int32
 	ReportYear  int32
+	HistoryYear int32
 }
 
 type ListCandidateMajorsRow struct {
@@ -175,6 +186,7 @@ type ListCandidateMajorsRow struct {
 	AdmitCount     int32
 	Duration       string
 	Tuition        float64
+	InCurrentPlan  bool
 }
 
 // 读取组内专业明细。LEFT JOIN 保留未关联专业基础表的记录，缺失展示字段取零值。
@@ -185,8 +197,8 @@ func (q *Queries) ListCandidateMajors(ctx context.Context, arg ListCandidateMajo
 		arg.Province,
 		arg.Category,
 		arg.Batch,
-		arg.HistoryYear,
 		arg.ReportYear,
+		arg.HistoryYear,
 	)
 	if err != nil {
 		return nil, err
@@ -207,6 +219,7 @@ func (q *Queries) ListCandidateMajors(ctx context.Context, arg ListCandidateMajo
 			&i.AdmitCount,
 			&i.Duration,
 			&i.Tuition,
+			&i.InCurrentPlan,
 		); err != nil {
 			return nil, err
 		}

@@ -25,6 +25,10 @@ service Algo {
   // 硬规则裁决：选科 / 单科 / 体检 / 批次 / 性别 → 剔除并记录原因。
   rpc CheckConstraints(CheckConstraintsRequest) returns (CheckConstraintsReply);
 
+  // 结构化资格规则裁决：返回 PASS / FAIL / UNKNOWN、覆盖声明与证据。
+  // 兼容期保留旧 CheckConstraints RPC。
+  rpc EvaluateEligibility(EvaluateEligibilityRequest) returns (EvaluateEligibilityReply);
+
   // 志愿表排序与配比（约束满足 + 启发式搜索）：从候选池生成成品志愿表，含解析式滑档率验证 Π(1−pᵢ)。
   rpc OptimizeWishlist(OptimizeWishlistRequest) returns (OptimizeWishlistReply);
 }
@@ -51,6 +55,7 @@ message MajorDetail {
   int32 min_score = 7;    // 该专业历史最低分（专业级参考）
   int32 min_rank = 8;     // 该专业历史最低位次（仅展示，不用于概率计算）
   int32 admit_count = 9;  // 录取人数
+  bool in_current_plan = 10; // 该专业代码是否存在于报考年招生计划
 }
 
 // AdmissionRecord 某年录取记录（专业组维度）。
@@ -191,6 +196,140 @@ message CheckConstraintsRequest {
 message CheckConstraintsReply {
   repeated CandidateWithProb kept     = 1; // 通过校验的候选
   repeated RejectedCandidate rejected = 2; // 被剔除的候选 + 原因
+}
+
+enum EligibilityResultStatus {
+  ELIGIBILITY_RESULT_STATUS_UNSPECIFIED = 0;
+  ELIGIBILITY_RESULT_STATUS_COMPLETE = 1;
+  ELIGIBILITY_RESULT_STATUS_PARTIAL = 2;
+  ELIGIBILITY_RESULT_STATUS_BLOCKED = 3;
+}
+
+enum EligibilityProfileLifecycle {
+  ELIGIBILITY_PROFILE_LIFECYCLE_UNSPECIFIED = 0;
+  ELIGIBILITY_PROFILE_LIFECYCLE_CONFIRMED = 1;
+}
+
+enum EligibilityProfileFieldState {
+  ELIGIBILITY_PROFILE_FIELD_STATE_UNSPECIFIED = 0;
+  ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED = 1;
+  ELIGIBILITY_PROFILE_FIELD_STATE_UNKNOWN = 2;
+  ELIGIBILITY_PROFILE_FIELD_STATE_DECLINED = 3;
+  ELIGIBILITY_PROFILE_FIELD_STATE_DERIVED = 4;
+  ELIGIBILITY_PROFILE_FIELD_STATE_DEFAULT = 5;
+}
+
+enum MajorEligibilityStatus {
+  MAJOR_ELIGIBILITY_STATUS_UNSPECIFIED = 0;
+  MAJOR_ELIGIBILITY_STATUS_PASS = 1;
+  MAJOR_ELIGIBILITY_STATUS_FAIL = 2;
+  MAJOR_ELIGIBILITY_STATUS_UNKNOWN = 3;
+  MAJOR_ELIGIBILITY_STATUS_NOT_APPLICABLE = 4;
+  MAJOR_ELIGIBILITY_STATUS_MISSING_REQUIRED_FACT = 5;
+}
+
+enum GroupEligibilityStatus {
+  GROUP_ELIGIBILITY_STATUS_UNSPECIFIED = 0;
+  GROUP_ELIGIBILITY_STATUS_PASS = 1;
+  GROUP_ELIGIBILITY_STATUS_PASS_PARTIAL = 2;
+  GROUP_ELIGIBILITY_STATUS_FAIL = 3;
+  GROUP_ELIGIBILITY_STATUS_UNKNOWN = 4;
+}
+
+enum RuleCoverageStatus {
+  RULE_COVERAGE_STATUS_UNSPECIFIED = 0;
+  RULE_COVERAGE_STATUS_FULL = 1;
+  RULE_COVERAGE_STATUS_PARTIAL = 2;
+  RULE_COVERAGE_STATUS_NONE = 3;
+}
+
+message EligibilityScope {
+  string province = 1;
+  int32 application_year = 2;
+  string category = 3;
+  string batch = 4;
+  int64 university_id = 5;
+  string major_group = 6;
+  string major_code = 7;
+}
+
+message EligibilityProfileFact {
+  string field_key = 1;
+  EligibilityProfileFieldState state = 2;
+  string string_value = 3;
+  int32 int_value = 4;
+  repeated string string_values = 5;
+}
+
+message EligibilityCandidateMajor {
+  string major_code = 1;
+  string major_name = 2;
+  string subject_requirement = 3;
+  bool in_current_plan = 4;
+}
+
+message EligibilityCandidateGroup {
+  int64 university_id = 1;
+  string university_code = 2;
+  string university_name = 3;
+  string major_group = 4;
+  repeated EligibilityCandidateMajor majors = 5;
+}
+
+message EvaluateEligibilityRequest {
+  common.v1.Trace trace = 1;
+  string release_id = 2;
+  string confirmed_profile_version = 3;
+  EligibilityProfileLifecycle profile_lifecycle = 4;
+  EligibilityScope scope = 5;
+  repeated EligibilityProfileFact profile_facts = 6;
+  repeated EligibilityCandidateGroup candidate_groups = 7;
+  string profile_snapshot_sha256 = 8;
+}
+
+message EligibilityEvidenceRef {
+  string evidence_id = 1;
+  string evidence_type = 2;
+  string release_id = 3;
+  string content_sha256 = 4;
+}
+
+message EligibilityRuleCoverage {
+  string rule_type = 1;
+  EligibilityScope scope = 2;
+  RuleCoverageStatus status = 3;
+  repeated string covered_data_sources = 4;
+  string notes = 5;
+}
+
+message MajorEligibility {
+  string major_code = 1;
+  MajorEligibilityStatus status = 2;
+  repeated string failure_rule_keys = 3;
+  repeated string unknown_reasons = 4;
+  repeated string missing_fields = 5;
+  repeated EligibilityEvidenceRef evidence_refs = 6;
+}
+
+message GroupEligibility {
+  string group_key = 1;
+  GroupEligibilityStatus status = 2;
+  repeated MajorEligibility majors = 3;
+  repeated EligibilityEvidenceRef evidence_refs = 4;
+}
+
+message EligibilityDiagnostics {
+  int32 evaluated_rule_count = 1;
+  int32 conflict_count = 2;
+  int32 unknown_count = 3;
+}
+
+message EvaluateEligibilityReply {
+  EligibilityResultStatus status = 1;
+  repeated GroupEligibility groups = 2;
+  repeated EligibilityRuleCoverage coverage = 3;
+  string evidence_bundle_id = 4;
+  EligibilityDiagnostics diagnostics = 5;
 }
 
 message OptimizeWishlistRequest {
