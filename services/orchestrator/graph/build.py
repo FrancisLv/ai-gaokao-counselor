@@ -28,12 +28,25 @@ def route_after_intake(state: GraphState) -> str:
     return "ask"
 
 
-def build_graph():
+def build_graph(
+    *,
+    retrieve_policy: retrieve.RetrievePolicyPort | None = None,
+    retrieval_binding: retrieve.RetrievalRunBinding | None = None,
+):
+    if (retrieve_policy is None) != (retrieval_binding is None):
+        raise ValueError(
+            "retrieve_policy 与 retrieval_binding 必须同时提供"
+        )
     g = StateGraph(GraphState)
 
     g.add_node("intake", intake.run)
     g.add_node("profile_confirm", profile_confirm.run)
-    g.add_node("retrieve", retrieve.run)
+    retrieval_node = (
+        retrieve.build_retrieve_node(retrieve_policy, retrieval_binding)
+        if retrieve_policy is not None and retrieval_binding is not None
+        else retrieve.run
+    )
+    g.add_node("retrieve", retrieval_node)
     g.add_node("check_conditional", check_conditional.run)
     # TODO(M3+): strategy / constraint / risk / critic / optimize / report / verify / backfill
 

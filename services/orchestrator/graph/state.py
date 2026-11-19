@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
+from rag.policy_retrieval import EvidenceRef, PolicyRetrievalDiagnostics
+
 # ---- 画像 Schema ----
 
 # 全局必需：缺任一都不能往下走
@@ -48,12 +50,22 @@ class Profile(TypedDict, total=False):
 
 class GraphState(TypedDict, total=False):
     session_id: str
+    run_id: str
+    principal_id: str
+    task_kind: str
+    release_id: str
     trace_id: str
     user_text: str
 
     profile: Profile
+    confirmed_profile: dict[str, Any]
     missing: list[str]      # 当前缺失的必需字段
     ask_round: int          # 追问轮次（护栏）
+
+    retrieval_status: str
+    policy_evidence: tuple[EvidenceRef, ...]
+    retrieval_diagnostics: PolicyRetrievalDiagnostics | None
+    retrieval_error: str | None
 
     candidates: list[dict]  # 冲/稳/保候选
     kept: list[dict]

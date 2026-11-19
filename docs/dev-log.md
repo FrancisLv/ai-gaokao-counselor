@@ -1075,3 +1075,27 @@ sqlc 的 `:many` 先收集类型化结果 slice，再映射领域对象，相较
 
 - Python 同步适配器通过有界等待实现超时；若底层模型忽略取消并长期阻塞，工作线程可能继续存活。真实本地 rerank 模型仍需在接入层实现可取消调用或进程隔离。
 - rerank 成功会改变 top-k 选择，因此评测与缓存身份必须同时记录 release、模型和配置版本；本次只提供运行时诊断，不实现 golden set 基线与质量阈值。
+
+## 35. M4a-05：在线检索节点接入 RetrievePolicy
+
+**日期与范围**：2026-11-19。实现 issue #12：在线检索节点只通过唯一 `RetrievePolicy` seam 读取政策证据，不生成报告、不执行资格规则，也不接 LLM Gateway。
+
+### 实现
+
+- `RetrievalRunBinding` 由 RunLifecycle 权威记录构造，冻结 principal、run、不可变 `release_id`、已确认画像范围或 POLICY_QA 的必要任务范围，以及学校/文档类型、检索模式和 top/pool 配置。
+- 在线检索节点会把可信 binding 的 principal/run/release/task 回写到图状态，避免客户端正文伪造值流入后续节点；已确认画像范围直接来自可信 `ConfirmedProfileScope`，图状态中的画像副本不能覆盖省、报考年、科类或批次。
+- 节点只构造 `PolicyRetrievalQuery` 并调用 `RetrievePolicy`，不构造 SQL、不访问 `policy_*` 表，也不调用 `HybridRetriever`。同步数据库/模型 adapter 通过线程执行，避免阻塞事件循环。
+- `FOUND` 原样交接稳定 `EvidenceRef` tuple 与诊断；`NO_EVIDENCE`、`UNSUPPORTED_SCOPE`、`RELEASE_UNAVAILABLE` 保持各自状态。单路降级同时设置 `degraded` 和 `retrieval_diagnostics.degraded_reason`。
+- `PolicyRetrievalError` 写回稳定 `retrieval_status` / `retrieval_error`，两路均不可用仍为 `RETRIEVAL_UNAVAILABLE`，不伪装成 `NO_EVIDENCE`。返回结果或任一证据的 release 与 run binding 不一致时拒绝交接并返回 `EVIDENCE_RELEASE_MISMATCH`。
+- 文档正文只作为 `DocumentEvidence.excerpt` 数据交接；节点不解析其中的系统指令、工具调用或流程控制语句。`build_graph` 支持注入 `RetrievePolicy` 与 binding，使节点从空桩变为可执行接线。
+
+### 测试
+
+- `test_retrieval_node.py` 从节点/图外部行为覆盖：可信 principal 与 release、已确认画像范围防覆盖、POLICY_QA 任务范围、`FOUND` 证据交接、`NO_EVIDENCE`/`UNSUPPORTED_SCOPE`/`RELEASE_UNAVAILABLE` 状态保真、单路降级、两路技术失败、跨 release 拒绝、文档指令不改变图控制。
+- 图级测试通过 `build_graph(..., retrieve_policy=..., retrieval_binding=...)` 调用完整图，确认注入的 seam 实际被在线节点执行。
+
+### 风险与边界
+
+- binding 的组装代码必须从可信认证上下文、run 记录和已确认 `profile_revision` 取值；节点已拒绝状态覆盖，但生产装配尚未暴露 POLICY_QA API/子图。
+- 当前 legacy `graph.build` 无 checkpointer；`EvidenceRef` / 诊断 dataclass 若进入官方 PostgreSQL saver，仍需后续验证序列化形制。
+- 本票不实现查询改写、结构化事实 SQL、资格规则、报告生成、LLM Gateway 或真实模型质量门禁。
