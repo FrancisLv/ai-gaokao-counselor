@@ -50,7 +50,10 @@ type expressionOutcome struct {
 	missing  []string
 }
 
-func validateEligibilityRules(rules []RuleVersion) string {
+func validateEligibilityRules(
+	rules []RuleVersion,
+	definitions map[string]ProfileFieldDefinition,
+) string {
 	for _, rule := range rules {
 		if rule.ReviewState != ReviewStatePublished {
 			continue
@@ -67,7 +70,7 @@ func validateEligibilityRules(rules []RuleVersion) string {
 		}
 		nodes := 0
 		fields := make([]string, 0)
-		if reason := validateRuleExpression(rule.When, 1, &nodes, &fields); reason != "" {
+		if reason := validateRuleExpression(rule.When, 1, &nodes, &fields, definitions); reason != "" {
 			return reason
 		}
 		if !sameProfileFieldSet(rule.RequiredProfileFields, fields) {
@@ -77,7 +80,13 @@ func validateEligibilityRules(rules []RuleVersion) string {
 	return ""
 }
 
-func validateRuleExpression(expr RuleExpression, depth int, nodes *int, fields *[]string) string {
+func validateRuleExpression(
+	expr RuleExpression,
+	depth int,
+	nodes *int,
+	fields *[]string,
+	definitions map[string]ProfileFieldDefinition,
+) string {
 	if depth > maxExpressionDepth {
 		return ReasonRuleExpression
 	}
@@ -98,26 +107,27 @@ func validateRuleExpression(expr RuleExpression, depth int, nodes *int, fields *
 		if !emptyExceptBoolChildren(expr) || expr.Left == nil || expr.Right == nil {
 			return ReasonRuleExpression
 		}
-		if reason := validateRuleExpression(*expr.Left, depth+1, nodes, fields); reason != "" {
+		if reason := validateRuleExpression(*expr.Left, depth+1, nodes, fields, definitions); reason != "" {
 			return reason
 		}
-		return validateRuleExpression(*expr.Right, depth+1, nodes, fields)
+		return validateRuleExpression(*expr.Right, depth+1, nodes, fields, definitions)
 	case OperatorNot:
 		if !emptyExceptChild(expr) || expr.Child == nil {
 			return ReasonRuleExpression
 		}
-		return validateRuleExpression(*expr.Child, depth+1, nodes, fields)
+		return validateRuleExpression(*expr.Child, depth+1, nodes, fields, definitions)
 	case OperatorEQ, OperatorNEQ:
 		if !emptyExceptFieldAndValue(expr) || len(expr.Value) == 0 {
 			return ReasonRuleExpression
 		}
-		kind, ok := profileFieldType(expr.Field)
+		kind, definition, ok := profileFieldDefinition(definitions, expr.Field)
 		if !ok {
 			return ReasonRuleUnknownField
 		}
 		if kind == profileFieldString {
 			value, err := decodeStringLiteral(expr.Value)
-			if err != nil || len(value) > maxExpressionStringLength {
+			if err != nil || len(value) > maxExpressionStringLength ||
+				!profileFieldAllowedValue(definition, value) {
 				return ReasonRuleExpression
 			}
 		} else if kind == profileFieldInt {
@@ -133,13 +143,14 @@ func validateRuleExpression(expr RuleExpression, depth int, nodes *int, fields *
 		if !emptyExceptFieldAndValues(expr) || len(expr.Values) == 0 {
 			return ReasonRuleExpression
 		}
-		kind, ok := profileFieldType(expr.Field)
+		kind, definition, ok := profileFieldDefinition(definitions, expr.Field)
 		if !ok {
 			return ReasonRuleUnknownField
 		}
 		if kind == profileFieldString {
 			values, err := decodeStringValues(expr.Values)
-			if err != nil || !allStringsWithinLimit(values, maxExpressionStringLength) {
+			if err != nil || !allStringsWithinLimit(values, maxExpressionStringLength) ||
+				!allProfileFieldValuesAllowed(definition, values) {
 				return ReasonRuleExpression
 			}
 		} else if kind == profileFieldInt {
@@ -157,7 +168,7 @@ func validateRuleExpression(expr RuleExpression, depth int, nodes *int, fields *
 		if !emptyExceptFieldAndValue(expr) || len(expr.Value) == 0 {
 			return ReasonRuleExpression
 		}
-		kind, ok := profileFieldType(expr.Field)
+		kind, _, ok := profileFieldDefinition(definitions, expr.Field)
 		if !ok {
 			return ReasonRuleUnknownField
 		}
@@ -173,7 +184,7 @@ func validateRuleExpression(expr RuleExpression, depth int, nodes *int, fields *
 		if !emptyExceptField(expr) {
 			return ReasonRuleExpression
 		}
-		if _, ok := profileFieldType(expr.Field); !ok {
+		if _, _, ok := profileFieldDefinition(definitions, expr.Field); !ok {
 			return ReasonRuleUnknownField
 		}
 		*fields = append(*fields, expr.Field)
@@ -182,7 +193,7 @@ func validateRuleExpression(expr RuleExpression, depth int, nodes *int, fields *
 		if !emptyExceptFieldAndValues(expr) || len(expr.Values) == 0 {
 			return ReasonRuleExpression
 		}
-		kind, ok := profileFieldType(expr.Field)
+		kind, _, ok := profileFieldDefinition(definitions, expr.Field)
 		if !ok {
 			return ReasonRuleUnknownField
 		}
@@ -372,16 +383,16 @@ func evaluateSubjectMatch(expr RuleExpression, major CandidateMajor, facts map[s
 }
 
 func evaluateEquality(expr RuleExpression, facts map[string]ProfileFact) expressionOutcome {
-	field, ok := profileFieldType(expr.Field)
-	if !ok || len(expr.Value) == 0 {
-		return expressionOutcome{decision: expressionIndeterminate}
-	}
 	fact, exists := facts[expr.Field]
 	if !exists || !usableProfileState(fact.State) {
 		return expressionOutcome{
 			decision: expressionIndeterminate,
 			missing:  []string{expr.Field},
 		}
+	}
+	field := fact.fieldKind
+	if field == profileFieldUnknown || len(expr.Value) == 0 {
+		return expressionOutcome{decision: expressionIndeterminate}
 	}
 
 	var equal bool
@@ -414,13 +425,13 @@ func evaluateEquality(expr RuleExpression, facts map[string]ProfileFact) express
 }
 
 func evaluateMembership(expr RuleExpression, facts map[string]ProfileFact) expressionOutcome {
-	field, ok := profileFieldType(expr.Field)
-	if !ok || len(expr.Values) == 0 {
-		return expressionOutcome{decision: expressionIndeterminate}
-	}
 	fact, exists := facts[expr.Field]
 	if !exists || !usableProfileState(fact.State) {
 		return expressionOutcome{decision: expressionIndeterminate, missing: []string{expr.Field}}
+	}
+	field := fact.fieldKind
+	if field == profileFieldUnknown || len(expr.Values) == 0 {
+		return expressionOutcome{decision: expressionIndeterminate}
 	}
 
 	matched := false
@@ -463,12 +474,12 @@ func evaluateMembership(expr RuleExpression, facts map[string]ProfileFact) expre
 }
 
 func evaluateOrdering(expr RuleExpression, facts map[string]ProfileFact) expressionOutcome {
-	if field, ok := profileFieldType(expr.Field); !ok || field != profileFieldInt || len(expr.Value) == 0 {
-		return expressionOutcome{decision: expressionIndeterminate}
-	}
 	fact, exists := facts[expr.Field]
 	if !exists || !usableProfileState(fact.State) {
 		return expressionOutcome{decision: expressionIndeterminate, missing: []string{expr.Field}}
+	}
+	if fact.fieldKind != profileFieldInt || len(expr.Value) == 0 {
+		return expressionOutcome{decision: expressionIndeterminate}
 	}
 	actual, state := resolveIntFact(fact)
 	expected, err := decodeIntLiteral(expr.Value)
@@ -486,13 +497,13 @@ func evaluateOrdering(expr RuleExpression, facts map[string]ProfileFact) express
 }
 
 func evaluatePresent(expr RuleExpression, facts map[string]ProfileFact) expressionOutcome {
-	field, ok := profileFieldType(expr.Field)
-	if !ok {
-		return expressionOutcome{decision: expressionIndeterminate}
-	}
 	fact, exists := facts[expr.Field]
 	if !exists || !usableProfileState(fact.State) {
 		return expressionOutcome{decision: expressionIndeterminate, missing: []string{expr.Field}}
+	}
+	field := fact.fieldKind
+	if field == profileFieldUnknown {
+		return expressionOutcome{decision: expressionIndeterminate}
 	}
 	switch field {
 	case profileFieldString:
@@ -515,12 +526,12 @@ func evaluatePresent(expr RuleExpression, facts map[string]ProfileFact) expressi
 }
 
 func evaluateContains(expr RuleExpression, facts map[string]ProfileFact) expressionOutcome {
-	if field, ok := profileFieldType(expr.Field); !ok || field != profileFieldStringList || len(expr.Values) == 0 {
-		return expressionOutcome{decision: expressionIndeterminate}
-	}
 	fact, exists := facts[expr.Field]
 	if !exists || !usableProfileState(fact.State) {
 		return expressionOutcome{decision: expressionIndeterminate, missing: []string{expr.Field}}
+	}
+	if fact.fieldKind != profileFieldStringList || len(expr.Values) == 0 {
+		return expressionOutcome{decision: expressionIndeterminate}
 	}
 	actual, state := resolveStringListFact(fact)
 	if state != factResolved {
@@ -560,23 +571,64 @@ const (
 )
 
 func profileFieldType(field string) (profileFieldKind, bool) {
-	switch field {
-	case FieldCategory, "province", "batch", "physical_exam.color_vision", "foreign_language",
-		"gender", "graduate_status", "household_province", "school_registration_province":
-		return profileFieldString, true
-	case FieldApplicationYear, "score", "rank":
-		return profileFieldInt, true
-	case FieldSubjects:
-		return profileFieldStringList, true
-	default:
-		if strings.HasPrefix(field, "single_subject_scores.") {
-			subject := strings.TrimPrefix(field, "single_subject_scores.")
-			if subject == firstPhysics || subject == firstHistory || isReselect(subject) {
-				return profileFieldInt, true
-			}
+	kind, _, ok := profileFieldDefinition(
+		profileFieldDefinitionIndex(BuiltinEligibilityProfileFields()),
+		field,
+	)
+	return kind, ok
+}
+
+func profileFieldDefinitionIndex(fields []ProfileFieldDefinition) map[string]ProfileFieldDefinition {
+	out := make(map[string]ProfileFieldDefinition, len(fields))
+	for _, field := range fields {
+		out[field.FieldKey] = ProfileFieldDefinition{
+			FieldKey:      field.FieldKey,
+			ValueType:     field.ValueType,
+			AllowedValues: append([]string(nil), field.AllowedValues...),
 		}
-		return profileFieldUnknown, false
 	}
+	return out
+}
+
+func profileFieldDefinition(
+	definitions map[string]ProfileFieldDefinition,
+	field string,
+) (profileFieldKind, ProfileFieldDefinition, bool) {
+	definition, ok := definitions[field]
+	if !ok {
+		return profileFieldUnknown, ProfileFieldDefinition{}, false
+	}
+	kind := profileFieldKindForValueType(definition.ValueType)
+	if kind == profileFieldUnknown {
+		return profileFieldUnknown, ProfileFieldDefinition{}, false
+	}
+	return kind, definition, true
+}
+
+func profileFieldKindForValueType(valueType string) profileFieldKind {
+	switch valueType {
+	case ProfileFieldTypeString:
+		return profileFieldString
+	case ProfileFieldTypeInt:
+		return profileFieldInt
+	case ProfileFieldTypeStringList:
+		return profileFieldStringList
+	default:
+		return profileFieldUnknown
+	}
+}
+
+func profileFieldAllowedValue(definition ProfileFieldDefinition, value string) bool {
+	return len(definition.AllowedValues) == 0 || slices.Contains(definition.AllowedValues, value)
+}
+
+func allProfileFieldValuesAllowed(definition ProfileFieldDefinition, values []string) bool {
+	for _, value := range values {
+		if !profileFieldAllowedValue(definition, value) {
+			return false
+		}
+	}
+	return true
 }
 
 type factResolution int
@@ -591,7 +643,11 @@ func resolveStringFact(fact ProfileFact) (string, factResolution) {
 	if strings.TrimSpace(fact.StringValue) == "" || len(fact.StringValues) > 0 || fact.IntValue != 0 {
 		return "", factInvalid
 	}
-	return fact.StringValue, factResolved
+	value := strings.TrimSpace(fact.StringValue)
+	if len(fact.allowedValues) > 0 && !slices.Contains(fact.allowedValues, value) {
+		return "", factInvalid
+	}
+	return value, factResolved
 }
 
 func resolveIntFact(fact ProfileFact) (int, factResolution) {

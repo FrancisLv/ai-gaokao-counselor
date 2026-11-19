@@ -13,6 +13,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/choucisan/ai-gaokao-counselor/internal/algo/biz"
 )
 
 func TestIntegration_RuleExpressionStorageContract(t *testing.T) {
@@ -90,6 +92,96 @@ func TestIntegration_RuleExpressionStorageContract(t *testing.T) {
 	)
 	if err := insert("oversized", oversized, 1); !isCheckViolation(err, "rule_version_expression_size_check") {
 		t.Fatalf("超过 32KiB 的表达式应由 CHECK 约束拒绝，got %v", err)
+	}
+}
+
+func TestIntegration_EligibilityProfileFieldCatalog(t *testing.T) {
+	dsn := os.Getenv("ALGO_TEST_DSN")
+	if dsn == "" {
+		t.Skip("ALGO_TEST_DSN 未设置，跳过集成测试")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	expected := map[string]string{
+		"single_subject_scores.数学":     "INT",
+		"single_subject_scores.英语":     "INT",
+		"physical_exam.color_vision":   "STRING",
+		"gender":                       "STRING",
+		"household_province":           "STRING",
+		"school_registration_province": "STRING",
+	}
+	for fieldKey, valueType := range expected {
+		var gotType string
+		if err := pool.QueryRow(context.Background(),
+			`SELECT value_type
+			 FROM eligibility_profile_field
+			 WHERE field_key = $1`, fieldKey,
+		).Scan(&gotType); err != nil {
+			t.Fatalf("load %s field contract: %v", fieldKey, err)
+		}
+		if gotType != valueType {
+			t.Fatalf("%s value_type = %q, want %q", fieldKey, gotType, valueType)
+		}
+	}
+
+	var colorValues []string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT allowed_values
+		 FROM eligibility_profile_field
+		 WHERE field_key = 'physical_exam.color_vision'`,
+	).Scan(&colorValues); err != nil {
+		t.Fatalf("load color-vision values: %v", err)
+	}
+	if got := strings.Join(colorValues, ","); got != "NORMAL,COLOR_WEAK,COLOR_BLIND" {
+		t.Fatalf("color-vision values = %q", got)
+	}
+
+	rows, err := pool.Query(context.Background(),
+		`SELECT field_key, value_type, allowed_values
+		 FROM eligibility_profile_field
+		 ORDER BY field_key`,
+	)
+	if err != nil {
+		t.Fatalf("list field catalog: %v", err)
+	}
+	persisted := make(map[string]biz.ProfileFieldDefinition)
+	for rows.Next() {
+		var field biz.ProfileFieldDefinition
+		if err := rows.Scan(&field.FieldKey, &field.ValueType, &field.AllowedValues); err != nil {
+			t.Fatalf("scan field catalog: %v", err)
+		}
+		persisted[field.FieldKey] = field
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate field catalog: %v", err)
+	}
+	rows.Close()
+	builtin := biz.BuiltinEligibilityProfileFields()
+	if len(persisted) != len(builtin) {
+		t.Fatalf("field catalog size = %d, builtin = %d", len(persisted), len(builtin))
+	}
+	for _, expected := range builtin {
+		actual, ok := persisted[expected.FieldKey]
+		if !ok {
+			t.Fatalf("field catalog missing %s", expected.FieldKey)
+		}
+		if actual.ValueType != expected.ValueType ||
+			strings.Join(actual.AllowedValues, ",") != strings.Join(expected.AllowedValues, ",") {
+			t.Fatalf("field catalog %s = %+v, want %+v", expected.FieldKey, actual, expected)
+		}
+	}
+
+	_, err = pool.Exec(context.Background(),
+		`INSERT INTO eligibility_profile_field (
+			field_key, value_type, allowed_values, description
+		 ) VALUES ('invalid-field-type', 'BOOLEAN', ARRAY[]::TEXT[], 'invalid')`,
+	)
+	if !isCheckViolation(err, "eligibility_profile_field_value_type_check") {
+		t.Fatalf("invalid field value_type should be rejected by CHECK, got %v", err)
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -609,6 +610,304 @@ func TestIntegration_EvaluateEligibility_TypedAST(t *testing.T) {
 	reasons := blocked.GetGroups()[0].GetMajors()[0].GetUnknownReasons()
 	if len(reasons) != 1 || reasons[0] != "RULE_EXPRESSION_INVALID" {
 		t.Fatalf("invalid AST reasons = %v", reasons)
+	}
+}
+
+func TestIntegration_EvaluateEligibility_ProfileFieldCatalogIsAuthoritative(t *testing.T) {
+	dsn := os.Getenv("ALGO_TEST_DSN")
+	if dsn == "" {
+		t.Skip("ALGO_TEST_DSN 未设置，跳过集成测试")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := time.Now().UnixNano()
+	releaseID := fmt.Sprintf("rel_m4b_field_catalog_%d", suffix)
+	ruleID := fmt.Sprintf("rule-field-catalog-%d", suffix)
+	fieldKey := fmt.Sprintf("single_subject_scores.技术%d", suffix)
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO eligibility_profile_field (
+			field_key, value_type, allowed_values, description
+		 ) VALUES ($1, 'INT', ARRAY[]::TEXT[], 'integration fixture')`,
+		fieldKey,
+	); err != nil {
+		t.Fatalf("insert profile field contract: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM eligibility_profile_field WHERE field_key = $1`, fieldKey)
+	})
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
+		 VALUES ($1, 'PUBLISHED', '{}'::jsonb, 'sha256:m4b-field-catalog', NOW())`,
+		releaseID,
+	); err != nil {
+		t.Fatalf("insert release: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
+	})
+	publishEligibilityRuleFixture(
+		t,
+		pool,
+		releaseID,
+		ruleID,
+		"technical-subject-min",
+		"SINGLE_SUBJECT_MIN",
+		fmt.Sprintf(`[%q]`, fieldKey),
+		fmt.Sprintf(`{"op":"NOT","child":{"op":"GTE","field":%q,"value":80}}`, fieldKey),
+		1,
+		"SUBJECT_REQUIREMENT",
+		"SINGLE_SUBJECT_MIN",
+	)
+
+	t.Setenv("ALGO_DATA_DSN", dsn)
+	bc := &conf.Bootstrap{Data: &conf.Data{Database: &conf.Data_Database{Dsn: dsn}}}
+	d, cleanup, err := data.NewData(bc)
+	if err != nil {
+		t.Fatalf("NewData: %v", err)
+	}
+	t.Cleanup(cleanup)
+	svc := NewAlgo(nil, nil, nil, biz.NewEligibilityUsecase(data.NewEligibilityRepo(d)))
+	client := setupBufconnClient(t, svc)
+
+	reply, err := client.EvaluateEligibility(context.Background(), &algov1.EvaluateEligibilityRequest{
+		ReleaseId: releaseID, ConfirmedProfileVersion: "profile-field-catalog",
+		ProfileLifecycle: algov1.EligibilityProfileLifecycle_ELIGIBILITY_PROFILE_LIFECYCLE_CONFIRMED,
+		Scope:            &algov1.EligibilityScope{Province: "湖南", ApplicationYear: 2025, Category: "物理类", Batch: "本科批"},
+		ProfileFacts: []*algov1.EligibilityProfileFact{
+			{
+				FieldKey: "subjects", State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+				StringValues: []string{"物理", "化学", "生物"},
+			},
+			{
+				FieldKey: "category", State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+				StringValue: "物理类",
+			},
+			{
+				FieldKey: fieldKey, State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+				IntValue: 90,
+			},
+		},
+		CandidateGroups: []*algov1.EligibilityCandidateGroup{{
+			UniversityId: 1, UniversityCode: "1001", UniversityName: "测试大学", MajorGroup: "01",
+			Majors: []*algov1.EligibilityCandidateMajor{{
+				MajorCode: "080901", MajorName: "计算机科学与技术",
+				SubjectRequirement: "首选物理，再选化学", InCurrentPlan: true,
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("EvaluateEligibility: %v", err)
+	}
+	if got := reply.GetStatus(); got != algov1.EligibilityResultStatus_ELIGIBILITY_RESULT_STATUS_COMPLETE {
+		t.Fatalf("status = %v, want COMPLETE; reasons=%v",
+			got, reply.GetGroups()[0].GetMajors()[0].GetUnknownReasons())
+	}
+	if got := reply.GetGroups()[0].GetMajors()[0].GetStatus(); got != algov1.MajorEligibilityStatus_MAJOR_ELIGIBILITY_STATUS_PASS {
+		t.Fatalf("major status = %v, want PASS", got)
+	}
+}
+
+func TestIntegration_EvaluateEligibility_ConditionalFacts(t *testing.T) {
+	dsn := os.Getenv("ALGO_TEST_DSN")
+	if dsn == "" {
+		t.Skip("ALGO_TEST_DSN 未设置，跳过集成测试")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := time.Now().UnixNano()
+	releaseID := fmt.Sprintf("rel_m4b_conditional_%d", suffix)
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
+		 VALUES ($1, 'PUBLISHED', '{}'::jsonb, 'sha256:m4b-conditional', NOW())`,
+		releaseID,
+	); err != nil {
+		t.Fatalf("insert release: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
+	})
+
+	publishRule := func(
+		ruleKey string,
+		ruleType string,
+		requiredFields string,
+		expression string,
+		coverageTypes ...string,
+	) {
+		t.Helper()
+		ruleID := fmt.Sprintf("%s-%d", ruleKey, suffix)
+		publishEligibilityRuleFixture(
+			t,
+			pool,
+			releaseID,
+			ruleID,
+			ruleKey,
+			ruleType,
+			requiredFields,
+			expression,
+			1,
+			coverageTypes...,
+		)
+	}
+	publishRule(
+		"math-min",
+		"SINGLE_SUBJECT_MIN",
+		`["single_subject_scores.数学"]`,
+		`{"op":"NOT","child":{"op":"GTE","field":"single_subject_scores.数学","value":120}}`,
+		"SUBJECT_REQUIREMENT",
+		"SINGLE_SUBJECT_MIN",
+	)
+	publishRule(
+		"color-vision",
+		"PHYSICAL_RESTRICTION",
+		`["physical_exam.color_vision"]`,
+		`{"op":"EQ","field":"physical_exam.color_vision","value":"COLOR_BLIND"}`,
+		"PHYSICAL_RESTRICTION",
+	)
+	publishRule(
+		"gender",
+		"GENDER_RESTRICTION",
+		`["gender"]`,
+		`{"op":"EQ","field":"gender","value":"FEMALE"}`,
+		"GENDER_RESTRICTION",
+	)
+	publishRule(
+		"household",
+		"OTHER_HARD",
+		`["household_province"]`,
+		`{"op":"NEQ","field":"household_province","value":"湖南"}`,
+		"OTHER_HARD",
+	)
+	publishRule(
+		"school-registration",
+		"OTHER_HARD",
+		`["school_registration_province"]`,
+		`{"op":"NEQ","field":"school_registration_province","value":"湖南"}`,
+	)
+
+	t.Setenv("ALGO_DATA_DSN", dsn)
+	bc := &conf.Bootstrap{Data: &conf.Data{Database: &conf.Data_Database{Dsn: dsn}}}
+	d, cleanup, err := data.NewData(bc)
+	if err != nil {
+		t.Fatalf("NewData: %v", err)
+	}
+	t.Cleanup(cleanup)
+	svc := NewAlgo(nil, nil, nil, biz.NewEligibilityUsecase(data.NewEligibilityRepo(d)))
+	client := setupBufconnClient(t, svc)
+
+	baseFacts := []*algov1.EligibilityProfileFact{
+		{
+			FieldKey: "subjects", State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+			StringValues: []string{"物理", "化学", "生物"},
+		},
+		{
+			FieldKey: "category", State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+			StringValue: "物理类",
+		},
+	}
+	evaluate := func(extra ...*algov1.EligibilityProfileFact) *algov1.EvaluateEligibilityReply {
+		t.Helper()
+		reply, err := client.EvaluateEligibility(context.Background(), &algov1.EvaluateEligibilityRequest{
+			ReleaseId: releaseID, ConfirmedProfileVersion: "profile-conditional",
+			ProfileLifecycle: algov1.EligibilityProfileLifecycle_ELIGIBILITY_PROFILE_LIFECYCLE_CONFIRMED,
+			Scope:            &algov1.EligibilityScope{Province: "湖南", ApplicationYear: 2025, Category: "物理类", Batch: "本科批"},
+			ProfileFacts:     append(append([]*algov1.EligibilityProfileFact{}, baseFacts...), extra...),
+			CandidateGroups: []*algov1.EligibilityCandidateGroup{{
+				UniversityId: 1, UniversityCode: "1001", UniversityName: "测试大学", MajorGroup: "01",
+				Majors: []*algov1.EligibilityCandidateMajor{{
+					MajorCode: "080901", MajorName: "计算机科学与技术",
+					SubjectRequirement: "首选物理，再选化学", InCurrentPlan: true,
+				}},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("EvaluateEligibility: %v", err)
+		}
+		return reply
+	}
+	provided := func(fieldKey string, value any) *algov1.EligibilityProfileFact {
+		fact := &algov1.EligibilityProfileFact{
+			FieldKey: fieldKey,
+			State:    algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+		}
+		switch value := value.(type) {
+		case int:
+			fact.IntValue = int32(value)
+		case string:
+			fact.StringValue = value
+		default:
+			t.Fatalf("unsupported fact value %T", value)
+		}
+		return fact
+	}
+	allClear := evaluate(
+		provided("single_subject_scores.数学", 130),
+		provided("physical_exam.color_vision", "NORMAL"),
+		provided("gender", "MALE"),
+		provided("household_province", "湖南"),
+		provided("school_registration_province", "湖南"),
+	)
+	if got := allClear.GetGroups()[0].GetMajors()[0].GetStatus(); got != algov1.MajorEligibilityStatus_MAJOR_ELIGIBILITY_STATUS_PASS {
+		t.Fatalf("all-clear status = %v, want PASS; reasons=%v",
+			got, allClear.GetGroups()[0].GetMajors()[0].GetUnknownReasons())
+	}
+
+	missing := evaluate()
+	major := missing.GetGroups()[0].GetMajors()[0]
+	if got := major.GetStatus(); got != algov1.MajorEligibilityStatus_MAJOR_ELIGIBILITY_STATUS_MISSING_REQUIRED_FACT {
+		t.Fatalf("missing status = %v, want MISSING_REQUIRED_FACT", got)
+	}
+	wantMissing := []string{
+		"gender",
+		"household_province",
+		"physical_exam.color_vision",
+		"school_registration_province",
+		"single_subject_scores.数学",
+	}
+	if got := major.GetMissingFields(); !slices.Equal(got, wantMissing) {
+		t.Fatalf("missing fields = %v, want %v", got, wantMissing)
+	}
+
+	declined := evaluate(
+		provided("single_subject_scores.数学", 130),
+		provided("physical_exam.color_vision", "NORMAL"),
+		&algov1.EligibilityProfileFact{
+			FieldKey: "gender",
+			State:    algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_DECLINED,
+		},
+		provided("household_province", "湖南"),
+		provided("school_registration_province", "湖南"),
+	)
+	declinedMajor := declined.GetGroups()[0].GetMajors()[0]
+	if got := declinedMajor.GetStatus(); got != algov1.MajorEligibilityStatus_MAJOR_ELIGIBILITY_STATUS_MISSING_REQUIRED_FACT {
+		t.Fatalf("declined status = %v, want MISSING_REQUIRED_FACT", got)
+	}
+	if got := declinedMajor.GetMissingFields(); !slices.Equal(got, []string{"gender"}) {
+		t.Fatalf("declined missing fields = %v", got)
+	}
+
+	restricted := evaluate(
+		provided("single_subject_scores.数学", 130),
+		provided("physical_exam.color_vision", "COLOR_BLIND"),
+		provided("gender", "MALE"),
+		provided("household_province", "湖南"),
+		provided("school_registration_province", "湖南"),
+	)
+	restrictedMajor := restricted.GetGroups()[0].GetMajors()[0]
+	if got := restrictedMajor.GetStatus(); got != algov1.MajorEligibilityStatus_MAJOR_ELIGIBILITY_STATUS_FAIL {
+		t.Fatalf("restricted status = %v, want FAIL", got)
+	}
+	if got := restrictedMajor.GetFailureRuleKeys(); !slices.Equal(got, []string{"color-vision"}) {
+		t.Fatalf("failure rules = %v, want [color-vision]", got)
 	}
 }
 

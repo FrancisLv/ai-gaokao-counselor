@@ -1445,3 +1445,41 @@ RunLifecycle 接线。
 - 撤销规则不自动发布替代规则或新 release；恢复完整覆盖必须发布新规则版本和
   release。
 - 本票不从文本或 LLM 生成规则，也不提供审核 UI。
+
+## 45. M4b-05：条件事实字段与已确认画像快照
+
+**日期与范围**：2026-11-19，对应 issue #20。把单科成绩、色觉、性别、户籍和
+学籍接入结构化资格规则，并把 Profile 已确认 revision 投影为确定性事实快照；
+不实现覆盖不足、组级五态或 RunLifecycle 正式接线。
+
+### 实现
+
+- 迁移 24 新增 `eligibility_profile_field` 字段目录，声明稳定 field key、
+  `STRING / INT / STRING_LIST` 类型和枚举允许值；规则 allowlist 不再只依赖
+  编译期字符串列表。
+- `EvaluateEligibility` 从规则仓库加载字段目录，表达式字段、literal 类型和枚举
+  值均按目录校验。未登记字段返回 `RULE_UNKNOWN_FIELD`。
+- 单科规则使用 `single_subject_scores.<subject>`，覆盖语文、数学、英语、物理、
+  历史、化学、生物、思想政治和地理；色觉、性别、户籍与学籍使用 Profile 契约中
+  的稳定 flat key。
+- 缺失、UNKNOWN、DECLINED 在专业结果中成为 `MISSING_REQUIRED_FACT` 并返回规则
+  实际引用的缺失字段；类型或枚举非法产生 UNKNOWN，不宽松转换后 PASS。
+- Profile 内部新增已确认 revision 到资格事实的确定性投影。DRAFT revision
+  返回 `PROFILE_NOT_CONFIRMED`，事实按 field key 排序，不读取自由文本或历史数据。
+- 新迁移已加入 sqlc schema、RunLifecycle 测试迁移链和 policy acceptance schema
+  helper；fresh schema 名称更新为 `00→24`。
+
+### 验证
+
+- biz 表驱动测试覆盖单科 PASS/FAIL/缺失/UNKNOWN、色觉、性别 DECLINED、非法枚举、
+  户籍与学籍缺失，以及只返回适用规则所需字段。
+- service + 真实 PostgreSQL + bufconn 测试逐项覆盖五类条件事实；另验证字段目录
+  是运行时 allowlist 权威来源。
+- 字段目录 storage contract 验证关键字段、枚举值和非法 value type。
+- Python 测试验证 CONFIRMED facts 的稳定排序与 DRAFT 拒绝。
+- 专用测试库 fresh schema `00→24` 与相关 integration tests 通过。
+
+### 边界
+
+- 仍不在本票实现 FULL/PARTIAL/NONE 的最具体 scope 覆盖、组内 `PASS_PARTIAL`
+  和 RunLifecycle 正式资格门禁。

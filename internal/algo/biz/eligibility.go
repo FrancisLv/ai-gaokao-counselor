@@ -20,6 +20,7 @@ type EligibilityRuleSet struct {
 	ReleaseStatus string
 	Rules         []RuleVersion
 	Coverage      []RuleCoverage
+	ProfileFields []ProfileFieldDefinition
 	RevokedRules  []RevokedRuleVersion
 }
 
@@ -92,11 +93,48 @@ type RuleCoverage struct {
 }
 
 type ProfileFact struct {
-	FieldKey     string
-	State        string
-	StringValue  string
-	IntValue     int
-	StringValues []string
+	FieldKey      string
+	State         string
+	StringValue   string
+	IntValue      int
+	StringValues  []string
+	fieldKind     profileFieldKind
+	allowedValues []string
+}
+
+type ProfileFieldDefinition struct {
+	FieldKey      string
+	ValueType     string
+	AllowedValues []string
+}
+
+// BuiltinEligibilityProfileFields 仅用于无数据库的业务单测和测试替身；
+// 生产评估以规则仓库读取的 eligibility_profile_field 目录为准。
+func BuiltinEligibilityProfileFields() []ProfileFieldDefinition {
+	return []ProfileFieldDefinition{
+		{FieldKey: "province", ValueType: ProfileFieldTypeString, AllowedValues: []string{"湖南"}},
+		{FieldKey: FieldApplicationYear, ValueType: ProfileFieldTypeInt},
+		{FieldKey: FieldCategory, ValueType: ProfileFieldTypeString, AllowedValues: []string{"物理类", "历史类"}},
+		{FieldKey: "batch", ValueType: ProfileFieldTypeString, AllowedValues: []string{"本科批"}},
+		{FieldKey: "score", ValueType: ProfileFieldTypeInt},
+		{FieldKey: FieldSubjects, ValueType: ProfileFieldTypeStringList},
+		{FieldKey: "rank", ValueType: ProfileFieldTypeInt},
+		{FieldKey: FieldColorVision, ValueType: ProfileFieldTypeString, AllowedValues: []string{"NORMAL", "COLOR_WEAK", "COLOR_BLIND"}},
+		{FieldKey: "foreign_language", ValueType: ProfileFieldTypeString},
+		{FieldKey: FieldGender, ValueType: ProfileFieldTypeString, AllowedValues: []string{"MALE", "FEMALE"}},
+		{FieldKey: "graduate_status", ValueType: ProfileFieldTypeString, AllowedValues: []string{"FRESH", "PREVIOUS"}},
+		{FieldKey: FieldHouseholdProvince, ValueType: ProfileFieldTypeString},
+		{FieldKey: FieldSchoolRegistrationProvince, ValueType: ProfileFieldTypeString},
+		{FieldKey: FieldSingleSubjectScoresPrefix + "语文", ValueType: ProfileFieldTypeInt},
+		{FieldKey: FieldSingleSubjectScoresPrefix + "数学", ValueType: ProfileFieldTypeInt},
+		{FieldKey: FieldSingleSubjectScoresPrefix + "英语", ValueType: ProfileFieldTypeInt},
+		{FieldKey: FieldSingleSubjectScoresPrefix + "物理", ValueType: ProfileFieldTypeInt},
+		{FieldKey: FieldSingleSubjectScoresPrefix + "历史", ValueType: ProfileFieldTypeInt},
+		{FieldKey: FieldSingleSubjectScoresPrefix + "化学", ValueType: ProfileFieldTypeInt},
+		{FieldKey: FieldSingleSubjectScoresPrefix + "生物", ValueType: ProfileFieldTypeInt},
+		{FieldKey: FieldSingleSubjectScoresPrefix + "思想政治", ValueType: ProfileFieldTypeInt},
+		{FieldKey: FieldSingleSubjectScoresPrefix + "地理", ValueType: ProfileFieldTypeInt},
+	}
 }
 
 type CandidateMajor struct {
@@ -207,9 +245,18 @@ const (
 	ProfileDerived            = "DERIVED"
 	ProfileDefault            = "DEFAULT"
 
-	FieldSubjects        = "subjects"
-	FieldCategory        = "category"
-	FieldApplicationYear = "application_year"
+	FieldSubjects                   = "subjects"
+	FieldCategory                   = "category"
+	FieldApplicationYear            = "application_year"
+	FieldColorVision                = "physical_exam.color_vision"
+	FieldGender                     = "gender"
+	FieldHouseholdProvince          = "household_province"
+	FieldSchoolRegistrationProvince = "school_registration_province"
+	FieldSingleSubjectScoresPrefix  = "single_subject_scores."
+
+	ProfileFieldTypeString     = "STRING"
+	ProfileFieldTypeInt        = "INT"
+	ProfileFieldTypeStringList = "STRING_LIST"
 )
 
 const (
@@ -264,7 +311,8 @@ func (u *EligibilityUsecase) EvaluateEligibility(ctx context.Context, req Eligib
 		return result, nil
 	}
 
-	facts := profileFactIndex(req.ProfileFacts)
+	fieldDefinitions := profileFieldDefinitionIndex(set.ProfileFields)
+	facts := profileFactIndex(req.ProfileFacts, fieldDefinitions)
 	rules := sortedRules(set.Rules)
 	result.Diagnostics.EvaluatedRuleCount = len(rules)
 	conflicts := conflictingRuleKeys(rules)
@@ -275,7 +323,7 @@ func (u *EligibilityUsecase) EvaluateEligibility(ctx context.Context, req Eligib
 		result.Groups = blockedGroups(req.CandidateGroups, ReasonRuleConflict)
 		return result, nil
 	}
-	if reason := validateEligibilityRules(rules); reason != "" {
+	if reason := validateEligibilityRules(rules, fieldDefinitions); reason != "" {
 		result.Status = EligibilityBlocked
 		result.Diagnostics.UnknownCount = candidateMajorCount(req.CandidateGroups)
 		result.Groups = blockedGroups(req.CandidateGroups, reason)
@@ -499,9 +547,16 @@ func hasFullCoverage(coverage []RuleCoverage, ruleType string) bool {
 	return false
 }
 
-func profileFactIndex(facts []ProfileFact) map[string]ProfileFact {
+func profileFactIndex(
+	facts []ProfileFact,
+	definitions map[string]ProfileFieldDefinition,
+) map[string]ProfileFact {
 	index := make(map[string]ProfileFact, len(facts))
 	for _, fact := range facts {
+		if definition, ok := definitions[fact.FieldKey]; ok {
+			fact.fieldKind = profileFieldKindForValueType(definition.ValueType)
+			fact.allowedValues = append([]string(nil), definition.AllowedValues...)
+		}
 		index[fact.FieldKey] = fact
 	}
 	return index

@@ -36,6 +36,9 @@ type serviceEligibilityRepo struct {
 }
 
 func (r serviceEligibilityRepo) LoadEligibilityRuleSet(context.Context, string) (biz.EligibilityRuleSet, error) {
+	if len(r.set.ProfileFields) == 0 {
+		r.set.ProfileFields = biz.BuiltinEligibilityProfileFields()
+	}
 	return r.set, nil
 }
 

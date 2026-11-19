@@ -14,6 +14,9 @@ type fakeEligibilityRepo struct {
 }
 
 func (f fakeEligibilityRepo) LoadEligibilityRuleSet(context.Context, string) (EligibilityRuleSet, error) {
+	if len(f.set.ProfileFields) == 0 {
+		f.set.ProfileFields = BuiltinEligibilityProfileFields()
+	}
 	return f.set, f.err
 }
 

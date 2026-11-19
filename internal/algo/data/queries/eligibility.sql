@@ -36,6 +36,14 @@ FROM rule_coverage
 WHERE release_id = @release_id::text
 ORDER BY rule_type, scope::text, status;
 
+-- name: ListEligibilityProfileFields :many
+SELECT
+    field_key,
+    value_type,
+    allowed_values
+FROM eligibility_profile_field
+ORDER BY field_key;
+
 -- name: ListRevokedEligibilityRules :many
 SELECT rule_key, rule_type, scope
 FROM rule_version
