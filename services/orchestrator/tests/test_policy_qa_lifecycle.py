@@ -21,6 +21,55 @@ class FakePolicyRetriever:
 
 
 class PolicyQaLifecycleTests(RunLifecyclePostgresTest):
+    async def test_policy_qa_submit_is_persisted_before_worker_retrieval(self):
+        from app.run_lifecycle import (
+            PolicyQaInput,
+            RunLifecycle,
+            SubmitRunCommand,
+        )
+        from rag.policy_retrieval import PolicyRetrievalResult
+
+        release_id = await self.seed_release()
+        retriever = FakePolicyRetriever(
+            PolicyRetrievalResult(
+                status="NO_EVIDENCE",
+                release_id=release_id,
+            )
+        )
+        lifecycle = RunLifecycle(
+            self.dsn,
+            auto_profile=False,
+            policy_retriever=retriever,
+        )
+        self.addAsyncCleanup(lifecycle.close)
+
+        receipt = await lifecycle.SubmitRun(
+            SubmitRunCommand(
+                principal_id="principal-policy",
+                session_id=None,
+                task_kind="POLICY_QA",
+                input=PolicyQaInput(
+                    query_text="转专业政策是什么？",
+                    province="湖南",
+                    application_year=2025,
+                    category="物理类",
+                    batch="本科批",
+                ),
+                idempotency_key="policy-qa-worker-owned",
+            )
+        )
+
+        self.assertEqual(receipt.state, "QUEUED")
+        self.assertEqual(retriever.queries, [])
+        await lifecycle.run_due_work_once()
+        view = await self._wait_for_terminal(
+            lifecycle,
+            principal_id="principal-policy",
+            run_id=receipt.run_id,
+        )
+        self.assertEqual(view.state, "SUCCEEDED")
+        self.assertEqual(len(retriever.queries), 1)
+
     async def test_policy_qa_rejects_a_profile_only_input(self):
         from app.run_lifecycle import (
             RunLifecycle,

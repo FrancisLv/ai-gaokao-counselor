@@ -33,10 +33,10 @@ export function useRunLifecycle() {
   const policy = reactive<PolicyQueryForm>({
     queryText: "转专业政策是什么？",
     province: "湖南",
-    applicationYear: new Date().getFullYear(),
+    applicationYear: 2025,
     category: "物理类",
     batch: "本科批",
-    schoolIds: "1001",
+    schoolIds: "",
     documentTypes: "charter",
     mode: "hybrid",
   });

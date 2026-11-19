@@ -200,3 +200,68 @@ npm run e2e
 - `NO_EVIDENCE` 与“无限制”明确区分。
 - 技术失败与 `NO_EVIDENCE` 明确区分。
 - GENERATE_PLAN 既有运行验收不回归。
+
+## 6. 真实 2025 章程业务验收
+
+短流程使用合成数据验证交互。要用主库已有的真实 2025 招生章程做业务验证：
+
+```bash
+make m4a-real-policy-import \
+  SOURCE_DSN=postgresql://francis@localhost:5432/ai_gaokao_counselor \
+  TARGET_DSN=postgresql://francis@localhost:5432/ai_gaokao_ticket2_test \
+  PY=/Users/francis/miniconda3/envs/ai-gaokao-counselor/bin/python3
+```
+
+主库文档和 embedding 由 `scripts/ingest_charters.py` 写入；该脚本默认使用
+`BAAI/bge-large-zh-v1.5` 生成 1024 维归一化向量。装载脚本从主库复制这些真实
+文档和已有 embedding，并校验 embedding 非空且维度为 1024，再从原始 JSON/TXT
+回填：
+
+- 真实 `school_id`
+- 内容 hash、文件来源和抓取时间
+- chunk 文本 hash
+- chunk set、适用域、release 映射和索引身份
+
+首次真实装载结果：
+
+```text
+documents=2856
+chunks=23453
+skipped_documents_without_valid_chunks=3
+```
+
+主库有 2,093 个超过 M4a 600 字符证据上限的旧 chunk。这些 chunk 不进入测试
+release；没有放宽 600 字符契约。
+
+旧 2025 数据业务验收必须固定检索日期，避免当前日期把年度章程判为过期：
+
+```bash
+HF_HUB_OFFLINE=1 \
+TRANSFORMERS_OFFLINE=1 \
+ORCHESTRATOR_DSN="$M4A_ACCEPTANCE_DSN" \
+ORCHESTRATOR_ADDR=127.0.0.1:9100 \
+POLICY_EMBEDDING_MODEL=BAAI/bge-large-zh-v1.5 \
+POLICY_RETRIEVAL_AS_OF=2025-11-19 \
+PYTHONPATH=services/orchestrator:services/orchestrator/pb \
+/Users/francis/miniconda3/envs/ai-gaokao-counselor/bin/python3 \
+-m app.main
+```
+
+前端使用：
+
+```text
+application_year=2025
+mode=vector
+query_text=转专业政策
+```
+
+真实 vector 验收应返回：
+
+- `retrievalStatus=FOUND`
+- `vectorCandidates>0`
+- `degradedReason` 为空
+- 证据来源为 `gaokao.cn` 的真实院校章程
+
+旧院校章程当前回填为
+`regions=['全国'] / categories=['不限'] / batches=['不限']`，仅用于 2025 旧数据
+业务验证，不等同于最终适用域标注。

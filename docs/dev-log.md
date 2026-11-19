@@ -1297,6 +1297,13 @@ rerank 模型质量。
   release，也不会因 run 外键失败。
 - Evidence wire 补齐 `evidence_type/content_sha256/created_at/producer_version` 和
   `rerank_timeout_ms`；前端仅允许 http/https 来源链接；运行中任务刷新后会恢复 SSE。
+- 新增真实 2025 章程装载脚本：从主库复制 2,859 份文档和已有 1024 维 embedding，
+  回填 school_id/hash/source/chunk set/applicability/release，发布
+  `rel_real_2025_c52bb419b1c0c5ffaf558cbc`。2,093 个超过 600 字符的旧 chunk
+  不进入 release；最终装载 2,856 份文档、23,453 个合规 chunk。
+- 生产入口改用 worker 异步执行，避免首次 BGE 模型加载阻塞 `SubmitRun` 并造成
+  gateway 504；新增 `POLICY_RETRIEVAL_AS_OF`，旧 2025 数据验收固定
+  `as_of=2025-11-19`。
 
 ### 边界
 

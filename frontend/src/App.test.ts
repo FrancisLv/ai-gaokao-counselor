@@ -41,6 +41,7 @@ describe("Run verification console", () => {
     await wrapper
       .get('[data-testid="policy-application-year"]')
       .setValue("2025");
+    await wrapper.get('[data-testid="policy-schools"]').setValue("1001");
     await wrapper.get('[data-testid="policy-form"]').trigger("submit");
     await flushPromises();
 

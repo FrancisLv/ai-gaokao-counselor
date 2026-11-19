@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 
 import psycopg
 from psycopg.rows import dict_row
@@ -22,9 +23,11 @@ class PostgresPolicyRetriever:
         dsn: str,
         *,
         embedding_model: str | None = None,
+        as_of: date | None = None,
     ) -> None:
         self._dsn = dsn
         self._embedding_model = embedding_model
+        self._as_of = as_of
         self._embedder = None
 
     async def retrieve(
@@ -56,10 +59,22 @@ class PostgresPolicyRetriever:
                             "VECTOR_UNAVAILABLE",
                             "query embedding model could not be loaded",
                         ) from exc
-                    return RetrievePolicy(conn).retrieve(query)
+                    return RetrievePolicy(
+                        conn,
+                        today=(
+                            (lambda: self._as_of)
+                            if self._as_of is not None
+                            else None
+                        ),
+                    ).retrieve(query)
             return RetrievePolicy(
                 conn,
                 embedder=self._embedder,
+                today=(
+                    (lambda: self._as_of)
+                    if self._as_of is not None
+                    else None
+                ),
             ).retrieve(query)
         finally:
             conn.close()

@@ -28,7 +28,7 @@ SQLC_VERSION := v1.30.0
 SQLC := $(CURDIR)/bin/tools/sqlc-$(SQLC_VERSION)/sqlc
 
 .PHONY: help api api-go api-py conf tidy build build-gateway build-llm-gateway build-algo \
-        test py-check m4a-acceptance-seed up down logs run-gateway run-llm-gateway run-algo run-orchestrator
+        test py-check m4a-acceptance-seed m4a-real-policy-import up down logs run-gateway run-llm-gateway run-algo run-orchestrator
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -126,6 +126,13 @@ py-test: api-py ## Python 离线逻辑与导入测试，不下载模型、不入
 m4a-acceptance-seed: ## 为 M4a 前端验收 seed policy release；需 DSN
 	@test -n "$(DSN)" || (echo '需设置 DSN'; exit 1)
 	$(PY) scripts/seed_m4a_frontend_acceptance.py --dsn "$(DSN)" $(if $(RESET_SCHEMA),--reset-schema,)
+
+m4a-real-policy-import: ## 将主库真实 2025 章程复制到隔离测试库并发布 release
+	@test -n "$(SOURCE_DSN)" || (echo '需设置 SOURCE_DSN'; exit 1)
+	@test -n "$(TARGET_DSN)" || (echo '需设置 TARGET_DSN'; exit 1)
+	$(PY) scripts/load_real_policy_release.py \
+		--source-dsn "$(SOURCE_DSN)" \
+		--target-dsn "$(TARGET_DSN)"
 
 ## ---- 运行 ----
 run-gateway: ## 本地直跑 svc-gateway

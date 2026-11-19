@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import date
 
 
 async def _serve() -> None:
@@ -29,11 +30,16 @@ async def _serve() -> None:
     lifecycle = (
         RunLifecycle(
             dsn,
-            auto_profile=True,
+            auto_profile=False,
             algo_client=algo_client,
             policy_retriever=PostgresPolicyRetriever(
                 dsn,
                 embedding_model=os.getenv("POLICY_EMBEDDING_MODEL"),
+                as_of=(
+                    date.fromisoformat(os.environ["POLICY_RETRIEVAL_AS_OF"])
+                    if os.getenv("POLICY_RETRIEVAL_AS_OF")
+                    else None
+                ),
             ),
         )
         if dsn
