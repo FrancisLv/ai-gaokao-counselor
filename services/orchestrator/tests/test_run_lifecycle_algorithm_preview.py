@@ -20,6 +20,13 @@ class FakeAlgoClient:
                 university_code="U001",
                 university_name="测试大学",
                 major_group="01",
+                majors=[
+                    algo_pb2.MajorDetail(
+                        major_code="M01",
+                        major_name="测试专业",
+                        subject_req="首选物理，再选不限",
+                    )
+                ],
                 school_tier="985",
                 location="长沙",
                 province="湖南",
@@ -57,6 +64,53 @@ class FakeAlgoClient:
         self.calls.append(("CheckConstraints", request))
         return algo_pb2.CheckConstraintsReply(kept=[self.candidate])
 
+    async def EvaluateEligibility(self, request):
+        self.calls.append(("EvaluateEligibility", request))
+        candidate = request.candidate_groups[0]
+        return algo_pb2.EvaluateEligibilityReply(
+            status=(
+                algo_pb2.EligibilityResultStatus
+                .ELIGIBILITY_RESULT_STATUS_COMPLETE
+            ),
+            groups=[
+                algo_pb2.GroupEligibility(
+                    group_key=(
+                        f"{candidate.university_code}|"
+                        f"{candidate.major_group}"
+                    ),
+                    status=(
+                        algo_pb2.GroupEligibilityStatus
+                        .GROUP_ELIGIBILITY_STATUS_PASS
+                    ),
+                    majors=[
+                        algo_pb2.MajorEligibility(
+                            major_code=major.major_code,
+                            status=(
+                                algo_pb2.MajorEligibilityStatus
+                                .MAJOR_ELIGIBILITY_STATUS_PASS
+                            ),
+                        )
+                        for major in candidate.majors
+                    ],
+                )
+            ],
+            coverage=[
+                algo_pb2.EligibilityRuleCoverage(
+                    rule_type="SUBJECT_REQUIREMENT",
+                    status=(
+                        algo_pb2.RuleCoverageStatus
+                        .RULE_COVERAGE_STATUS_FULL
+                    ),
+                    covered_data_sources=["test admissions plan"],
+                )
+            ],
+            evidence_bundle_id="eligibility:test",
+            diagnostics=algo_pb2.EligibilityDiagnostics(
+                evaluated_rule_count=1,
+                unknown_count=0,
+            ),
+        )
+
     async def OptimizeWishlist(self, request):
         self.calls.append(("OptimizeWishlist", request))
         return algo_pb2.OptimizeWishlistReply(
@@ -89,6 +143,9 @@ class WireFakeAlgoService(algo_pb2_grpc.AlgoServicer):
 
     async def CheckConstraints(self, request, context):
         return await self.fake.CheckConstraints(request)
+
+    async def EvaluateEligibility(self, request, context):
+        return await self.fake.EvaluateEligibility(request)
 
     async def OptimizeWishlist(self, request, context):
         return await self.fake.OptimizeWishlist(request)
@@ -176,7 +233,6 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
         unverified = {item["code"] for item in preview["unverified_conditions"]}
         self.assertTrue(
             {
-                "FULL_ELIGIBILITY_RULES",
                 "ONLINE_RAG_EVIDENCE",
                 "LLM_GATEWAY",
                 "STRATEGY",
@@ -190,7 +246,7 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
             [
                 "RankConvert",
                 "EstimateProb",
-                "CheckConstraints",
+                "EvaluateEligibility",
                 "OptimizeWishlist",
             ],
         )
@@ -198,9 +254,20 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
             {request.release_id for _, request in algo.calls},
             {release_id},
         )
-        checked_candidates = algo.calls[2][1].candidates
-        self.assertEqual(len(checked_candidates), 1)
-        self.assertEqual(algo.calls[3][1].candidates, list(checked_candidates))
+        evaluated_candidates = algo.calls[2][1].candidate_groups
+        self.assertEqual(len(evaluated_candidates), 1)
+        self.assertEqual(
+            [
+                (item.candidate.university_code, item.candidate.major_group)
+                for item in algo.calls[3][1].candidates
+            ],
+            [
+                (
+                    evaluated_candidates[0].university_code,
+                    evaluated_candidates[0].major_group,
+                )
+            ],
+        )
 
         events = lifecycle.WatchRun(
             principal_id="principal-a",
@@ -451,7 +518,7 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
             [
                 "RankConvert",
                 "EstimateProb",
-                "CheckConstraints",
+                "EvaluateEligibility",
                 "OptimizeWishlist",
             ],
         )

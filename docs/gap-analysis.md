@@ -59,12 +59,12 @@
 
 | FR | 现状 | 证据（文件:行） | 剩余工作 | 关联 | 里程碑 |
 | --- | --- | --- | --- | --- | --- |
-| FR-12 冲/稳/保方案生成（P0） | 🟡 受控预览已接线 | `internal/algo/service/algo.go:54` `EstimateProb` 从分数生成整池；RunLifecycle 在确认画像后调用四 RPC，并将候选、概率与 `AuditBasis` 原样发布为 `ALGORITHM_PREVIEW` | 正式推荐仍需当年计划/规则/证据/报告门禁；Strategy 仍不可替换候选身份或概率 | P1-14 | M3 已接，M4/M5 继续 |
-| FR-13 硬约束校验（P0） | 🟡 规则最小闭环 + 生命周期 + 受限 AST + 条件事实 + 覆盖声明 + 组内五态 | `EvaluateEligibility` 已提供 release-bound 规则快照、FULL/PARTIAL/NONE 覆盖、证据引用和专业五态；迁移 21 建立 `rule_version / rule_coverage`。迁移 22 增加 DRAFT→REVIEWED→PUBLISHED→REVOKED、内容不可变、状态审计、发布覆盖/重叠冲突门禁和撤销失效；迁移 23 增加 AST v1、字段 allowlist、Kleene 三值逻辑、资源上限；迁移 24 增加 `eligibility_profile_field` 字段目录，将单科、色觉、性别、户籍和学籍映射为 typed facts；迁移 25 增加规范 scope、来源完整性、同具体度冲突阻断和发布后覆盖冻结。组级已按 PASS / PASS_PARTIAL / FAIL / UNKNOWN 汇总，UNKNOWN 支配 PASS，PASS_PARTIAL 保留受限专业；空组、重复身份与不完整 scope 阻断。旧 `CheckConstraints` 保留兼容，实际仅选科 | 继续实现 M4b-07：RunLifecycle 接线与 V1_FORMAL 资格门禁；未完成前不声称正式资格已核验 | P1-01, P1-15 | M4b |
+| FR-12 冲/稳/保方案生成（P0） | 🟡 受控预览已接线 | `internal/algo/service/algo.go:54` `EstimateProb` 从分数生成整池；RunLifecycle 在确认画像后按 RankConvert → EstimateProb → EvaluateEligibility → OptimizeWishlist 执行，只有 PASS/PASS_PARTIAL 组进入优化，并将候选、概率、`AuditBasis` 与资格事实发布为 `ALGORITHM_PREVIEW` | 正式推荐仍需当年计划/证据/报告门禁；Strategy 仍不可替换候选身份或概率 | P1-14 | M3/M4b 已接，M4/M5 继续 |
+| FR-13 硬约束校验（P0） | ✅ 结构化资格闭环 | `EvaluateEligibility` 已提供 release-bound 规则快照、FULL/PARTIAL/NONE 覆盖、证据引用和专业五态；迁移 21 建立 `rule_version / rule_coverage`。迁移 22 增加 DRAFT→REVIEWED→PUBLISHED→REVOKED、内容不可变、状态审计、发布覆盖/重叠冲突门禁和撤销失效；迁移 23 增加 AST v1、字段 allowlist、Kleene 三值逻辑、资源上限；迁移 24 增加 `eligibility_profile_field` 字段目录，将单科、色觉、性别、户籍和学籍映射为 typed facts；迁移 25 增加规范 scope、来源完整性、同具体度冲突阻断和发布后覆盖冻结。组级已按 PASS / PASS_PARTIAL / FAIL / UNKNOWN 汇总，UNKNOWN 支配 PASS，PASS_PARTIAL 保留受限专业；RunLifecycle 只允许 COMPLETE 资格事实进入 V1_FORMAL，PARTIAL/UNKNOWN/MISSING/BLOCKED 明确门禁。旧 `CheckConstraints` 保留兼容，正式路径不再使用 | 后续仍需真实规则内容发布、当年计划完整性与报告 Verifier；这些不计入本能力伪造通过 | P1-01, P1-15 | M4b 已接 |
 | FR-14 位次换算（P0） | ✅ 正向 | `algo.go:36` `RankConvert` score→rank；RunLifecycle 传入 run 绑定 `release_id` 并校验 reply rank 与 EstimateProb `AuditBasis` 一致 | 仅正向（符合 R7，rank-only 不反推）；**`RankConvertReply` 无控制线**，而 `score_rank_map.control_score` 在库（`00_schema.sql:223`）——可补透出 | §2(控制线未透出) | M3 已接 |
 | FR-15 录取概率估计（P0） | ✅ 受控预览 | `algo.proto:84` `ProbEstimate` method=`weighted_hit`、clamp `[0.01,0.99]`；RunLifecycle 校验概率范围、候选身份、重复/漂移与执行时限，再发布非空预览 | 置信区间仍为 P2；预览明确标注非录取保证，正式报告门禁未完成 | P1-05, P1-15 | M3 已接 |
 | FR-16 方案自我挑战 Critic（P1） | 🟡 有偏差 | `build.py:17-19` `MAX_ASK_ROUNDS=6` ✅、`MAX_VERIFY_RETRIES=2` ✅、`MAX_CRITIC_LOOPS=2` 已与 PRD v1.3 对齐；Critic 节点仍未实现 | 实现已优化方案上的结构化审查、无进展检测与 P1 发布门禁；硬错误不得由 Critic 豁免 | P1-02, P1-03 | M2/M6 |
-| FR-17 志愿表优化（P0） | 🟡 受控预览已接线 | `algo.go:86` `OptimizeWishlist`；RunLifecycle 只把 `CheckConstraints` kept 候选送入优化，并将结果原样写入 `ALGORITHM_PREVIEW` | 正式发布仍受完整资格/证据门禁约束；(P2)投档模拟未做 | P1-14 | M3 已接 |
+| FR-17 志愿表优化（P0） | 🟡 受控预览已接线 | `algo.go:86` `OptimizeWishlist`；RunLifecycle 只把 `EvaluateEligibility` 的 PASS/PASS_PARTIAL 候选组送入优化，并将结果原样写入 `ALGORITHM_PREVIEW` | 正式发布仍受证据/报告门禁约束；(P2)投档模拟未做 | P1-14 | M3/M4b 已接 |
 
 ### 1.4 生成、校验与治理（FR-18 ~ FR-24）
 

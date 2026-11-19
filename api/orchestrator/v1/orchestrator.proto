@@ -218,6 +218,14 @@ message UnverifiedCondition {
   string message = 2;
 }
 
+message EligibilityGate {
+  bool formal_eligibility_ready = 1;
+  repeated string eligible_group_keys = 2;
+  repeated string restricted_group_keys = 3;
+  repeated string unknown_group_keys = 4;
+  repeated string failed_group_keys = 5;
+}
+
 message AlgorithmPreview {
   string result_version = 1;
   string run_id = 2;
@@ -244,6 +252,8 @@ message AlgorithmPreview {
   bool formal_recommendation = 23;
   string result_kind = 24;
   bool internal_controlled_only = 25;
+  algo.v1.EvaluateEligibilityReply eligibility = 26;
+  EligibilityGate eligibility_gate = 27;
 }
 
 message PolicyEvidenceItem {

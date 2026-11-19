@@ -1557,3 +1557,45 @@ FULL/PARTIAL/NONE/缺失覆盖语义和 release 发布后冻结；不接入条�
 - 本票不判断招生计划是否存在；`NOT_APPLICABLE` 依赖上游提供的
   `in_current_plan=false`，仍不得从历史专业身份推断当年可报。
 - RunLifecycle 尚未消费该五态结果，V1_FORMAL 门禁仍由 M4b-07 完成。
+
+## 48. M4b-07：RunLifecycle 资格门禁与结果发布
+
+**日期与范围**：2026-11-19，对应 issue #22。把 `EvaluateEligibility` 接入真实
+`GENERATE_PLAN` run，发布资格事实并在优化前执行 fail-closed 门禁；不实现文本检索、
+报告 Verifier 或 LLM 规则生成。
+
+### 实现
+
+- RunLifecycle 从 run 记录读取不可变 `release_id` 和 CONFIRMED
+  `profile_version`，用 `ProfileRuntime.ToEligibilityFacts` 生成稳定排序的 typed
+  facts 快照，再将 `EstimateProb` 候选组映射为 `EligibilityCandidateGroup`。
+- 固定调用顺序改为 `RankConvert → EstimateProb → EvaluateEligibility →
+  OptimizeWishlist`。旧 `CheckConstraints` RPC 保持可调用，但正式资格链路不再调用
+  或选择其宽松结果。
+- 校验资格回复只包含原始候选组和专业，重复、缺失、注入组/专业、未定义状态均
+  fail-closed。COMPLETE 要求无 UNKNOWN；PARTIAL 要求存在 UNKNOWN 诊断。
+- 只有组状态 PASS/PASS_PARTIAL 的候选进入优化。PARTIAL 中已通过组可形成内部预览，
+  但 `formal_eligibility_ready=false`；UNKNOWN、MISSING_REQUIRED_FACT、FAIL、
+  BLOCKED 不进入正式资格集合。PASS_PARTIAL 组保留受限专业明细。
+- `AlgorithmPreview` additive 增加 typed `eligibility` 和 `eligibility_gate`，
+  GetRun/WatchRun 返回同一资格事实；`formal_recommendation` 仍固定为 false。
+- 发布前仍复验 lease、state_version、确认画像与 release；评估期间 release 撤销时
+  以 `RELEASE_REVOKED` 终止，不发布结果。
+
+### 验证
+
+- 新增 RunLifecycle 真实 PostgreSQL 端到端测试覆盖 COMPLETE、PARTIAL、
+  PASS_PARTIAL、资格 release 阻断和候选组注入；断言优化输入、资格门禁、受限专业
+  和 formal=false。
+- 既有 ALGORITHM_PREVIEW、失败门禁、lease、transport、migration 与检索回归全部
+  通过；生成 gRPC client 路径验证新增资格 proto 可往返。
+- `make api`、`make build && make check test`、`make sqlc-check`、
+  `make py-check py-test` 通过；完整 RunLifecycle 真实库套件 77 tests OK，
+  `ORCHESTRATOR_ALGO_ADDR` 未设置时真实 svc-algo TCP 用例按约定跳过。
+
+### 边界
+
+- `ALGORITHM_PREVIEW` 仍不是正式报告，`formal_recommendation=false`；COMPLETE 只
+  表示资格事实完整，不代表报告证据或全部发布门禁通过。
+- 当年招生计划身份、在线 RAG、三类证据 Verifier、LLM Gateway、Strategy、
+  Critic 和正式报告仍未完成，继续作为未核验条件与后续 milestone。

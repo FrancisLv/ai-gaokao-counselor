@@ -87,6 +87,8 @@ class AlgorithmPreviewPayload(TypedDict, total=False):
     stable_total: int
     safe_total: int
     audit_basis: dict[str, Any]
+    eligibility: dict[str, Any]
+    eligibility_gate: "EligibilityGatePayload"
     kept_candidates: list[dict[str, Any]]
     rejected_candidates: list[dict[str, Any]]
     wishlist: dict[str, Any]
@@ -99,6 +101,14 @@ class AlgorithmPreviewPayload(TypedDict, total=False):
     formal_recommendation: bool
     internal_controlled_only: bool
     result_kind: str
+
+
+class EligibilityGatePayload(TypedDict):
+    formal_eligibility_ready: bool
+    eligible_group_keys: list[str]
+    restricted_group_keys: list[str]
+    unknown_group_keys: list[str]
+    failed_group_keys: list[str]
 
 
 class PolicyEvidenceItemPayload(TypedDict, total=False):
