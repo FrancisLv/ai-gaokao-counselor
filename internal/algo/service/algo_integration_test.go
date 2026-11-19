@@ -67,6 +67,75 @@ func setupService(t testing.TB) *Service {
 	return NewAlgo(rankUc, recUc, optUc, eligibilityUc)
 }
 
+func publishEligibilityRuleFixture(
+	t testing.TB,
+	pool *pgxpool.Pool,
+	releaseID string,
+	ruleID string,
+	ruleKey string,
+	ruleType string,
+	requiredFieldsJSON string,
+	expressionJSON string,
+	expressionVersion int,
+	coverageTypes ...string,
+) {
+	t.Helper()
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM rule_version WHERE rule_id = $1`, ruleID)
+	})
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO rule_version (
+			rule_id, version, rule_key, rule_type, scope, required_profile_fields,
+			expression, expression_version, outcome_when_true, reason_code,
+			review_status, valid_from, source_evidence, created_by
+		) VALUES (
+			$1, 1, $2, $3, '{}'::jsonb, $4::jsonb,
+			$5::jsonb, $6, 'FAIL', 'TEST_RULE', 'DRAFT', NOW(),
+			jsonb_build_array(jsonb_build_object(
+				'evidence_id', 'ev-' || $1,
+				'evidence_type', 'DOCUMENT',
+				'release_id', $7::text,
+				'content_sha256', 'sha256:' || $1
+			)), 'test-suite'
+		)`, ruleID, ruleKey, ruleType, requiredFieldsJSON, expressionJSON,
+		expressionVersion, releaseID,
+	); err != nil {
+		t.Fatalf("insert draft eligibility rule: %v", err)
+	}
+	for _, coverageType := range coverageTypes {
+		if _, err := pool.Exec(context.Background(), `
+			INSERT INTO rule_coverage (
+				release_id, rule_type, scope, status, covered_data_sources, notes
+			) VALUES (
+				$1, $2, '{}'::jsonb, 'FULL', '["major_admission"]'::jsonb, 'test fixture'
+			)
+			ON CONFLICT (release_id, rule_type, scope) DO NOTHING`,
+			releaseID, coverageType,
+		); err != nil {
+			t.Fatalf("insert eligibility coverage: %v", err)
+		}
+	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE rule_version
+		SET review_status = 'REVIEWED',
+		    reviewed_by = 'test-suite',
+		    reviewed_at = clock_timestamp()
+		WHERE rule_id = $1 AND version = 1`, ruleID,
+	); err != nil {
+		t.Fatalf("review eligibility rule: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE rule_version
+		SET review_status = 'PUBLISHED',
+		    release_id = $2,
+		    published_by = 'test-suite',
+		    published_at = clock_timestamp()
+		WHERE rule_id = $1 AND version = 1`, ruleID, releaseID,
+	); err != nil {
+		t.Fatalf("publish eligibility rule: %v", err)
+	}
+}
+
 type errorRankRepo struct{ err error }
 
 func (r errorRankRepo) LoadScoreRankMap(context.Context, string, string, string, int) ([]biz.ScoreRankEntry, int, error) {
@@ -298,6 +367,7 @@ func TestIntegration_EvaluateEligibility_SubjectRule(t *testing.T) {
 	t.Cleanup(pool.Close)
 
 	releaseID := fmt.Sprintf("rel_m4b_test_%d", time.Now().UnixNano())
+	ruleID := "rule-subject-test-" + releaseID
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
 		 VALUES ($1, 'PUBLISHED', '{}'::jsonb, 'sha256:m4b', NOW())`, releaseID); err != nil {
@@ -306,24 +376,28 @@ func TestIntegration_EvaluateEligibility_SubjectRule(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
 	})
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM rule_version WHERE rule_id = $1`, ruleID)
+	})
 
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO rule_version (
 			rule_id, version, rule_key, rule_type, scope, required_profile_fields,
 			expression, outcome_when_true, reason_code, review_status,
-			valid_from, release_id, source_evidence
+			valid_from, source_evidence, created_by
 		) VALUES (
-			'rule-subject-test', 1, 'subject-requirement', 'SUBJECT_REQUIREMENT',
+			$2, 1, 'subject-requirement', 'SUBJECT_REQUIREMENT',
 			'{}'::jsonb, '["subjects","category"]'::jsonb,
 			'{"op":"NOT","child":{"op":"SUBJECT_MATCH"}}'::jsonb, 'FAIL',
-			'SUBJECT_NOT_MATCHED', 'PUBLISHED', NOW(), $1,
+			'SUBJECT_NOT_MATCHED', 'DRAFT', NOW(),
 			jsonb_build_array(jsonb_build_object(
 				'evidence_id', 'ev-subject',
 				'evidence_type', 'DOCUMENT',
 				'release_id', $1::text,
 				'content_sha256', 'sha256:subject'
-			))
-		)`, releaseID); err != nil {
+			)),
+			'test-suite'
+		)`, releaseID, ruleID); err != nil {
 		t.Fatalf("insert rule_version: %v", err)
 	}
 	if _, err := pool.Exec(context.Background(),
@@ -334,6 +408,27 @@ func TestIntegration_EvaluateEligibility_SubjectRule(t *testing.T) {
 			'["major_admission"]'::jsonb, 'test fixture'
 		)`, releaseID); err != nil {
 		t.Fatalf("insert rule_coverage: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE rule_version
+		 SET review_status = 'REVIEWED',
+		     reviewed_by = 'test-suite',
+		     reviewed_at = clock_timestamp()
+		 WHERE rule_id = $1 AND version = 1`,
+		ruleID,
+	); err != nil {
+		t.Fatalf("review rule_version: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE rule_version
+		 SET review_status = 'PUBLISHED',
+		     release_id = $1,
+		     published_by = 'test-suite',
+		     published_at = clock_timestamp()
+		 WHERE rule_id = $2 AND version = 1`,
+		releaseID, ruleID,
+	); err != nil {
+		t.Fatalf("publish rule_version: %v", err)
 	}
 
 	t.Setenv("ALGO_DATA_DSN", dsn)
@@ -429,34 +524,12 @@ func TestIntegration_EvaluateEligibility_TypedAST(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
 	})
 
-	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO rule_version (
-			rule_id, version, rule_key, rule_type, scope, required_profile_fields,
-			expression, expression_version, outcome_when_true, reason_code,
-			review_status, valid_from, release_id, source_evidence
-		) VALUES (
-			$2, 1, 'score-and-category', 'OTHER_HARD',
-			'{}'::jsonb, '["category","score"]'::jsonb,
-			'{"op":"AND","left":{"op":"GTE","field":"score","value":600},"right":{"op":"EQ","field":"category","value":"物理类"}}'::jsonb,
-			1, 'FAIL', 'SCORE_TOO_LOW', 'PUBLISHED', NOW(), $1,
-			jsonb_build_array(jsonb_build_object(
-				'evidence_id', 'ev-ast',
-				'evidence_type', 'DOCUMENT',
-				'release_id', $1::text,
-				'content_sha256', 'sha256:ast'
-			))
-		)`, releaseID, ruleID); err != nil {
-		t.Fatalf("insert typed expression rule: %v", err)
-	}
-	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO rule_coverage (
-			release_id, rule_type, scope, status, covered_data_sources, notes
-		) VALUES
-			($1, 'SUBJECT_REQUIREMENT', '{}'::jsonb, 'FULL', '["major_admission"]'::jsonb, 'test fixture'),
-			($1, 'OTHER_HARD', '{}'::jsonb, 'FULL', '["major_admission"]'::jsonb, 'test fixture')`,
-		releaseID); err != nil {
-		t.Fatalf("insert coverage: %v", err)
-	}
+	publishEligibilityRuleFixture(
+		t, pool, releaseID, ruleID, "score-and-category",
+		"OTHER_HARD", `["category","score"]`,
+		`{"op":"AND","left":{"op":"GTE","field":"score","value":600},"right":{"op":"EQ","field":"category","value":"物理类"}}`,
+		1, "SUBJECT_REQUIREMENT", "OTHER_HARD",
+	)
 
 	t.Setenv("ALGO_DATA_DSN", dsn)
 	bc := &conf.Bootstrap{Data: &conf.Data{Database: &conf.Data_Database{Dsn: dsn}}}
@@ -519,34 +592,12 @@ func TestIntegration_EvaluateEligibility_TypedAST(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, invalidReleaseID)
 	})
-	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO rule_version (
-			rule_id, version, rule_key, rule_type, scope, required_profile_fields,
-			expression, expression_version, outcome_when_true, reason_code,
-			review_status, valid_from, release_id, source_evidence
-		) VALUES (
-			$2, 1, 'dangerous-expression', 'OTHER_HARD',
-			'{}'::jsonb, '["category"]'::jsonb,
-			'{"op":"EQ","field":"category","value":"物理类","sql":"SELECT secret"}'::jsonb,
-			1, 'FAIL', 'INVALID', 'PUBLISHED', NOW(), $1,
-			jsonb_build_array(jsonb_build_object(
-				'evidence_id', 'ev-ast-invalid',
-				'evidence_type', 'DOCUMENT',
-				'release_id', $1::text,
-				'content_sha256', 'sha256:ast-invalid'
-			))
-		)`, invalidReleaseID, invalidRuleID); err != nil {
-		t.Fatalf("insert invalid expression rule: %v", err)
-	}
-	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO rule_coverage (
-			release_id, rule_type, scope, status, covered_data_sources, notes
-		) VALUES
-			($1, 'SUBJECT_REQUIREMENT', '{}'::jsonb, 'FULL', '["major_admission"]'::jsonb, 'test fixture'),
-			($1, 'OTHER_HARD', '{}'::jsonb, 'FULL', '["major_admission"]'::jsonb, 'test fixture')`,
-		invalidReleaseID); err != nil {
-		t.Fatalf("insert invalid coverage: %v", err)
-	}
+	publishEligibilityRuleFixture(
+		t, pool, invalidReleaseID, invalidRuleID, "dangerous-expression",
+		"OTHER_HARD", `["category"]`,
+		`{"op":"EQ","field":"category","value":"物理类","sql":"SELECT secret"}`,
+		1, "SUBJECT_REQUIREMENT", "OTHER_HARD",
+	)
 
 	request.ReleaseId = invalidReleaseID
 	blocked, err := client.EvaluateEligibility(context.Background(), request)
@@ -599,43 +650,19 @@ func TestIntegration_EvaluateEligibility_ProfileFieldCatalogIsAuthoritative(t *t
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
 	})
-	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO rule_version (
-			rule_id, version, rule_key, rule_type, scope, required_profile_fields,
-			expression, expression_version, outcome_when_true, reason_code,
-			review_status, valid_from, release_id, source_evidence
-		) VALUES (
-			$2, 1, 'technical-subject-min', 'SINGLE_SUBJECT_MIN',
-			'{}'::jsonb, jsonb_build_array($3::text),
-			jsonb_build_object(
-				'op', 'NOT',
-				'child', jsonb_build_object(
-					'op', 'GTE',
-					'field', $3::text,
-					'value', 80
-				)
-			),
-			1, 'FAIL', 'TECHNICAL_SUBJECT_TOO_LOW', 'PUBLISHED', NOW(), $1,
-			jsonb_build_array(jsonb_build_object(
-				'evidence_id', 'ev-field-catalog',
-				'evidence_type', 'DOCUMENT',
-				'release_id', $1::text,
-				'content_sha256', 'sha256:field-catalog'
-			))
-		)`, releaseID, ruleID, fieldKey,
-	); err != nil {
-		t.Fatalf("insert rule: %v", err)
-	}
-	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO rule_coverage (
-			release_id, rule_type, scope, status, covered_data_sources, notes
-		) VALUES
-			($1, 'SUBJECT_REQUIREMENT', '{}'::jsonb, 'FULL', '["major_admission"]'::jsonb, 'fixture'),
-			($1, 'SINGLE_SUBJECT_MIN', '{}'::jsonb, 'FULL', '["major_admission"]'::jsonb, 'fixture')`,
+	publishEligibilityRuleFixture(
+		t,
+		pool,
 		releaseID,
-	); err != nil {
-		t.Fatalf("insert coverage: %v", err)
-	}
+		ruleID,
+		"technical-subject-min",
+		"SINGLE_SUBJECT_MIN",
+		fmt.Sprintf(`[%q]`, fieldKey),
+		fmt.Sprintf(`{"op":"NOT","child":{"op":"GTE","field":%q,"value":80}}`, fieldKey),
+		1,
+		"SUBJECT_REQUIREMENT",
+		"SINGLE_SUBJECT_MIN",
+	)
 
 	t.Setenv("ALGO_DATA_DSN", dsn)
 	bc := &conf.Bootstrap{Data: &conf.Data{Database: &conf.Data_Database{Dsn: dsn}}}
@@ -709,77 +736,63 @@ func TestIntegration_EvaluateEligibility_ConditionalFacts(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
 	})
 
-	insertRule := func(
+	publishRule := func(
 		ruleKey string,
 		ruleType string,
 		requiredFields string,
 		expression string,
+		coverageTypes ...string,
 	) {
 		t.Helper()
 		ruleID := fmt.Sprintf("%s-%d", ruleKey, suffix)
-		if _, err := pool.Exec(context.Background(),
-			`INSERT INTO rule_version (
-				rule_id, version, rule_key, rule_type, scope, required_profile_fields,
-				expression, expression_version, outcome_when_true, reason_code,
-				review_status, valid_from, release_id, source_evidence
-			) VALUES (
-				$2, 1, $3, $4, '{}'::jsonb, $5::jsonb, $6::jsonb,
-				1, 'FAIL', $3, 'PUBLISHED', NOW(), $1,
-				jsonb_build_array(jsonb_build_object(
-					'evidence_id', 'ev-' || $3,
-					'evidence_type', 'DOCUMENT',
-					'release_id', $1::text,
-					'content_sha256', 'sha256:' || $3
-				))
-			)`,
-			releaseID, ruleID, ruleKey, ruleType, requiredFields, expression,
-		); err != nil {
-			t.Fatalf("insert rule %s: %v", ruleKey, err)
-		}
+		publishEligibilityRuleFixture(
+			t,
+			pool,
+			releaseID,
+			ruleID,
+			ruleKey,
+			ruleType,
+			requiredFields,
+			expression,
+			1,
+			coverageTypes...,
+		)
 	}
-	insertRule(
+	publishRule(
 		"math-min",
 		"SINGLE_SUBJECT_MIN",
 		`["single_subject_scores.数学"]`,
 		`{"op":"NOT","child":{"op":"GTE","field":"single_subject_scores.数学","value":120}}`,
+		"SUBJECT_REQUIREMENT",
+		"SINGLE_SUBJECT_MIN",
 	)
-	insertRule(
+	publishRule(
 		"color-vision",
 		"PHYSICAL_RESTRICTION",
 		`["physical_exam.color_vision"]`,
 		`{"op":"EQ","field":"physical_exam.color_vision","value":"COLOR_BLIND"}`,
+		"PHYSICAL_RESTRICTION",
 	)
-	insertRule(
+	publishRule(
 		"gender",
 		"GENDER_RESTRICTION",
 		`["gender"]`,
 		`{"op":"EQ","field":"gender","value":"FEMALE"}`,
+		"GENDER_RESTRICTION",
 	)
-	insertRule(
+	publishRule(
 		"household",
 		"OTHER_HARD",
 		`["household_province"]`,
 		`{"op":"NEQ","field":"household_province","value":"湖南"}`,
+		"OTHER_HARD",
 	)
-	insertRule(
+	publishRule(
 		"school-registration",
 		"OTHER_HARD",
 		`["school_registration_province"]`,
 		`{"op":"NEQ","field":"school_registration_province","value":"湖南"}`,
 	)
-	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO rule_coverage (
-			release_id, rule_type, scope, status, covered_data_sources, notes
-		) VALUES
-			($1, 'SUBJECT_REQUIREMENT', '{}'::jsonb, 'FULL', '["major_admission"]'::jsonb, 'fixture'),
-			($1, 'SINGLE_SUBJECT_MIN', '{}'::jsonb, 'FULL', '["major_admission"]'::jsonb, 'fixture'),
-			($1, 'PHYSICAL_RESTRICTION', '{}'::jsonb, 'FULL', '["major_admission"]'::jsonb, 'fixture'),
-			($1, 'GENDER_RESTRICTION', '{}'::jsonb, 'FULL', '["major_admission"]'::jsonb, 'fixture'),
-			($1, 'OTHER_HARD', '{}'::jsonb, 'FULL', '["major_admission", "enrollment_plan"]'::jsonb, 'fixture')`,
-		releaseID,
-	); err != nil {
-		t.Fatalf("insert coverage: %v", err)
-	}
 
 	t.Setenv("ALGO_DATA_DSN", dsn)
 	bc := &conf.Bootstrap{Data: &conf.Data{Database: &conf.Data_Database{Dsn: dsn}}}
