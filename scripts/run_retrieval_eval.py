@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import date, datetime, timezone
 import hashlib
 import json
+import os
 import platform
 from pathlib import Path
 import subprocess
@@ -34,14 +35,14 @@ DEFAULT_DATASET = (
     ROOT
     / "data"
     / "golden"
-    / "retrieval-hunan-2025-v0.1.0-draft"
+    / "retrieval-hunan-2025-v0.2.0-draft"
 )
 DEFAULT_OUTPUT = (
     ROOT
     / "data"
     / "golden"
     / "baselines"
-    / "retrieval-hunan-2025-v0.1.0-draft.rerank-off.fixture.json"
+    / "retrieval-hunan-2025-v0.2.0-draft.rerank-off.fixture.json"
 )
 SOURCE_FILES = (
     "services/orchestrator/eval/retrieval_eval.py",
@@ -184,6 +185,17 @@ def parse_args():
     parser.add_argument("--embedding-model", default=None)
     parser.add_argument("--index-version", default=None)
     parser.add_argument("--release-id", default=None)
+    parser.add_argument("--algorithm-config-version", default="retrieval-golden-v1")
+    parser.add_argument("--model-route-version", default="local-embedding-v1")
+    parser.add_argument(
+        "--price-table-version",
+        default="not-applicable-local-retrieval",
+    )
+    parser.add_argument(
+        "--verifier-version",
+        default="not-applicable-retrieval-only",
+    )
+    parser.add_argument("--baseline-eval-run-id", default=None)
     parser.add_argument("--dsn", default=None)
     parser.add_argument(
         "--fixture",
@@ -205,6 +217,7 @@ def main():
     if args.fixture:
         retriever = DeterministicGoldenFixture(dataset.cases)
         execution = "deterministic-contract-fixture"
+        rrf_k = 60
     else:
         if not args.dsn:
             raise SystemExit("real retrieval requires --dsn")
@@ -225,6 +238,20 @@ def main():
             embedder = Embedder(model_name=args.embedding_model)
         as_of = date.fromisoformat(args.as_of)
         conn = psycopg.connect(args.dsn)
+        release_config = conn.execute(
+            """
+            SELECT rrf_k
+            FROM release
+            WHERE release_id = %s
+            """,
+            (args.release_id,),
+        ).fetchone()
+        if release_config is None or release_config[0] != 60:
+            conn.close()
+            raise SystemExit(
+                "retrieval release is missing the contract rrf_k=60"
+            )
+        rrf_k = release_config[0]
         retriever = RetrievePolicy(
             conn,
             embedder=embedder,
@@ -232,12 +259,17 @@ def main():
         )
         execution = "retrieve-policy"
 
+    authoritative_quality = is_authoritative_quality(
+        dataset.manifest,
+        fixture=args.fixture,
+    )
     try:
         report = evaluate_retrieval(
             dataset,
             retriever,
             mode=args.mode,
             rerank_enabled=args.rerank_enabled,
+            authoritative_quality=authoritative_quality,
         )
     finally:
         if not args.fixture:
@@ -250,7 +282,7 @@ def main():
         ),
         "rerank_enabled": args.rerank_enabled,
         "rerank_model": args.rerank_model,
-        "rrf_k": 60,
+        "rrf_k": rrf_k,
         "index_version": args.index_version or (
             "fixture-index-v1" if args.fixture else None
         ),
@@ -258,16 +290,30 @@ def main():
         "top_k": 20,
         "pool_k": 20,
         "execution": execution,
-        "authoritative_quality": is_authoritative_quality(
-            dataset.manifest,
-            fixture=args.fixture,
-        ),
+        "authoritative_quality": authoritative_quality,
     }
     baseline = build_baseline(
         report,
         dataset,
         code_identity=code_identity(),
         retrieval_config=retrieval_config,
+        run_identity={
+            "algorithm_config_version": args.algorithm_config_version,
+            "model_route_version": args.model_route_version,
+            "price_table_version": args.price_table_version,
+            "verifier_version": args.verifier_version,
+            "environment": {
+                "python_version": platform.python_version(),
+                "platform": platform.platform(),
+                "offline": True,
+            },
+            "hardware_profile": {
+                "machine": platform.machine(),
+                "processor": platform.processor(),
+                "cpu_count": os.cpu_count(),
+            },
+            "baseline_eval_run_id": args.baseline_eval_run_id,
+        },
         generated_at=datetime.now(timezone.utc).isoformat(),
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)

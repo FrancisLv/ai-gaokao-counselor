@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 import hashlib
 import os
 from pathlib import Path
+import threading
 import time
 from uuid import uuid4
 
@@ -41,10 +42,22 @@ class FakeCursor:
         self.sql = (*self.sql, sql)
         self.params = (*self.params, params)
         normalized = " ".join(sql.split())
-        if normalized.startswith(("SELECT NULL::vector <=>", "SELECT set_config(")):
+        if normalized.startswith(
+            (
+                "SET TRANSACTION ",
+                "SELECT NULL::vector <=>",
+                "SELECT set_config(",
+            )
+        ):
             self._current = {}
         else:
             self._current = next(self._responses)
+        if (
+            isinstance(self._current, dict)
+            and "status" in self._current
+            and "revoked_at" in self._current
+        ):
+            self._current.setdefault("rrf_k", 60)
         if isinstance(self._current, BaseException):
             raise self._current
 
@@ -64,47 +77,6 @@ class FakeConnection:
 
     def transaction(self):
         return nullcontext()
-
-
-class TracingCursor:
-    def __init__(self, cursor, capture):
-        self._cursor = cursor
-        self._capture = capture
-
-    def __enter__(self):
-        self._cursor.__enter__()
-        return self
-
-    def __exit__(self, *args):
-        return self._cursor.__exit__(*args)
-
-    def execute(self, sql, params=None):
-        if "<=>" in sql:
-            self._capture.vector_sql = sql
-            self._capture.vector_params = params
-        return self._cursor.execute(sql, params)
-
-    def fetchone(self):
-        return self._cursor.fetchone()
-
-    def fetchall(self):
-        return self._cursor.fetchall()
-
-
-class TracingConnection:
-    def __init__(self, conn):
-        self._conn = conn
-        self.vector_sql = None
-        self.vector_params = None
-
-    def cursor(self, row_factory=None):
-        return TracingCursor(
-            self._conn.cursor(row_factory=row_factory),
-            self,
-        )
-
-    def transaction(self):
-        return self._conn.transaction()
 
 
 class DeterministicEmbedder:
@@ -1027,20 +999,20 @@ class PolicyRetrievalTests(unittest.TestCase):
         self.assertEqual(document.applicability.regions, ("湖南",))
         self.assertEqual(result.diagnostics.keyword_candidates, 1)
 
-    def test_evidence_projection_failure_is_a_technical_failure(self):
+    def test_unprojectable_candidate_is_no_evidence(self):
         invalid_row = self.evidence_row("chunk-invalid")
         invalid_row["source_uri"] = None
 
-        with self.assertRaises(PolicyRetrievalError) as raised:
-            RetrievePolicy(
-                FakeConnection(
-                    {"status": "PUBLISHED", "revoked_at": None},
-                    [invalid_row],
-                ),
-                today=lambda: date(2025, 11, 19),
-            ).retrieve(self.query())
+        result = RetrievePolicy(
+            FakeConnection(
+                {"status": "PUBLISHED", "revoked_at": None},
+                [invalid_row],
+            ),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(self.query())
 
-        self.assertEqual(raised.exception.reason, "EVIDENCE_PROJECTION_FAILED")
+        self.assertEqual(result.status, "NO_EVIDENCE")
+        self.assertEqual(result.evidence, ())
 
 
 @unittest.skipUnless(TEST_DSN, "ORCHESTRATOR_TEST_DSN 未设置")
@@ -1065,6 +1037,7 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             "migrations/15_policy_retrieval_release_scope.sql",
             "migrations/16_policy_vector_release_identity.sql",
             "migrations/17_policy_rerank_release_identity.sql",
+            "migrations/18_policy_retrieval_config_identity.sql",
         ):
             self._apply_sql_file(migration)
 
@@ -1334,6 +1307,159 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             ["chunk-current"],
         )
 
+    def test_release_and_candidates_share_one_snapshot(self):
+        release_id = self._seed_release("rel-snapshot-test")
+        self._seed_policy_document(release_id, "doc-before")
+        barrier = threading.Barrier(2)
+        results = []
+        errors = []
+        worker_name = "policy-snapshot-worker-" + uuid4().hex
+
+        def retrieve():
+            try:
+                conn = psycopg.connect(
+                    self.dsn,
+                    row_factory=dict_row,
+                    autocommit=True,
+                    application_name=worker_name,
+                )
+                try:
+                    conn.execute(
+                        f'SET search_path TO "{self.schema}", public'
+                    )
+                    barrier.wait()
+                    results.append(
+                        RetrievePolicy(
+                            conn,
+                            today=lambda: date(2025, 11, 19),
+                        ).retrieve(
+                            PolicyRetrievalQuery(
+                                principal_id="principal-test",
+                                query_text="转专业",
+                                scope=ApplicabilityScope(
+                                    "湖南",
+                                    2025,
+                                    "物理类",
+                                    "本科批",
+                                ),
+                                release_id=release_id,
+                                mode="keyword",
+                            )
+                        )
+                    )
+                finally:
+                    conn.close()
+            except Exception as exc:
+                errors.append(exc)
+
+        writer = psycopg.connect(self.dsn, row_factory=dict_row)
+        try:
+            writer.execute(f'SET search_path TO "{self.schema}", public')
+            writer.execute(
+                "LOCK TABLE policy_applicability IN ACCESS EXCLUSIVE MODE"
+            )
+            thread = threading.Thread(target=retrieve)
+            thread.start()
+            barrier.wait()
+            for _ in range(200):
+                waiting = self.conn.execute(
+                    """
+                    SELECT wait_event_type
+                    FROM pg_stat_activity
+                    WHERE application_name = %s
+                    """,
+                    (worker_name,),
+                ).fetchone()
+                if waiting is not None and waiting["wait_event_type"] == "Lock":
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("retrieval did not reach the locked candidate query")
+
+            text = "学生可以申请转专业。"
+            document_sha256 = hashlib.sha256(b"doc-during").hexdigest()
+            writer.execute(
+                """
+                INSERT INTO policy_doc (
+                    id, title, issuer, effective_year, region, source_uri,
+                    raw_storage_uri, document_type, issuer_type, issuer_id,
+                    school_id, fetched_at, content_sha256
+                )
+                VALUES (
+                    'doc-during', 'doc-during 标题', '湖南测试大学', 2025,
+                    '湖南', 'https://example.invalid/doc-during',
+                    's3://bucket/doc-during', 'charter', 'university',
+                    'issuer-doc-during', '1001', NOW(), %s
+                )
+                """,
+                (document_sha256,),
+            )
+            writer.execute(
+                """
+                INSERT INTO policy_chunk_set (
+                    chunk_set_version, doc_id, content_sha256,
+                    embedding_model, embedding_dim, index_version
+                )
+                VALUES (
+                    'doc-during-chunks', 'doc-during', %s,
+                    'deterministic-test', 1024, 'idx-v1'
+                )
+                """,
+                (document_sha256,),
+            )
+            writer.execute(
+                """
+                INSERT INTO policy_chunk (
+                    id, doc_id, chunk_set_version, section_path, text,
+                    text_sha256, char_start, char_end, embedding_model,
+                    embedding_dim, index_version
+                )
+                VALUES (
+                    'doc-during-chunk', 'doc-during', 'doc-during-chunks',
+                    '第二章 > 转专业', %s, %s, 0, %s,
+                    'deterministic-test', 1024, 'idx-v1'
+                )
+                """,
+                (
+                    text,
+                    hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    len(text),
+                ),
+            )
+            writer.execute(
+                """
+                INSERT INTO policy_applicability (
+                    doc_id, regions, categories, batches, valid_from, valid_to
+                )
+                VALUES (
+                    'doc-during', ARRAY['湖南'], ARRAY['物理类'],
+                    ARRAY['本科批'], DATE '2025-01-01', DATE '2025-12-31'
+                )
+                """
+            )
+            writer.execute(
+                """
+                INSERT INTO release_policy_doc (
+                    release_id, doc_id, chunk_set_version
+                )
+                VALUES (%s, 'doc-during', 'doc-during-chunks')
+                """,
+                (release_id,),
+            )
+            writer.commit()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+        finally:
+            writer.rollback()
+            writer.close()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            [item.document.doc_id for item in results[0].evidence],
+            ["doc-before"],
+        )
+
     def test_release_mapping_rejects_a_chunk_set_owned_by_another_document(self):
         release_id = self._seed_release("rel-cross-document-test")
         self._seed_policy_document(release_id, "doc-a")
@@ -1346,6 +1472,20 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
                     UPDATE release_policy_doc
                     SET chunk_set_version = 'doc-b-chunks'
                     WHERE release_id = %s AND doc_id = 'doc-a'
+                    """,
+                    (release_id,),
+                )
+
+    def test_release_retrieval_config_rejects_a_non_contract_rrf_k(self):
+        release_id = self._seed_release("rel-invalid-rrf-identity")
+
+        with self.assertRaises(psycopg.errors.CheckViolation):
+            with self.conn.transaction():
+                self.conn.execute(
+                    """
+                    UPDATE release
+                    SET rrf_k = 61
+                    WHERE release_id = %s
                     """,
                     (release_id,),
                 )
@@ -1616,7 +1756,7 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             "VECTOR_UNAVAILABLE",
         )
 
-    def test_vector_query_uses_hnsw_cosine_order_for_filtered_candidates(self):
+    def test_filtered_vector_behavior_returns_expected_evidence(self):
         release_id = self._seed_release("rel-vector-hnsw-plan-test")
         for doc_id, changes in (
             ("doc-match", {"embedding_axis": 0}),
@@ -1627,30 +1767,60 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
         ):
             self._seed_policy_document(release_id, doc_id, **changes)
 
-        tracing_conn = TracingConnection(self.conn)
-        result = RetrievePolicy(
-            tracing_conn,
+        service = RetrievePolicy(
+            self.conn,
             embedder=DeterministicEmbedder(vector=[1.0] + [0.0] * 1023),
             today=lambda: date(2025, 11, 19),
-        ).retrieve(
-            PolicyRetrievalQuery(
-                principal_id="principal-test",
-                query_text="转专业",
-                scope=ApplicabilityScope("湖南", 2025, "物理类", "本科批"),
-                release_id=release_id,
-                mode="vector",
-                school_ids=("1001",),
-                top_k=2,
-                pool_k=2,
-            )
         )
+        query = PolicyRetrievalQuery(
+            principal_id="principal-test",
+            query_text="转专业",
+            scope=ApplicabilityScope("湖南", 2025, "物理类", "本科批"),
+            release_id=release_id,
+            mode="vector",
+            school_ids=("1001",),
+            top_k=2,
+            pool_k=2,
+        )
+        result = service.retrieve(query)
 
         self.assertEqual(result.status, "FOUND")
         self.assertEqual(
             [item.document.doc_id for item in result.evidence],
             ["doc-match", "doc-in-scope"],
         )
-        self.assertIsNotNone(tracing_conn.vector_sql)
+
+    def test_filtered_ann_storage_contract_uses_hnsw_cosine_order(self):
+        release_id = self._seed_release("rel-vector-hnsw-plan-test")
+        for doc_id, changes in (
+            ("doc-match", {"embedding_axis": 0}),
+            ("doc-in-scope", {"embedding_axis": 1}),
+            ("doc-wrong-province", {"regions": ("湖北",)}),
+            ("doc-wrong-category", {"categories": ("历史类",)}),
+            ("doc-wrong-school", {"school_id": "2002"}),
+        ):
+            self._seed_policy_document(release_id, doc_id, **changes)
+        service = RetrievePolicy(self.conn)
+        query = PolicyRetrievalQuery(
+            principal_id="principal-test",
+            query_text="转专业",
+            scope=ApplicabilityScope("湖南", 2025, "物理类", "本科批"),
+            release_id=release_id,
+            mode="vector",
+            school_ids=("1001",),
+            top_k=2,
+            pool_k=2,
+        )
+
+        vector_sql, vector_params = service._vector_query(
+            query,
+            self._vector_literal(axis=0),
+            {
+                "embedding_model": "deterministic-test",
+                "embedding_dim": 1024,
+                "index_version": "idx-v1",
+            },
+        )
 
         with self.conn.transaction():
             self.conn.execute("SET LOCAL enable_seqscan = off")
@@ -1658,8 +1828,8 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             self.conn.execute("SET LOCAL hnsw.iterative_scan = 'strict_order'")
             explained = self.conn.execute(
                 "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "
-                + tracing_conn.vector_sql,
-                tracing_conn.vector_params,
+                + vector_sql,
+                vector_params,
             ).fetchone()
 
         plan = explained["QUERY PLAN"][0]["Plan"]
@@ -1904,6 +2074,7 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
                 scope=ApplicabilityScope("湖南", 2025, "物理类", "本科批"),
                 release_id=release_id,
                 mode="keyword",
+                school_ids=("1001",),
             )
         )
 
@@ -1913,7 +2084,7 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             ["doc-national", "doc-province"],
         )
 
-    def test_unprojectable_candidate_is_a_technical_failure(self):
+    def test_all_unprojectable_candidates_are_no_evidence(self):
         release_id = self._seed_release("rel-invalid-evidence-test")
         self._seed_policy_document(release_id, "doc-invalid")
         self.conn.execute(
@@ -1925,26 +2096,52 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             ("0" * 64,),
         )
 
-        with self.assertRaises(PolicyRetrievalError) as raised:
-            RetrievePolicy(
-                self.conn,
-                today=lambda: date(2025, 11, 19),
-            ).retrieve(
-                PolicyRetrievalQuery(
-                    principal_id="principal-test",
-                    query_text="转专业",
-                    scope=ApplicabilityScope(
-                        "湖南", 2025, "物理类", "本科批"
-                    ),
-                    release_id=release_id,
-                    mode="keyword",
-                )
+        result = RetrievePolicy(
+            self.conn,
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(
+            PolicyRetrievalQuery(
+                principal_id="principal-test",
+                query_text="转专业",
+                scope=ApplicabilityScope(
+                    "湖南", 2025, "物理类", "本科批"
+                ),
+                release_id=release_id,
+                mode="keyword",
             )
+        )
 
         self.assertEqual(
-            raised.exception.reason,
-            "EVIDENCE_PROJECTION_FAILED",
+            result.status,
+            "NO_EVIDENCE",
         )
+        self.assertEqual(result.evidence, ())
+
+    def test_university_document_without_school_identity_is_no_evidence(self):
+        release_id = self._seed_release("rel-missing-school-identity-test")
+        self._seed_policy_document(
+            release_id,
+            "doc-invalid-school",
+            school_id=None,
+        )
+
+        result = RetrievePolicy(
+            self.conn,
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(
+            PolicyRetrievalQuery(
+                principal_id="principal-test",
+                query_text="转专业",
+                scope=ApplicabilityScope(
+                    "湖南", 2025, "物理类", "本科批"
+                ),
+                release_id=release_id,
+                mode="keyword",
+            )
+        )
+
+        self.assertEqual(result.status, "NO_EVIDENCE")
+        self.assertEqual(result.evidence, ())
 
     def test_keyword_percent_and_underscore_are_literal_not_wildcards(self):
         release_id = self._seed_release("rel-keyword-escaping-test")

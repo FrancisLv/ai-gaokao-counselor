@@ -258,6 +258,111 @@ class RunLifecycle:
         finally:
             await conn.close()
 
+    async def GetRetrievalRunBinding(
+        self,
+        *,
+        principal_id: str,
+        run_id: UUID,
+        school_ids: tuple[str, ...] = (),
+        document_types: tuple[str, ...] = (),
+        mode: str = "hybrid",
+        top_k: int = 5,
+        pool_k: int = 20,
+    ):
+        """从持久 run 的权威记录构造在线检索 binding。
+
+        scope、principal 与 release 不接受调用方覆盖；调用方只能提供检索
+        通道、top/pool 和可由上层任务决定的范围筛选。
+        """
+        from graph.nodes.retrieve import (
+            ConfirmedProfileScope,
+            RetrievalRunBinding,
+        )
+        from rag.policy_retrieval import ApplicabilityScope
+
+        conn = await self._connect()
+        try:
+            row = await (
+                await conn.execute(
+                    """
+                    SELECT run_id, principal_id, task_kind, task_input,
+                           release_id, confirmed_profile_version
+                    FROM run
+                    WHERE run_id = %s AND principal_id = %s
+                    """,
+                    (run_id, principal_id),
+                )
+            ).fetchone()
+            if row is None:
+                raise RunLifecycleError("RUN_NOT_FOUND")
+
+            confirmed_profile = None
+            task_scope = None
+            if row["task_kind"] == "POLICY_QA":
+                task_input = dict(row["task_input"])
+                required = (
+                    task_input.get("province"),
+                    task_input.get("application_year"),
+                    task_input.get("category"),
+                    task_input.get("batch"),
+                )
+                if any(value in (None, "") for value in required):
+                    raise RunLifecycleError("RETRIEVAL_SCOPE_REQUIRED")
+                task_scope = ApplicabilityScope(
+                    province=str(required[0]),
+                    application_year=int(required[1]),
+                    category=str(required[2]),
+                    batch=str(required[3]),
+                )
+            else:
+                profile_version = row["confirmed_profile_version"]
+                if profile_version is None:
+                    raise RunLifecycleError("PROFILE_NOT_CONFIRMED")
+                profile = await (
+                    await conn.execute(
+                        """
+                        SELECT fields
+                        FROM profile_revision
+                        WHERE profile_version = %s
+                          AND lifecycle = 'CONFIRMED'
+                        """,
+                        (profile_version,),
+                    )
+                ).fetchone()
+                if profile is None:
+                    raise RunLifecycleError("PROFILE_NOT_CONFIRMED")
+                fields = profile["fields"]
+                required = (
+                    fields.get("province", {}).get("value"),
+                    fields.get("application_year", {}).get("value"),
+                    fields.get("category", {}).get("value"),
+                    fields.get("batch", {}).get("value"),
+                )
+                if any(value in (None, "") for value in required):
+                    raise RunLifecycleError("RETRIEVAL_SCOPE_REQUIRED")
+                confirmed_profile = ConfirmedProfileScope(
+                    profile_version=str(profile_version),
+                    province=str(required[0]),
+                    application_year=int(required[1]),
+                    category=str(required[2]),
+                    batch=str(required[3]),
+                )
+            return RetrievalRunBinding(
+                principal_id=row["principal_id"],
+                run_id=str(row["run_id"]),
+                release_id=row["release_id"],
+                task_kind=row["task_kind"],
+                confirmed_profile=confirmed_profile,
+                task_scope=task_scope,
+                school_ids=tuple(school_ids),
+                document_types=tuple(document_types),
+                mode=mode,
+                top_k=top_k,
+                pool_k=pool_k,
+            )
+        finally:
+            await conn.close()
+
     async def _expire_due_hitl(self, *, principal_id: str, run_id: UUID) -> bool:
         conn = await self._connect()
         try:

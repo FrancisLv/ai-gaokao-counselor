@@ -114,9 +114,16 @@ release_policy_index
   embedding_model
   embedding_dim
   index_version
+
+release.rrf_k
+  INTEGER NOT NULL DEFAULT 60
+  CHECK (rrf_k = 60)
 ```
 
 chunk 通过 `doc_id + chunk_set_version` 归属 release；`release_policy_index` 声明整个 release 唯一的模型、维度和索引版本，映射内所有 `policy_chunk_set` 与 chunk 身份必须一致。同一文档内容未变化时可复用；重新切分或更换 embedding 必须生成新 `chunk_set_version`/chunk 身份。
+
+迁移 18 在 `release` 上持久化 RRF 身份，历史与新建 release 默认 `rrf_k=60`；
+非契约值由 CHECK 拒绝，在线检索读取该值而不是隐式硬编码。
 
 ## 4. Profile 与 Run 持久化
 

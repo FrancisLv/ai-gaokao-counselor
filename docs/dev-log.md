@@ -1152,3 +1152,51 @@ rerank 模型质量。
   baseline 当作正式质量门禁。合并审查补充：真实 `RetrievePolicy` 运行的
   `authoritative_quality` 也只在 `owner_status=SIGNED_OFF` 时为 true，避免未签字
   草稿借由真实库执行被误当作权威质量结论。
+
+## 37. M4a code review 修复
+
+**日期与范围**：2026-11-19。针对 M4a #7–#13 的审查 findings 修复检索正确性、评测
+身份与生产装配缺口；不扩展资格规则、最终报告或 LLM Gateway。
+
+### 实现
+
+- `RetrievePolicy` 的 release 校验、索引/rerank 配置读取、候选查询和证据投影统一在
+  一个只读 `REPEATABLE READ` 事务快照内执行；单通道故障使用 savepoint 隔离，保持
+  hybrid 同范围降级语义。
+- 学校筛选改成“空筛选或不限学校；否则校级文档精确匹配或非校级 `school_id=NULL`
+  放行”，避免全国/省级政策被学校条件误删。
+- 候选基底前置过滤完整文档类型、issuer 类型、hash 格式、文本长度、locator 和适用域；
+  不可投影候选统一不计入证据，全部不可投影时稳定返回 `NO_EVIDENCE`，技术错误仍为
+  技术错误。
+- 融合内部候选保留 vector rank、keyword rank、RRF 分；迁移 18 在 release 上持久化
+  `rrf_k=60` 并由 CHECK 拒绝非契约值，检索读取 release 身份而非隐式常量。
+- 新增 `RunLifecycle.GetRetrievalRunBinding(...)`：GENERATE_PLAN 等任务从已确认
+  `profile_revision` 构造 scope，POLICY_QA 从 task input 构造 scope；principal、
+  release、run 和 scope 均不向调用方开放覆盖。`build_run_bound_graph(...)` 提供生产
+  图工厂，启动在线图的独立 run API 仍待后续接线。
+- golden set 新增不可变 `v0.2.0-draft`，30 条 Case 均带 `interference`；跨省/跨年/
+  跨科类/错误学校标签有结构化冲突值，scope leak 额外检查 release、文档类型、学校
+  筛选和缺失校级身份。旧 v0.1 保持原样。
+- EvalRun/baseline 记录 dataset SHA、model route、price table、verifier、算法配置、
+  environment、hardware profile 与 baseline identity。recall@5 继续作质量门禁；
+  MRR 只在真实且 `SIGNED_OFF` 的权威运行中参与门禁。安全泄漏、Case 技术错误和
+  `NO_EVIDENCE` 误判始终阻断。
+
+### 测试
+
+- `test_policy_retrieval.py` 覆盖全国/省级政策在学校筛选下仍可命中、全候选不可投影
+  返回 `NO_EVIDENCE`、迁移 18 CHECK、release 快照并发场景，以及 storage-contract
+  查询计划；行为断言仍从 `RetrievePolicy` 进入。
+- `test_retrieval_eval.py` 覆盖 interference 必填与独立 leak 复现、release/文档类型/
+  缺失学校身份泄漏、权威 MRR 门禁和完整 EvalRun 身份字段。
+- `test_run_lifecycle_retrieval.py` 使用真实隔离数据库覆盖已确认 plan profile 和
+  POLICY_QA task scope 到 `build_run_bound_graph(...)` 的在线装配。
+
+### 风险与边界
+
+- 真实政策索引仍未绑定正式 release；`v0.2.0-draft` 的 owner 仍为
+  `PENDING_SIGNOFF`，fixture 基线不构成真实 recall/MRR 结论。
+- `release.rrf_k` 当前契约固定 60；若未来需要可调融合参数，必须先更新 runtime
+  contract 并以新迁移放宽 CHECK，不能逐请求覆盖。
+- 生产启动在线检索图的 API/子图仍需在后续编排票接线；本轮已移除“只能由测试构造
+  binding”的阻塞，但未把完整的 planner 流程接到 worker。

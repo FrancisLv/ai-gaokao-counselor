@@ -258,8 +258,13 @@
 - 普通 Case 未命中进入分母并计 0；只有明确 `NO_EVIDENCE` 的 Case 走独立状态验收，
   不进入 recall/MRR 分母；
 - `MRR = mean(1 / 首次命中排名)`，未命中计 0；
-- 每条返回证据都检查省、年、科类、批次、学校与 `must_exclude_sources`。任一越界都
+- MRR 阈值只在真实 `RetrievePolicy` 且 `owner_status=SIGNED_OFF` 的权威质量门禁中
+  与 recall@5 一起参与判定；草稿/fixture 仍记录 MRR，但不把未签字数据变成发布门禁；
+- 每条返回证据都检查 release、文档类型、省、年、科类、批次、学校身份与
+  `must_exclude_sources`。任一越界都
   产生逐例 leak，`scope_leak_rate > 0` 直接使门禁失败，不能用平均 recall 抵消；
+- 跨省/跨年/跨科类/错误学校 Case 必须携带结构化 `interference` 元数据，供 harness
+  独立构造干扰证据并验证 leak，而不是只依赖标签；
 - 失败 Case 保存实际证据和 first diff；baseline 同时记录 dataset hash、release、
   代码身份、embedding、rerank、RRF、index version、运行环境与 `as_of`。
 
