@@ -73,6 +73,7 @@ RetrievalCase
   must_exclude_chunk_ids: optional list<chunk_id>
   tags: policy / charter / physical_exam / no_evidence / scope_conflict
   criticality: CRITICAL | NORMAL
+  evaluation_status: ACTIVE | PENDING_RELEASE_BINDING | PENDING_RELEASE_REBUILD | PENDING_SEMANTIC_RELEVANCE
 ```
 
 首批 30 条必须覆盖：
@@ -189,6 +190,9 @@ evidence_precision@5 =
 
 `must_exclude_chunk_ids` 命中必须逐例失败，不能用 recall 平均值掩盖。正式质量门槛
 必须使用 owner `SIGNED_OFF` 的数据集校准；草稿/fixture 只报告指标和 diff。
+
+非 `ACTIVE` case 不调用检索器，不进入 recall/MRR/precision 分母；baseline 必须报告
+`skipped_case_count` 和按状态分组的 `skipped_case_reasons`，不能静默省略。
 
 ## 5. 生成与事实指标
 

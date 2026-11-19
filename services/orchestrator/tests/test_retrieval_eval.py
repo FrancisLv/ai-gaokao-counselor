@@ -283,6 +283,61 @@ class RetrievalDatasetTests(unittest.TestCase):
         )
         self.assertEqual(len(case["must_exclude_chunk_ids"]), 7)
 
+    def test_v04_separates_active_cases_from_known_pending_gaps(self):
+        dataset = load_retrieval_dataset(
+            ROOT
+            / "data"
+            / "golden"
+            / "retrieval-hunan-2025-v0.4.0-draft"
+        )
+
+        statuses = {}
+        for case in dataset.cases:
+            status = case.get("evaluation_status", "ACTIVE")
+            statuses[status] = statuses.get(status, 0) + 1
+        self.assertEqual(
+            statuses,
+            {
+                "ACTIVE": 25,
+                "PENDING_RELEASE_BINDING": 2,
+                "PENDING_RELEASE_REBUILD": 2,
+                "PENDING_SEMANTIC_RELEVANCE": 2,
+            },
+        )
+        remapped = {
+            case["case_id"]: case["expected_chunk_ids"]
+            for case in dataset.cases
+            if case["case_id"] in {"retrieval-001", "retrieval-006"}
+        }
+        self.assertEqual(
+            remapped,
+            {
+                "retrieval-001": ["doc_2025_eafdeb597333_c0007"],
+                "retrieval-006": ["doc_2025_1a91a6f3cc9b_c0009"],
+            },
+        )
+
+    def test_v04_fixture_evaluates_only_active_cases(self):
+        dataset = load_retrieval_dataset(
+            ROOT
+            / "data"
+            / "golden"
+            / "retrieval-hunan-2025-v0.4.0-draft"
+        )
+        retriever = GoldenContractFixture(dataset.cases)
+
+        report = evaluate_retrieval(
+            dataset,
+            retriever,
+            mode="hybrid",
+            as_of=AS_OF,
+        )
+
+        self.assertEqual(retriever.calls, 25)
+        self.assertEqual(report.eligible_case_count, 25)
+        self.assertEqual(report.skipped_case_count, 6)
+        self.assertEqual(report.gate_status, "PASS")
+
     def test_only_real_runs_with_a_signed_owner_are_authoritative(self):
         self.assertFalse(
             is_authoritative_quality(
@@ -766,6 +821,37 @@ class RetrievalDatasetTests(unittest.TestCase):
         self.assertEqual(
             report.cases[0].first_diff["field"],
             "hard_negative_chunk",
+        )
+
+    def test_non_active_evaluation_status_is_skipped_and_reported(self):
+        case = self.valid_case()
+        case["evaluation_status"] = "PENDING_RELEASE_BINDING"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_dataset(root, case)
+            dataset = load_retrieval_dataset(root)
+
+        retriever = DeterministicRetriever(
+            {
+                case["query"]: PolicyRetrievalResult(
+                    "FOUND",
+                    "rel-test",
+                    (evidence("doc-001_c0001", "doc-001"),),
+                )
+            }
+        )
+        report = evaluate_retrieval(
+            dataset,
+            retriever,
+            mode="vector",
+            as_of=AS_OF,
+        )
+
+        self.assertEqual(retriever.queries, [])
+        self.assertEqual(report.skipped_case_count, 1)
+        self.assertEqual(
+            report.skipped_case_reasons,
+            {"PENDING_RELEASE_BINDING": 1},
         )
 
     def test_evidence_precision_detects_relevance_tail_filling(self):

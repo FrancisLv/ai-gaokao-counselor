@@ -1330,6 +1330,11 @@ rerank 模型质量。
 - golden set 新增不可变 `v0.3.0-draft`：31 条，新增真实 2465 同文档 hard-negative
   用例；harness 报告 `evidence_precision@5`、`irrelevant_evidence_rate`，并对
   `must_exclude_chunk_ids` 命中逐例失败。
+- `v0.4.0-draft` 绑定真实 release：9 个失效院校 expected chunk 重映射到当前合规
+  chunk；2 条政策用例标为 `PENDING_RELEASE_BINDING`，2 条长沙理工用例标为
+  `PENDING_RELEASE_REBUILD`，2 条“没有该专业限制”语义用例标为
+  `PENDING_SEMANTIC_RELEVANCE`。非 ACTIVE case 不调用检索器，不进入指标分母，
+  但在 baseline 中显式报告跳过数量与原因。
 
 ### 验证
 
@@ -1339,3 +1344,6 @@ rerank 模型质量。
   `0.064`，旧 30 条草稿中存在 expected chunk 已被 600 字符规则移除和
   `NO_EVIDENCE` 标签与真实数据不一致的问题。新 2465 用例通过且无 hard-negative
   leak；真实质量门禁继续 FAIL，不冒充 owner signoff。
+- v0.4 真实 vector 诊断：25 条 ACTIVE 全部进入分母，recall@5/MRR 为 1.0、
+  scope leak 为 0，precision@5 为 0.149，另有 6 条已知缺口显式跳过。由于
+  `quality_gate_applied=false` 且 owner 未签字，这不是正式质量通过结论。

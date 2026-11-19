@@ -273,3 +273,13 @@ query_text=转专业政策
 旧院校章程当前回填为
 `regions=['全国'] / categories=['不限'] / batches=['不限']`，仅用于 2025 旧数据
 业务验证，不等同于最终适用域标注。
+
+检索质量使用 release-bound `retrieval-hunan-2025-v0.4.0-draft`：
+
+- 31 条 case 中 25 条 ACTIVE、6 条显式跳过；
+- 跳过原因为 2 条待政策 release 绑定、2 条待重新切分/索引、2 条待 semantic
+  relevance 判断；
+- v0.4 真实 vector 诊断指标为 recall@5=1.0、MRR=1.0、scope leak=0、
+  precision@5=0.149；
+- dataset 仍为 `PENDING_SIGNOFF`，`quality_gate_applied=false`，不得把该诊断结果
+  冒充正式质量门禁。

@@ -57,6 +57,8 @@ class RetrievalEvaluationReport:
     cases: tuple[RetrievalCaseResult, ...]
     gate_status: str
     quality_gate_applied: bool = False
+    skipped_case_count: int = 0
+    skipped_case_reasons: dict[str, int] | None = None
 
 
 _SUPPORTED_PROVINCES = frozenset({"湖南"})
@@ -67,6 +69,14 @@ _SUPPORTED_DOCUMENT_TYPES = frozenset(
 )
 _CRITICALITIES = frozenset({"CRITICAL", "NORMAL"})
 _OWNER_STATUSES = frozenset({"DRAFT", "PENDING_SIGNOFF", "SIGNED_OFF"})
+_EVALUATION_STATUSES = frozenset(
+    {
+        "ACTIVE",
+        "PENDING_RELEASE_BINDING",
+        "PENDING_RELEASE_REBUILD",
+        "PENDING_SEMANTIC_RELEVANCE",
+    }
+)
 _RECALL_AT_5_MIN = 0.80
 _MRR_MIN = 0.65
 _EVIDENCE_PRECISION_AT_5_MIN = 0.20
@@ -183,6 +193,8 @@ def _validate_case(case: dict) -> None:
         raise ValueError(f"{case_id}: query must be a non-empty string")
     if case["criticality"] not in _CRITICALITIES:
         raise ValueError(f"{case_id}: criticality is unsupported")
+    if case.get("evaluation_status", "ACTIVE") not in _EVALUATION_STATUSES:
+        raise ValueError(f"{case_id}: evaluation_status is unsupported")
     if (
         not isinstance(case["tags"], list)
         or not case["tags"]
@@ -375,8 +387,15 @@ def evaluate_retrieval(
     cases_with_scope_leak = 0
     relevant_evidence_at_5 = 0
     returned_evidence_at_5 = 0
+    skipped_case_reasons: dict[str, int] = {}
 
     for case in dataset.cases:
+        evaluation_status = case.get("evaluation_status", "ACTIVE")
+        if evaluation_status != "ACTIVE":
+            skipped_case_reasons[evaluation_status] = (
+                skipped_case_reasons.get(evaluation_status, 0) + 1
+            )
+            continue
         scope = case["scope"]
         query = PolicyRetrievalQuery(
             principal_id="eval:retrieval-golden",
@@ -607,6 +626,8 @@ def evaluate_retrieval(
         cases=tuple(case_results),
         gate_status=gate_status,
         quality_gate_applied=authoritative_quality,
+        skipped_case_count=sum(skipped_case_reasons.values()),
+        skipped_case_reasons=skipped_case_reasons,
     )
 
 
@@ -816,6 +837,8 @@ def build_baseline(
             for case_result in report.cases
             if case_result.first_diff is not None
         ],
+        "skipped_case_count": report.skipped_case_count,
+        "skipped_case_reasons": report.skipped_case_reasons or {},
         "cases": cases,
     }
     identity_payload = {

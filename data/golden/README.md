@@ -5,7 +5,7 @@
 评测集按不可变版本目录存放。当前检索集版本：
 
 ```text
-retrieval-hunan-2025-v0.3.0-draft/
+retrieval-hunan-2025-v0.4.0-draft/
   qa.jsonl
   manifest.json
 ```
@@ -25,6 +25,11 @@ harness 冒烟、diff 和待审阅基线，不能宣称正式检索质量门禁�
 v0.3 在 v0.2 的 30 条用例上新增一条真实同文档 relevance precision 用例。评测除
 recall/MRR 外还报告 `evidence_precision@5` 与 `irrelevant_evidence_rate`；
 `must_exclude_chunk_ids` 命中会逐例失败，不能被 recall 平均值掩盖。
+
+v0.4 绑定真实 2025 release，并把 6 条暂不可评测的 case 用 `evaluation_status`
+显式分类：2 条待政策 release 绑定、2 条待重新切分/索引、2 条待 semantic relevance
+判断。非 ACTIVE case 不调用 `RetrievePolicy`，不进入 recall/MRR/precision 分母，
+但会在 baseline 的 `skipped_case_count` 和 `skipped_case_reasons` 中逐类报告。
 
 首批规模为检索集 30 条、端到端集 10 条；本版本先交付检索集。后续检索集扩展目标
 为 100–200 条。修改任何用例都必须复制到新的版本目录并生成新 hash 与新
@@ -60,7 +65,7 @@ scripts/run_retrieval_eval.py \
 当前冻结 fixture baseline：
 
 ```text
-baselines/retrieval-hunan-2025-v0.3.0-draft.rerank-off.fixture.json
+baselines/retrieval-hunan-2025-v0.4.0-draft.rerank-off.fixture.json
 ```
 
 baseline 记录 dataset SHA、code identity、model route、price table、verifier、

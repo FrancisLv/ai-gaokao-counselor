@@ -35,14 +35,14 @@ DEFAULT_DATASET = (
     ROOT
     / "data"
     / "golden"
-    / "retrieval-hunan-2025-v0.3.0-draft"
+    / "retrieval-hunan-2025-v0.4.0-draft"
 )
 DEFAULT_OUTPUT = (
     ROOT
     / "data"
     / "golden"
     / "baselines"
-    / "retrieval-hunan-2025-v0.3.0-draft.rerank-off.fixture.json"
+    / "retrieval-hunan-2025-v0.4.0-draft.rerank-off.fixture.json"
 )
 SOURCE_FILES = (
     "services/orchestrator/eval/retrieval_eval.py",
@@ -351,6 +351,7 @@ def main():
             {
                 "eval_run_id": baseline["eval_run_id"],
                 "gate_status": baseline["gate_status"],
+                "skipped_case_count": baseline["skipped_case_count"],
                 "output": str(args.output),
             },
             ensure_ascii=False,
