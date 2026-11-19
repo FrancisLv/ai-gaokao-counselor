@@ -303,7 +303,7 @@ func RegisterRunEventStream(server *khttp.Server, service *Service, options Even
 			case event := <-events:
 				data, marshalErr := protojson.Marshal(event)
 				if marshalErr != nil {
-					return marshalErr
+					return nil
 				}
 				if _, writeErr := fmt.Fprintf(
 					writer,
@@ -312,21 +312,21 @@ func RegisterRunEventStream(server *khttp.Server, service *Service, options Even
 					event.GetType().String(),
 					data,
 				); writeErr != nil {
-					return writeErr
+					return nil
 				}
 				flusher.Flush()
 			case recvErr := <-streamErr:
 				if recvErr == io.EOF {
 					return nil
 				}
-				return recvErr
+				return nil
 			case <-ticker.C:
 				if _, writeErr := io.WriteString(writer, ": heartbeat\n\n"); writeErr != nil {
-					return writeErr
+					return nil
 				}
 				flusher.Flush()
 			case <-ctx.Done():
-				return ctx.Err()
+				return nil
 			}
 		}
 	})

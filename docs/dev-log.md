@@ -934,3 +934,29 @@ sqlc 的 `:many` 先收集类型化结果 slice，再映射领域对象，相较
 
 - 开发期仍可用 `x-principal-id` 注入 principal；公网部署必须替换为真实认证上下文。
 - 本次只提供前端验收所需传输契约，不实现 M4 检索、资格规则或正式报告。
+
+## 29. M2/M3 Vue 3 验收控制台
+
+**日期与范围**：2026-11-19。新增独立 Vue 3 + Vite + TypeScript 前端验收页，只通过 gateway 验证 M2/M3。
+
+### 实现要点
+
+- 结构化画像表单提交到 `POST /v1/plans`，页面展示 runId、sessionId、state、stage、releaseId、stateVersion 和 expiresAt。
+- `GET /v1/runs/{run_id}` 用于 URL/sessionStorage 刷新恢复；SSE 使用 fetch ReadableStream，以便携带 `x-principal-id`，不使用无法设置自定义 header 的原生 EventSource。
+- SSE 事件按 eventSeq 去重排序，忽略 heartbeat，断线后使用最后消费游标作为 `after_event_seq` 重连。
+- PROFILE_CONFIRM interrupt 展示画像字段、DEFAULT 批次、profileVersion、interruptId 和 stateVersion；确认按钮在请求期间禁用并复用同一幂等键。
+- SUCCEEDED 展示 ALGORITHM_PREVIEW、位次/百分位、冲稳保候选、AuditBasis、剔除原因、优化志愿表、验证摘要、未核验条件、风险提示和免责声明。
+- 前端显式标注“仅用于内部受控验证”和“不得作为正式志愿方案”；失败、过期、取消和未认证均展示稳定状态。
+- 候选组各展示前 12 条并标出完整总数，避免数千候选导致页面不可用；完整数据仍保存在不可变 result version。
+
+### 测试
+
+- Vitest：10 项页面行为，覆盖提交、URL 恢复、画像确认、双击保护、SSE 去重/heartbeat/重连、preview、失败、取消终态和未认证。
+- Playwright：真实 Vue 页面路由验收画像确认到 preview。
+- 使用真实 gateway + orchestrator + svc-algo + 临时 PostgreSQL 数据副本完成浏览器 happy path：`WAITING_HITL → SUCCEEDED`，浏览器无 console/page error。
+- `npm test`、`npm run build`、`npm run e2e` 通过。
+
+### 边界
+
+- 开发 principal 来自 `VITE_PRINCIPAL_ID`；公网部署必须换为真实认证。
+- 前端不直连 orchestrator，不实现 M4 检索、资格规则或正式报告。
