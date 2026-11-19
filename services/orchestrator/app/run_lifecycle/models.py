@@ -139,6 +139,7 @@ class PolicyEvidencePayload(TypedDict, total=False):
     rerank_enabled: bool
     rerank_model: str | None
     rerank_config_version: str | None
+    rerank_timeout_ms: int | None
     evidence: list[PolicyEvidenceItemPayload]
 
 

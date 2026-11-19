@@ -21,6 +21,36 @@ class FakePolicyRetriever:
 
 
 class PolicyQaLifecycleTests(RunLifecyclePostgresTest):
+    async def test_policy_qa_rejects_a_profile_only_input(self):
+        from app.run_lifecycle import (
+            RunLifecycle,
+            RunLifecycleError,
+            StructuredProfileInput,
+            SubmitRunCommand,
+        )
+
+        lifecycle = RunLifecycle(self.dsn)
+        self.addAsyncCleanup(lifecycle.close)
+        with self.assertRaises(RunLifecycleError) as raised:
+            await lifecycle.SubmitRun(
+                SubmitRunCommand(
+                    principal_id="principal-policy",
+                    session_id=None,
+                    task_kind="POLICY_QA",
+                    input=StructuredProfileInput(
+                        province="湖南",
+                        application_year=2025,
+                        category="物理类",
+                        batch="本科批",
+                    ),
+                    idempotency_key="policy-qa-wrong-input",
+                )
+            )
+        self.assertEqual(
+            raised.exception.reason,
+            "RETRIEVAL_SCOPE_INVALID",
+        )
+
     async def test_policy_qa_rejects_an_unpublished_year_before_creating_a_run(self):
         from app.run_lifecycle import (
             PolicyQaInput,

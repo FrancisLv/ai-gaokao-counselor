@@ -110,6 +110,22 @@ class RunLifecycle:
         )
 
     async def SubmitRun(self, command: SubmitRunCommand) -> RunReceipt:
+        if command.task_kind == "POLICY_QA" and not isinstance(
+            command.input,
+            PolicyQaInput,
+        ):
+            raise RunLifecycleError(
+                "RETRIEVAL_SCOPE_INVALID",
+                "POLICY_QA requires PolicyQaInput",
+            )
+        if command.task_kind == "GENERATE_PLAN" and not isinstance(
+            command.input,
+            StructuredProfileInput,
+        ):
+            raise RunLifecycleError(
+                "PROFILE_UNSUPPORTED_INPUT",
+                "GENERATE_PLAN requires StructuredProfileInput",
+            )
         if isinstance(command.input, PolicyQaInput):
             if not command.input.query_text.strip():
                 raise RunLifecycleError("RETRIEVAL_QUERY_REQUIRED")
@@ -1289,6 +1305,7 @@ class RunLifecycle:
             "rerank_config_version": (
                 result.diagnostics.rerank_config_version
             ),
+            "rerank_timeout_ms": result.diagnostics.rerank_timeout_ms,
             "evidence": [
                 {
                     "evidence_id": item.evidence_id,

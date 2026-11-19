@@ -195,6 +195,12 @@ export function useRunLifecycle() {
       sessionStorage.getItem("verification.runId");
     if (!runId) return;
     await refreshRun(runId);
+    if (
+      run.value &&
+      (run.value.state === "QUEUED" || run.value.state === "RUNNING")
+    ) {
+      void connectEvents(runId);
+    }
   }
 
   async function connectEvents(runId: string): Promise<void> {

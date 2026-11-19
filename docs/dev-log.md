@@ -1292,6 +1292,11 @@ rerank 模型质量。
   locator/source 完整。
 - acceptance seed 通过真实 `RetrievePolicy`：转专业与全国资助政策返回 FOUND，火星
   查询返回 NO_EVIDENCE。
+- 复核后验收 seed 改为按 seed version + application year 派生内容哈希 `release_id`，
+  已存在时只复用不删除；年度章程使用当前验收年的有效区间，重复执行不会改写已发布
+  release，也不会因 run 外键失败。
+- Evidence wire 补齐 `evidence_type/content_sha256/created_at/producer_version` 和
+  `rerank_timeout_ms`；前端仅允许 http/https 来源链接；运行中任务刷新后会恢复 SSE。
 
 ### 边界
 

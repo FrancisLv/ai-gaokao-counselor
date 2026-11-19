@@ -285,6 +285,7 @@ message PolicyEvidenceResult {
   string rerank_model = 10;
   string rerank_config_version = 11;
   repeated PolicyEvidenceItem evidence = 12;
+  int32 rerank_timeout_ms = 13;
 }
 
 message RunViewReply {

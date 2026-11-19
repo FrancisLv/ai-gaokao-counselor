@@ -11,10 +11,10 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg import conninfo
 
-RELEASE_ID = "rel_m4a_frontend_acceptance"
 EMBEDDING_MODEL = "acceptance-keyword"
 INDEX_VERSION = "acceptance-index-v1"
 ACCEPTANCE_YEAR = datetime.now(ZoneInfo("Asia/Shanghai")).year
+SEED_VERSION = "m4a-frontend-v1"
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_MIGRATIONS = (
     "migrations/00_schema.sql",
@@ -58,6 +58,7 @@ def reset_schema(conn) -> None:
 def _insert_document(
     conn,
     *,
+    release_id: str,
     doc_id: str,
     title: str,
     document_type: str,
@@ -165,57 +166,47 @@ def _insert_document(
         )
         VALUES (%s, %s, %s)
         """,
-        (RELEASE_ID, doc_id, chunk_set_version),
+        (release_id, doc_id, chunk_set_version),
     )
 
 
 def seed(dsn: str, *, reset: bool = False) -> None:
-    document_ids = (
-        "doc_m4a_charter",
-        "doc_m4a_national_policy",
-        "doc_m4a_wrong_province",
-        "doc_m4a_expired",
+    release_id = "rel_m4a_ui_" + _sha256(
+        f"{SEED_VERSION}:{ACCEPTANCE_YEAR}"
+    )[:24]
+    doc_suffix = release_id.removeprefix("rel_m4a_ui_")
+    manifest = {
+        "purpose": "M4a frontend acceptance",
+        "seed_version": SEED_VERSION,
+        "application_year": ACCEPTANCE_YEAR,
+        "embedding_model": EMBEDDING_MODEL,
+        "index_version": INDEX_VERSION,
+    }
+    manifest_text = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
     with psycopg.connect(dsn) as conn:
         if reset:
             reset_schema(conn)
         with conn.transaction():
-            conn.execute(
-                "DELETE FROM release_policy_doc WHERE release_id = %s",
-                (RELEASE_ID,),
-            )
-            conn.execute(
-                "DELETE FROM release WHERE release_id = %s",
-                (RELEASE_ID,),
-            )
-            conn.execute(
-                "DELETE FROM policy_applicability WHERE doc_id = ANY(%s)",
-                (list(document_ids),),
-            )
-            conn.execute(
-                "DELETE FROM policy_chunk WHERE doc_id = ANY(%s)",
-                (list(document_ids),),
-            )
-            conn.execute(
-                "DELETE FROM policy_chunk_set WHERE doc_id = ANY(%s)",
-                (list(document_ids),),
-            )
-            conn.execute(
-                "DELETE FROM policy_doc WHERE id = ANY(%s)",
-                (list(document_ids),),
-            )
-
-            manifest = {
-                "purpose": "M4a frontend acceptance",
-                "embedding_model": EMBEDDING_MODEL,
-                "index_version": INDEX_VERSION,
-            }
-            manifest_text = json.dumps(
-                manifest,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
+            existing = conn.execute(
+                "SELECT status FROM release WHERE release_id = %s",
+                (release_id,),
+            ).fetchone()
+            if existing is not None:
+                if existing[0] != "PUBLISHED":
+                    raise SystemExit(
+                        f"验收 release {release_id} 已存在但状态为 {existing[0]}"
+                    )
+                print(f"release_id={release_id}")
+                print(f"application_year={ACCEPTANCE_YEAR}")
+                print("query_found=转专业政策是什么？")
+                print("query_national=全国学生资助政策")
+                print("query_no_evidence=火星基地招生政策")
+                return
             conn.execute(
                 """
                 INSERT INTO release (
@@ -225,7 +216,7 @@ def seed(dsn: str, *, reset: bool = False) -> None:
                 VALUES (%s, 'PUBLISHED', %s::jsonb, %s, %s, 60)
                 """,
                 (
-                    RELEASE_ID,
+                    release_id,
                     manifest_text,
                     _sha256(manifest_text),
                     datetime.now(timezone.utc),
@@ -238,7 +229,7 @@ def seed(dsn: str, *, reset: bool = False) -> None:
                 )
                 VALUES (%s, '湖南', %s, '物理类', '本科批')
                 """,
-                (RELEASE_ID, ACCEPTANCE_YEAR),
+                (release_id, ACCEPTANCE_YEAR),
             )
             conn.execute(
                 """
@@ -247,11 +238,12 @@ def seed(dsn: str, *, reset: bool = False) -> None:
                 )
                 VALUES (%s, %s, 1024, %s)
                 """,
-                (RELEASE_ID, EMBEDDING_MODEL, INDEX_VERSION),
+                (release_id, EMBEDDING_MODEL, INDEX_VERSION),
             )
             _insert_document(
                 conn,
-                doc_id="doc_m4a_charter",
+                release_id=release_id,
+                doc_id=f"doc_m4a_charter_{doc_suffix}",
                 title=f"湖南测试大学{ACCEPTANCE_YEAR}年招生章程",
                 document_type="charter",
                 issuer_type="university",
@@ -268,7 +260,8 @@ def seed(dsn: str, *, reset: bool = False) -> None:
             )
             _insert_document(
                 conn,
-                doc_id="doc_m4a_national_policy",
+                release_id=release_id,
+                doc_id=f"doc_m4a_national_policy_{doc_suffix}",
                 title="全国学生资助政策",
                 document_type="policy",
                 issuer_type="national",
@@ -285,7 +278,8 @@ def seed(dsn: str, *, reset: bool = False) -> None:
             )
             _insert_document(
                 conn,
-                doc_id="doc_m4a_wrong_province",
+                release_id=release_id,
+                doc_id=f"doc_m4a_wrong_province_{doc_suffix}",
                 title=f"湖北省测试大学{ACCEPTANCE_YEAR}年招生章程",
                 document_type="charter",
                 issuer_type="university",
@@ -299,7 +293,8 @@ def seed(dsn: str, *, reset: bool = False) -> None:
             )
             _insert_document(
                 conn,
-                doc_id="doc_m4a_expired",
+                release_id=release_id,
+                doc_id=f"doc_m4a_expired_{doc_suffix}",
                 title=f"湖南测试大学{ACCEPTANCE_YEAR - 1}年招生章程",
                 document_type="charter",
                 issuer_type="university",
@@ -312,7 +307,7 @@ def seed(dsn: str, *, reset: bool = False) -> None:
                 text=f"{ACCEPTANCE_YEAR - 1}年转专业政策已经失效。",
                 effective_year=ACCEPTANCE_YEAR - 1,
             )
-    print(f"release_id={RELEASE_ID}")
+    print(f"release_id={release_id}")
     print(f"application_year={ACCEPTANCE_YEAR}")
     print("query_found=转专业政策是什么？")
     print("query_national=全国学生资助政策")

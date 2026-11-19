@@ -101,14 +101,6 @@ const statusMessage = computed(() => {
       return "已找到可核验的文档证据。";
     case "NO_EVIDENCE":
       return "未检索到可靠证据。这不代表没有相关政策限制。";
-    case "UNSUPPORTED_SCOPE":
-      return "当前适用范围不受支持，请修正省份、报考年、科类或批次。";
-    case "RELEASE_UNAVAILABLE":
-      return "当前发布版本不可用，请稍后重试或联系管理员。";
-    case "RETRIEVAL_UNAVAILABLE":
-      return "检索服务暂不可用，本次没有生成可靠证据。";
-    case "INDEX_MODEL_MISMATCH":
-      return "检索索引与查询模型版本不一致，当前不能返回证据。";
     default:
       return `检索未完成：${props.result.retrievalStatus}`;
   }

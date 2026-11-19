@@ -122,6 +122,7 @@ export interface PolicyEvidenceResult {
   rerankEnabled: boolean;
   rerankModel?: string;
   rerankConfigVersion?: string;
+  rerankTimeoutMs?: number;
   evidence: PolicyEvidenceItem[];
 }
 

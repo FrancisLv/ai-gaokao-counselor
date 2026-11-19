@@ -105,9 +105,9 @@ class RunLifecycleRetrievalBindingTests(RunLifecyclePostgresTest):
 
     async def test_policy_qa_binding_uses_trusted_task_scope(self):
         from app.run_lifecycle import (
+            PolicyQaInput,
             RunLifecycle,
             RunLifecycleError,
-            StructuredProfileInput,
             SubmitRunCommand,
         )
 
@@ -119,7 +119,8 @@ class RunLifecycleRetrievalBindingTests(RunLifecyclePostgresTest):
                 principal_id="principal-policy",
                 session_id=None,
                 task_kind="POLICY_QA",
-                input=StructuredProfileInput(
+                input=PolicyQaInput(
+                    query_text="转专业政策是什么？",
                     province="湖南",
                     application_year=2025,
                     category="不限",

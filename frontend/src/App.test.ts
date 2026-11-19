@@ -101,6 +101,40 @@ describe("Run verification console", () => {
     wrapper.unmount();
   });
 
+  it("resumes SSE for a running run restored from the URL", async () => {
+    vi.stubEnv("VITE_PRINCIPAL_ID", "principal-policy");
+    history.replaceState({}, "", "/?run=run-running");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/v1/runs/run-running" && !init?.method) {
+        return jsonResponse({
+          ...policyEvidenceRunView(),
+          state: "RUNNING",
+          stage: "RETRIEVING",
+          policyEvidence: undefined,
+          result: undefined,
+        });
+      }
+      if (url.startsWith("/v1/runs/run-running/events")) {
+        return new Response("", {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      throw new Error(`unexpected request: ${init?.method ?? "GET"} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).startsWith("/v1/runs/run-running/events"),
+      ),
+    ).toBe(true);
+    wrapper.unmount();
+  });
+
   it("renders policy evidence as untrusted plain text", async () => {
     vi.stubEnv("VITE_PRINCIPAL_ID", "principal-policy");
     history.replaceState({}, "", "/?run=run-policy");

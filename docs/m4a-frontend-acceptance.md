@@ -26,7 +26,7 @@ make m4a-acceptance-seed \
 
 seed 会创建：
 
-- `PUBLISHED` release：`rel_m4a_frontend_acceptance`
+- 内容哈希派生的 `PUBLISHED` release（命令会打印具体 `release_id`）
 - 湖南当前验收年物理类本科批院校章程
 - 全国长期学生资助政策
 - 跨省干扰章程
@@ -104,7 +104,7 @@ http://127.0.0.1:5173
 - 标题包含当前验收年。
 - 章节为“第二章 > 政策说明”。
 - 原文为纯文本，不执行 HTML。
-- 页面显示 release `rel_m4a_frontend_acceptance`。
+- 页面显示 seed 输出的 `release_id`。
 - excerpt hash 显示前 14 位，并可展开完整 hash。
 - 字符定位为 `0–...`。
 - “查看原始来源”在新窗口打开。
