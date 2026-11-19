@@ -569,4 +569,3 @@ class EligibilityRunLifecycleTests(RunLifecyclePostgresTest):
         finally:
             await events.aclose()
         self.fail("run 缺少 ERROR 事件")
-
