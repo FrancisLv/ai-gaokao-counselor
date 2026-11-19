@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 import hashlib
 import os
 from pathlib import Path
+import time
 from uuid import uuid4
 
 import psycopg
@@ -124,6 +125,36 @@ class FailingEmbedder(DeterministicEmbedder):
         raise RuntimeError("deterministic embedding outage")
 
 
+class DeterministicReranker:
+    model_name = "deterministic-reranker"
+    config_version = "rerank-config-v1"
+
+    def __init__(self, order=None):
+        self.order = order
+        self.calls = []
+
+    def rerank(self, query_text, candidates):
+        inputs = tuple(candidates)
+        self.calls.append((query_text, inputs))
+        if callable(self.order):
+            return self.order(inputs)
+        if self.order is not None:
+            return list(self.order)
+        return [chunk_id for chunk_id, _text in reversed(inputs)]
+
+
+class SlowReranker(DeterministicReranker):
+    def rerank(self, query_text, candidates):
+        self.calls.append((query_text, tuple(candidates)))
+        time.sleep(0.05)
+        return [chunk_id for chunk_id, _text in reversed(candidates)]
+
+
+class UnavailableReranker:
+    model_name = "deterministic-reranker"
+    config_version = "rerank-config-v1"
+
+
 class PolicyRetrievalTests(unittest.TestCase):
     def query(self, **changes) -> PolicyRetrievalQuery:
         values = {
@@ -171,6 +202,38 @@ class PolicyRetrievalTests(unittest.TestCase):
             "valid_to": date(2025, 12, 31),
             "candidate_count": 2,
         }
+
+    def hybrid_connection(
+        self,
+        *,
+        rerank_enabled=None,
+        rerank_model=None,
+        rerank_config_version=None,
+        rerank_timeout_ms=None,
+        vector_rows=None,
+        keyword_rows=None,
+    ):
+        release = {"status": "PUBLISHED", "revoked_at": None}
+        if rerank_enabled is not None:
+            release.update(
+                {
+                    "rerank_enabled": rerank_enabled,
+                    "rerank_model": rerank_model,
+                    "rerank_config_version": rerank_config_version,
+                    "rerank_timeout_ms": rerank_timeout_ms,
+                }
+            )
+        return FakeConnection(
+            release,
+            {
+                "embedding_model": "deterministic-test",
+                "embedding_dim": 1024,
+                "index_version": "idx-v1",
+            },
+            [],
+            list(vector_rows or ()),
+            list(keyword_rows or ()),
+        )
 
     def test_unpublished_release_is_unavailable(self):
         result = RetrievePolicy(
@@ -415,6 +478,323 @@ class PolicyRetrievalTests(unittest.TestCase):
         self.assertEqual(result.diagnostics.vector_candidates, 2)
         self.assertEqual(result.diagnostics.keyword_candidates, 2)
         self.assertIsNone(result.diagnostics.degraded_reason)
+
+    def test_hybrid_rerank_reorders_only_the_rrf_pool_and_reports_identity(self):
+        dual_rank_one_and_two = self.evidence_row("chunk-b")
+        vector_only_rank_two = self.evidence_row("chunk-a")
+        keyword_only_rank_one = self.evidence_row("chunk-c")
+        baseline = RetrievePolicy(
+            self.hybrid_connection(
+                vector_rows=[dual_rank_one_and_two, vector_only_rank_two],
+                keyword_rows=[keyword_only_rank_one, dual_rank_one_and_two],
+            ),
+            embedder=DeterministicEmbedder(),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(self.query(mode="hybrid", top_k=3))
+        reranker = DeterministicReranker()
+        result = RetrievePolicy(
+            FakeConnection(
+                {
+                    "status": "PUBLISHED",
+                    "revoked_at": None,
+                    "rerank_enabled": True,
+                    "rerank_model": "deterministic-reranker",
+                    "rerank_config_version": "rerank-config-v1",
+                    "rerank_timeout_ms": 100,
+                },
+                {
+                    "embedding_model": "deterministic-test",
+                    "embedding_dim": 1024,
+                    "index_version": "idx-v1",
+                },
+                [],
+                [dual_rank_one_and_two, vector_only_rank_two],
+                [keyword_only_rank_one, dual_rank_one_and_two],
+            ),
+            embedder=DeterministicEmbedder(),
+            reranker=reranker,
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(self.query(mode="hybrid", top_k=3))
+
+        self.assertEqual(result.status, "FOUND")
+        self.assertEqual(
+            [item.document.chunk_id for item in result.evidence],
+            ["chunk-a", "chunk-c", "chunk-b"],
+        )
+        self.assertEqual(
+            reranker.calls[0][1],
+            (
+                ("chunk-b", dual_rank_one_and_two["text"]),
+                ("chunk-c", keyword_only_rank_one["text"]),
+                ("chunk-a", vector_only_rank_two["text"]),
+            ),
+        )
+        baseline_identity = {
+            item.document.chunk_id: (
+                item.evidence_id,
+                item.content_sha256,
+                item.document.excerpt,
+                item.document.char_start,
+                item.document.char_end,
+                item.document.applicability,
+            )
+            for item in baseline.evidence
+        }
+        reranked_identity = {
+            item.document.chunk_id: (
+                item.evidence_id,
+                item.content_sha256,
+                item.document.excerpt,
+                item.document.char_start,
+                item.document.char_end,
+                item.document.applicability,
+            )
+            for item in result.evidence
+        }
+        self.assertEqual(reranked_identity, baseline_identity)
+        self.assertTrue(result.diagnostics.rerank_enabled)
+        self.assertEqual(
+            result.diagnostics.rerank_model,
+            "deterministic-reranker",
+        )
+        self.assertEqual(
+            result.diagnostics.rerank_config_version,
+            "rerank-config-v1",
+        )
+        self.assertEqual(result.diagnostics.rerank_timeout_ms, 100)
+        self.assertIsNone(result.diagnostics.degraded_reason)
+
+    def test_hybrid_rerank_is_off_unless_release_explicitly_enables_it(self):
+        dual = self.evidence_row("chunk-b")
+        vector_only = self.evidence_row("chunk-a")
+        keyword_only = self.evidence_row("chunk-c")
+        reranker = DeterministicReranker()
+
+        for rerank_enabled in (None, False):
+            with self.subTest(rerank_enabled=rerank_enabled):
+                result = RetrievePolicy(
+                    self.hybrid_connection(
+                        rerank_enabled=rerank_enabled,
+                        rerank_model=(
+                            "deterministic-reranker"
+                            if rerank_enabled is False
+                            else None
+                        ),
+                        rerank_config_version=(
+                            "rerank-config-v1"
+                            if rerank_enabled is False
+                            else None
+                        ),
+                        rerank_timeout_ms=(
+                            100 if rerank_enabled is False else None
+                        ),
+                        vector_rows=[dual, vector_only],
+                        keyword_rows=[keyword_only, dual],
+                    ),
+                    embedder=DeterministicEmbedder(),
+                    reranker=reranker,
+                    today=lambda: date(2025, 11, 19),
+                ).retrieve(self.query(mode="hybrid"))
+
+                self.assertEqual(result.status, "FOUND")
+                self.assertEqual(
+                    [item.document.chunk_id for item in result.evidence],
+                    ["chunk-b", "chunk-c", "chunk-a"],
+                )
+                self.assertFalse(result.diagnostics.rerank_enabled)
+                self.assertIsNone(result.diagnostics.degraded_reason)
+        self.assertEqual(reranker.calls, [])
+
+    def test_hybrid_rerank_timeout_preserves_the_complete_rrf_evidence(self):
+        dual = self.evidence_row("chunk-b")
+        vector_only = self.evidence_row("chunk-a")
+        keyword_only = self.evidence_row("chunk-c")
+        baseline = RetrievePolicy(
+            self.hybrid_connection(
+                vector_rows=[dual, vector_only],
+                keyword_rows=[keyword_only, dual],
+            ),
+            embedder=DeterministicEmbedder(),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(self.query(mode="hybrid"))
+        result = RetrievePolicy(
+            self.hybrid_connection(
+                rerank_enabled=True,
+                rerank_model="deterministic-reranker",
+                rerank_config_version="rerank-config-v1",
+                rerank_timeout_ms=5,
+                vector_rows=[dual, vector_only],
+                keyword_rows=[keyword_only, dual],
+            ),
+            embedder=DeterministicEmbedder(),
+            reranker=SlowReranker(),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(self.query(mode="hybrid"))
+
+        self.assertEqual(result.status, "FOUND")
+        self.assertEqual(
+            [item.document.chunk_id for item in result.evidence],
+            ["chunk-b", "chunk-c", "chunk-a"],
+        )
+        self.assertEqual(
+            [item.evidence_id for item in result.evidence],
+            [item.evidence_id for item in baseline.evidence],
+        )
+        self.assertEqual(
+            result.diagnostics.degraded_reason,
+            "RERANK_TIMEOUT",
+        )
+
+    def test_hybrid_rerank_failure_preserves_the_complete_rrf_evidence(self):
+        dual = self.evidence_row("chunk-b")
+        vector_only = self.evidence_row("chunk-a")
+        keyword_only = self.evidence_row("chunk-c")
+
+        def fail(_inputs):
+            raise RuntimeError("deterministic rerank outage")
+
+        result = RetrievePolicy(
+            self.hybrid_connection(
+                rerank_enabled=True,
+                rerank_model="deterministic-reranker",
+                rerank_config_version="rerank-config-v1",
+                rerank_timeout_ms=100,
+                vector_rows=[dual, vector_only],
+                keyword_rows=[keyword_only, dual],
+            ),
+            embedder=DeterministicEmbedder(),
+            reranker=DeterministicReranker(order=fail),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(self.query(mode="hybrid"))
+
+        self.assertEqual(
+            [item.document.chunk_id for item in result.evidence],
+            ["chunk-b", "chunk-c", "chunk-a"],
+        )
+        self.assertEqual(
+            result.diagnostics.degraded_reason,
+            "RERANK_FAILED",
+        )
+
+    def test_invalid_rerank_orders_are_rejected_without_partial_application(self):
+        dual = self.evidence_row("chunk-b")
+        vector_only = self.evidence_row("chunk-a")
+        keyword_only = self.evidence_row("chunk-c")
+        rrf_ids = ["chunk-b", "chunk-c", "chunk-a"]
+        baseline = RetrievePolicy(
+            self.hybrid_connection(
+                vector_rows=[dual, vector_only],
+                keyword_rows=[keyword_only, dual],
+            ),
+            embedder=DeterministicEmbedder(),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(self.query(mode="hybrid"))
+        invalid_orders = {
+            "duplicate": ["chunk-b", "chunk-b", "chunk-a"],
+            "unknown": ["chunk-outside", "chunk-c", "chunk-a"],
+            "missing": ["chunk-b", "chunk-c"],
+        }
+
+        for label, invalid_order in invalid_orders.items():
+            with self.subTest(label=label):
+                result = RetrievePolicy(
+                    self.hybrid_connection(
+                        rerank_enabled=True,
+                        rerank_model="deterministic-reranker",
+                        rerank_config_version="rerank-config-v1",
+                        rerank_timeout_ms=100,
+                        vector_rows=[dual, vector_only],
+                        keyword_rows=[keyword_only, dual],
+                    ),
+                    embedder=DeterministicEmbedder(),
+                    reranker=DeterministicReranker(order=invalid_order),
+                    today=lambda: date(2025, 11, 19),
+                ).retrieve(self.query(mode="hybrid"))
+
+                self.assertEqual(
+                    [item.document.chunk_id for item in result.evidence],
+                    rrf_ids,
+                )
+                self.assertEqual(
+                    [item.evidence_id for item in result.evidence],
+                    [item.evidence_id for item in baseline.evidence],
+                )
+                self.assertEqual(
+                    result.diagnostics.degraded_reason,
+                    "RERANK_INVALID_OUTPUT",
+                )
+
+    def test_hybrid_rerank_identity_mismatch_uses_rrf_without_calling_model(self):
+        dual = self.evidence_row("chunk-b")
+        reranker = DeterministicReranker()
+        result = RetrievePolicy(
+            self.hybrid_connection(
+                rerank_enabled=True,
+                rerank_model="different-reranker",
+                rerank_config_version="rerank-config-v1",
+                rerank_timeout_ms=100,
+                vector_rows=[dual],
+                keyword_rows=[dual],
+            ),
+            embedder=DeterministicEmbedder(),
+            reranker=reranker,
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(self.query(mode="hybrid"))
+
+        self.assertEqual(
+            [item.document.chunk_id for item in result.evidence],
+            ["chunk-b"],
+        )
+        self.assertEqual(
+            result.diagnostics.degraded_reason,
+            "RERANK_UNAVAILABLE",
+        )
+        self.assertEqual(reranker.calls, [])
+
+    def test_hybrid_rerank_adapter_without_callable_falls_back_to_rrf(self):
+        dual = self.evidence_row("chunk-b")
+        result = RetrievePolicy(
+            self.hybrid_connection(
+                rerank_enabled=True,
+                rerank_model="deterministic-reranker",
+                rerank_config_version="rerank-config-v1",
+                rerank_timeout_ms=100,
+                vector_rows=[dual],
+                keyword_rows=[dual],
+            ),
+            embedder=DeterministicEmbedder(),
+            reranker=UnavailableReranker(),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(self.query(mode="hybrid"))
+
+        self.assertEqual(
+            [item.document.chunk_id for item in result.evidence],
+            ["chunk-b"],
+        )
+        self.assertEqual(
+            result.diagnostics.degraded_reason,
+            "RERANK_UNAVAILABLE",
+        )
+
+    def test_enabled_rerank_does_not_invoke_on_an_empty_rrf_pool(self):
+        reranker = DeterministicReranker()
+        result = RetrievePolicy(
+            self.hybrid_connection(
+                rerank_enabled=True,
+                rerank_model="deterministic-reranker",
+                rerank_config_version="rerank-config-v1",
+                rerank_timeout_ms=100,
+            ),
+            embedder=DeterministicEmbedder(),
+            reranker=reranker,
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(self.query(mode="hybrid"))
+
+        self.assertEqual(result.status, "NO_EVIDENCE")
+        self.assertEqual(result.evidence, ())
+        self.assertTrue(result.diagnostics.rerank_enabled)
+        self.assertIsNone(result.diagnostics.degraded_reason)
+        self.assertEqual(reranker.calls, [])
 
     def test_hybrid_equal_single_channel_scores_break_ties_by_chunk_id(self):
         vector_only_chunk_b = self.evidence_row("chunk-b")
@@ -684,6 +1064,7 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             "migrations/08_release_and_run_foundation.sql",
             "migrations/15_policy_retrieval_release_scope.sql",
             "migrations/16_policy_vector_release_identity.sql",
+            "migrations/17_policy_rerank_release_identity.sql",
         ):
             self._apply_sql_file(migration)
 
@@ -805,6 +1186,25 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             VALUES (%s, %s, %s, %s)
             """,
             (release_id, embedding_model, embedding_dim, index_version),
+        )
+
+    def _seed_release_rerank(
+        self,
+        release_id,
+        *,
+        enabled=True,
+        model_name="deterministic-reranker",
+        config_version="rerank-config-v1",
+        timeout_ms=100,
+    ):
+        self.conn.execute(
+            """
+            INSERT INTO release_policy_rerank (
+                release_id, enabled, model_name, config_version, timeout_ms
+            )
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (release_id, enabled, model_name, config_version, timeout_ms),
         )
 
     @staticmethod
@@ -1132,6 +1532,60 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             [item.evidence_id for item in result.evidence],
             [item.evidence_id for item in repeated.evidence],
         )
+
+    def test_hybrid_rerank_uses_release_config_and_only_reorders_rrf_pool(self):
+        release_id = self._seed_release("rel-hybrid-rerank-test")
+        self._seed_policy_document(release_id, "doc-a", embedding_axis=0)
+        self._seed_policy_document(release_id, "doc-b", embedding_axis=1)
+        self._seed_policy_document(
+            release_id,
+            "doc-wrong-province",
+            regions=("湖北",),
+            embedding_axis=0,
+        )
+        self._seed_release_rerank(release_id)
+        reranker = DeterministicReranker()
+        service = RetrievePolicy(
+            self.conn,
+            embedder=DeterministicEmbedder(vector=[1.0] + [0.0] * 1023),
+            reranker=reranker,
+            today=lambda: date(2025, 11, 19),
+        )
+        query = PolicyRetrievalQuery(
+            principal_id="principal-test",
+            query_text="转专业",
+            scope=ApplicabilityScope("湖南", 2025, "物理类", "本科批"),
+            release_id=release_id,
+            mode="hybrid",
+        )
+
+        first = service.retrieve(query)
+        second = service.retrieve(query)
+
+        self.assertEqual(first.status, "FOUND")
+        self.assertEqual(
+            [item.document.chunk_id for item in first.evidence],
+            ["doc-b-chunk", "doc-a-chunk"],
+        )
+        self.assertEqual(
+            [item.evidence_id for item in first.evidence],
+            [item.evidence_id for item in second.evidence],
+        )
+        self.assertEqual(
+            [chunk_id for chunk_id, _text in reranker.calls[0][1]],
+            ["doc-a-chunk", "doc-b-chunk"],
+        )
+        self.assertTrue(first.diagnostics.rerank_enabled)
+        self.assertEqual(
+            first.diagnostics.rerank_model,
+            "deterministic-reranker",
+        )
+        self.assertEqual(
+            first.diagnostics.rerank_config_version,
+            "rerank-config-v1",
+        )
+        self.assertEqual(first.diagnostics.rerank_timeout_ms, 100)
+        self.assertIsNone(first.diagnostics.degraded_reason)
 
     def test_hybrid_without_embedding_model_degrades_to_keyword_evidence(self):
         release_id = self._seed_release("rel-hybrid-degraded-test")

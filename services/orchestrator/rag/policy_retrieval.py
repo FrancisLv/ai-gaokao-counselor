@@ -1,6 +1,7 @@
 """Release-bound 政策文档检索的唯一公开 seam。"""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from datetime import date, datetime
 import hashlib
@@ -136,6 +137,9 @@ class PolicyRetrievalDiagnostics:
     vector_candidates: int = 0
     keyword_candidates: int = 0
     rerank_enabled: bool = False
+    rerank_model: str | None = None
+    rerank_config_version: str | None = None
+    rerank_timeout_ms: int | None = None
     degraded_reason: str | None = None
 
 
@@ -206,9 +210,10 @@ class RetrievePolicy:
     _SUPPORTED_CATEGORIES = frozenset({"物理类", "历史类", "不限"})
     _SUPPORTED_BATCHES = frozenset({"本科批", "不限"})
 
-    def __init__(self, conn, embedder=None, today=None) -> None:
+    def __init__(self, conn, embedder=None, today=None, reranker=None) -> None:
         self._conn = conn
         self._embedder = embedder
+        self._reranker = reranker
         self._today = today or (
             lambda: datetime.now(ZoneInfo("Asia/Shanghai")).date()
         )
@@ -217,7 +222,19 @@ class RetrievePolicy:
         try:
             with self._conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
-                    "SELECT status, revoked_at FROM release WHERE release_id = %s",
+                    """
+                    SELECT
+                        r.status,
+                        r.revoked_at,
+                        rr.enabled AS rerank_enabled,
+                        rr.model_name AS rerank_model,
+                        rr.config_version AS rerank_config_version,
+                        rr.timeout_ms AS rerank_timeout_ms
+                    FROM release r
+                    LEFT JOIN release_policy_rerank rr
+                      ON rr.release_id = r.release_id
+                    WHERE r.release_id = %s
+                    """,
                     (query.release_id,),
                 )
                 release = cur.fetchone()
@@ -250,6 +267,17 @@ class RetrievePolicy:
                 release_id=query.release_id,
             )
 
+        rerank_enabled = (
+            query.mode == "hybrid"
+            and bool(release.get("rerank_enabled", False))
+        )
+        rerank_model = release.get("rerank_model") if rerank_enabled else None
+        rerank_config_version = (
+            release.get("rerank_config_version") if rerank_enabled else None
+        )
+        rerank_timeout_ms = (
+            release.get("rerank_timeout_ms") if rerank_enabled else None
+        )
         vector_count = 0
         keyword_count = 0
         degraded_reason = None
@@ -300,6 +328,15 @@ class RetrievePolicy:
                 )
 
             rows = self._rrf_fuse(vector_rows, keyword_rows)
+            if rows and rerank_enabled:
+                rows, degraded_reason = self._rerank_pool(
+                    query=query,
+                    rows=rows,
+                    model_name=rerank_model,
+                    config_version=rerank_config_version,
+                    timeout_ms=rerank_timeout_ms,
+                    retrieval_degraded_reason=degraded_reason,
+                )
         else:
             raise PolicyRetrievalError(
                 "MODE_UNSUPPORTED",
@@ -313,6 +350,10 @@ class RetrievePolicy:
                 diagnostics=PolicyRetrievalDiagnostics(
                     vector_candidates=vector_count,
                     keyword_candidates=keyword_count,
+                    rerank_enabled=rerank_enabled,
+                    rerank_model=rerank_model,
+                    rerank_config_version=rerank_config_version,
+                    rerank_timeout_ms=rerank_timeout_ms,
                     degraded_reason=degraded_reason,
                 ),
             )
@@ -342,6 +383,10 @@ class RetrievePolicy:
             diagnostics=PolicyRetrievalDiagnostics(
                 vector_candidates=vector_count,
                 keyword_candidates=keyword_count,
+                rerank_enabled=rerank_enabled,
+                rerank_model=rerank_model,
+                rerank_config_version=rerank_config_version,
+                rerank_timeout_ms=rerank_timeout_ms,
                 degraded_reason=degraded_reason,
             ),
         )
@@ -369,6 +414,64 @@ class RetrievePolicy:
             chunk_id,
         ))
         return [fused[chunk_id] for chunk_id in ordered_ids]
+
+    def _rerank_pool(
+        self,
+        *,
+        query: PolicyRetrievalQuery,
+        rows: list[dict],
+        model_name,
+        config_version,
+        timeout_ms,
+        retrieval_degraded_reason: str | None,
+    ) -> tuple[list[dict], str | None]:
+        reranker = self._reranker
+        if (
+            reranker is None
+            or not callable(getattr(reranker, "rerank", None))
+            or not isinstance(model_name, str)
+            or not model_name.strip()
+            or not isinstance(config_version, str)
+            or not config_version.strip()
+            or isinstance(timeout_ms, bool)
+            or not isinstance(timeout_ms, int)
+            or timeout_ms <= 0
+            or getattr(reranker, "model_name", None) != model_name
+            or getattr(reranker, "config_version", None) != config_version
+        ):
+            return rows, "RERANK_UNAVAILABLE"
+
+        candidates = tuple((row["chunk_id"], row["text"]) for row in rows)
+        executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="policy-rerank",
+        )
+        future = executor.submit(reranker.rerank, query.query_text, candidates)
+        try:
+            ordered_ids = list(
+                future.result(timeout=timeout_ms / 1000.0)
+            )
+        except FutureTimeoutError:
+            future.cancel()
+            return rows, "RERANK_TIMEOUT"
+        except Exception:
+            return rows, "RERANK_FAILED"
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        rrf_ids = [chunk_id for chunk_id, _text in candidates]
+        if (
+            not all(isinstance(chunk_id, str) for chunk_id in ordered_ids)
+            or len(ordered_ids) != len(rrf_ids)
+            or len(set(ordered_ids)) != len(ordered_ids)
+            or set(ordered_ids) != set(rrf_ids)
+        ):
+            return rows, "RERANK_INVALID_OUTPUT"
+
+        rows_by_id = {row["chunk_id"]: row for row in rows}
+        return [rows_by_id[chunk_id] for chunk_id in ordered_ids], (
+            retrieval_degraded_reason
+        )
 
     def _vector_candidates(
         self,
