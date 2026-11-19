@@ -8,6 +8,7 @@ import unittest
 
 from evidence import (
     Claim,
+    DerivedEvidence,
     DocumentApplicability,
     DocumentEvidence,
     EvidencePackage,
@@ -122,6 +123,103 @@ def document_package(
     )
 
 
+def derived_evidence(
+    *,
+    output_value=15860,
+    unit: str | None = "名",
+    sample_years=(2022, 2023, 2024),
+    precision: int | None = 0,
+) -> DerivedEvidence:
+    return DerivedEvidence(
+        operation="rank_convert",
+        algorithm="rank_conversion",
+        algorithm_version="rank-v1",
+        config_sha256="c" * 64,
+        input_snapshot_sha256="d" * 64,
+        profile_version="profile-v1",
+        release_id="rel-2025",
+        sample_years=sample_years,
+        output_field="rank",
+        output_value=output_value,
+        unit=unit,
+        precision=precision,
+        assumptions=("使用湖南省同科类一分一段表",),
+        warnings=("位次仅用于同科类比较",),
+    )
+
+
+def derived_ref(
+    evidence: DerivedEvidence,
+    *,
+    evidence_id: str = "ev-derived-rank",
+):
+    return EvidenceRef(
+        evidence_id=evidence_id,
+        evidence_type="DERIVED",
+        release_id=evidence.release_id,
+        content_sha256="e" * 64,
+        created_at=datetime(2025, 1, 2, tzinfo=timezone.utc),
+        producer_version="algo-estimate-v1",
+        derived=evidence,
+    )
+
+
+def derived_claim(ref: EvidenceRef) -> Claim:
+    return Claim(
+        claim_id="claim-rank",
+        claim_type="DERIVED_FACT",
+        criticality="CRITICAL",
+        normalized=NormalizedFact(
+            subject="湖南物理类考生",
+            predicate="rank",
+            object=15860,
+            unit="名",
+            sample_years=(2022, 2023, 2024),
+            precision=0,
+        ),
+        rendered_text="考生位次为 15860 名，样本年份为 2022、2023、2024 年。",
+        evidence_refs=(ref,),
+        rendered_bindings=(
+            RenderedBinding(
+                fact_path="normalized.object",
+                rendered_text="15860",
+                evidence_id=ref.evidence_id,
+            ),
+            RenderedBinding(
+                fact_path="normalized.unit",
+                rendered_text="名",
+                evidence_id=ref.evidence_id,
+            ),
+            RenderedBinding(
+                fact_path="normalized.sample_years",
+                rendered_text="2022、2023、2024",
+                evidence_id=ref.evidence_id,
+            ),
+        ),
+    )
+
+
+def derived_package(
+    evidence: DerivedEvidence,
+    ref: EvidenceRef,
+) -> EvidencePackage:
+    return EvidencePackage(
+        release_id="rel-2025",
+        profile_version="profile-v1",
+        result_version="result-v1",
+        verifier_version="evidence-verifier-v1",
+        scope=VerificationScope(
+            province="湖南",
+            application_year=2025,
+            category="物理类",
+            batch="本科批",
+            school_id="1001",
+        ),
+        claims=(derived_claim(ref),),
+        evidence_registry=(ref,),
+    )
+
+
 class FixedEntailmentVerifier:
     def __init__(self, result, *, verifier_version="entailment-v1"):
         self.result = result
@@ -131,6 +229,16 @@ class FixedEntailmentVerifier:
     def verify(self, claim, document):
         self.calls.append((claim.claim_id, document.chunk_id))
         return self.result
+
+
+class FixedDerivedRecomputer:
+    def __init__(self, evidence):
+        self.evidence = evidence
+        self.calls = []
+
+    def recompute(self, evidence):
+        self.calls.append(evidence.operation)
+        return self.evidence
 
 
 class VerifyPackageDocumentTests(unittest.TestCase):
@@ -422,3 +530,132 @@ class VerifyPackageDocumentTests(unittest.TestCase):
         self.assertTrue(
             all(item.status != "VERIFIED" for item in report.claims)
         )
+
+
+class VerifyPackageDerivedTests(unittest.TestCase):
+    def test_derived_probability_cannot_assert_admission_guarantee(self):
+        evidence = replace(
+            derived_evidence(),
+            operation="probability",
+            algorithm="weighted_hit",
+            algorithm_version="weighted-hit-v1",
+            output_field="probability",
+            output_value=0.67,
+            unit="",
+            precision=2,
+        )
+        ref = derived_ref(evidence)
+        claim = replace(
+            derived_claim(ref),
+            normalized=replace(
+                derived_claim(ref).normalized,
+                predicate="probability",
+                object=0.67,
+                unit="",
+                precision=2,
+            ),
+            rendered_text=(
+                "录取概率为0.67，样本年份为2022、2023、2024，保证录取。"
+            ),
+            rendered_bindings=(
+                RenderedBinding(
+                    fact_path="normalized.object",
+                    rendered_text="0.67",
+                    evidence_id=ref.evidence_id,
+                ),
+                RenderedBinding(
+                    fact_path="normalized.unit",
+                    rendered_text="",
+                    evidence_id=ref.evidence_id,
+                ),
+                RenderedBinding(
+                    fact_path="normalized.sample_years",
+                    rendered_text="2022、2023、2024",
+                    evidence_id=ref.evidence_id,
+                ),
+            ),
+        )
+
+        report = VerifyPackage(
+            replace(derived_package(evidence, ref), claims=(claim,)),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.claims[0].status, "CONTRADICTED")
+        self.assertEqual(
+            report.claims[0].reason,
+            "DERIVED_PROMISE_OUT_OF_BOUNDS",
+        )
+
+    def test_missing_claim_sample_year_identity_is_unverifiable(self):
+        evidence = derived_evidence()
+        ref = derived_ref(evidence)
+        claim = derived_claim(ref)
+        package = replace(
+            derived_package(evidence, ref),
+            claims=(
+                replace(
+                    claim,
+                    normalized=replace(
+                        claim.normalized,
+                        sample_years=(),
+                    ),
+                    rendered_bindings=tuple(
+                        binding
+                        for binding in claim.rendered_bindings
+                        if binding.fact_path != "normalized.sample_years"
+                    ),
+                ),
+            ),
+        )
+
+        report = VerifyPackage(
+            package,
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.claims[0].status, "UNVERIFIABLE")
+        self.assertEqual(
+            report.claims[0].reason,
+            "DERIVED_IDENTITY_MISSING",
+        )
+
+    def test_available_recomputation_is_authoritative(self):
+        evidence = derived_evidence()
+        ref = derived_ref(evidence)
+        recomputer = FixedDerivedRecomputer(
+            replace(evidence, output_value=15000)
+        )
+
+        report = VerifyPackage(
+            derived_package(evidence, ref),
+            today=date(2025, 6, 1),
+            derived_recomputer=recomputer,
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.claims[0].status, "CONTRADICTED")
+        self.assertEqual(
+            report.claims[0].reason,
+            "DERIVED_VALUE_MISMATCH",
+        )
+        self.assertEqual(recomputer.calls, ["rank_convert"])
+
+    def test_saved_immutable_derived_artifact_is_verified(self):
+        evidence = derived_evidence()
+        ref = derived_ref(evidence)
+
+        report = VerifyPackage(
+            derived_package(evidence, ref),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "PASS")
+        self.assertEqual(report.claims[0].status, "VERIFIED")
+        self.assertEqual(
+            report.claims[0].checked_against,
+            ("ev-derived-rank",),
+        )
+        self.assertTrue(report.claims[0].deterministic)
