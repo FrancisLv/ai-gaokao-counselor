@@ -375,6 +375,7 @@ class VerifyPackageDocumentTests(unittest.TestCase):
         self.assertEqual(report.claims[0].checked_against, ("ev-transfer",))
         self.assertTrue(report.claims[0].deterministic)
         self.assertEqual(report.blocking_reasons, ())
+        self.assertEqual(report.citation_coverage, 1.0)
 
     def test_excerpt_hash_mismatch_is_contradicted(self):
         document = document_evidence()
@@ -600,6 +601,195 @@ class VerifyPackageDocumentTests(unittest.TestCase):
         self.assertEqual(report.claims[0].status, "UNVERIFIABLE")
         self.assertFalse(report.claims[0].deterministic)
 
+    def test_normal_unverifiable_claim_is_stripped_as_partial(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        claim = replace(
+            document_claim(ref),
+            claim_id="claim-normal",
+            criticality="NORMAL",
+            normalized=NormalizedFact(
+                subject="湖南测试大学",
+                predicate="毕业要求",
+                object="必须通过英语六级",
+                unit=None,
+            ),
+            rendered_text="必须通过英语六级。",
+            rendered_bindings=(),
+        )
+
+        report = VerifyPackage(
+            document_package(
+                document,
+                ref,
+                claims=(document_claim(ref), claim),
+            ),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "PARTIAL")
+        stripped_verification = next(
+            item
+            for item in report.claims
+            if item.claim_id == "claim-normal"
+        )
+        self.assertEqual(stripped_verification.status, "UNVERIFIABLE")
+        self.assertEqual(stripped_verification.criticality, "NORMAL")
+        self.assertEqual(report.stripped_claim_ids, ("claim-normal",))
+        self.assertEqual(report.blocking_reasons, ())
+        self.assertEqual(report.citation_coverage, 1.0)
+
+    def test_normal_claim_with_mismatched_evidence_type_is_blocked(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        claim = replace(
+            structured_claim(ref),
+            claim_id="claim-wrong-type",
+            criticality="NORMAL",
+        )
+
+        report = VerifyPackage(
+            document_package(document, ref, claims=(claim,)),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.claims[0].status, "UNVERIFIABLE")
+        self.assertEqual(report.stripped_claim_ids, ())
+        self.assertIn("CLAIM_UNSUPPORTED", report.blocking_reasons)
+
+    def test_partial_report_coverage_counts_retained_claims(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        verified_claim = replace(
+            document_claim(ref),
+            claim_id="claim-verified",
+        )
+        stripped_claim = replace(
+            document_claim(ref),
+            claim_id="claim-stripped",
+            criticality="NORMAL",
+            normalized=NormalizedFact(
+                subject="湖南测试大学",
+                predicate="毕业要求",
+                object="必须通过英语六级",
+                unit=None,
+            ),
+            rendered_text="必须通过英语六级。",
+            evidence_refs=(),
+            rendered_bindings=(),
+        )
+
+        report = VerifyPackage(
+            document_package(
+                document,
+                ref,
+                claims=(verified_claim, stripped_claim),
+            ),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "PARTIAL")
+        self.assertEqual(report.stripped_claim_ids, ("claim-stripped",))
+        self.assertEqual(report.citation_coverage, 1.0)
+
+    def test_package_with_no_retained_factual_claims_is_blocked(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        claim = replace(
+            document_claim(ref),
+            criticality="NORMAL",
+            normalized=NormalizedFact(
+                subject="湖南测试大学",
+                predicate="毕业要求",
+                object="必须通过英语六级",
+                unit=None,
+            ),
+            rendered_text="必须通过英语六级。",
+            rendered_bindings=(),
+        )
+
+        report = VerifyPackage(
+            document_package(document, ref, claims=(claim,)),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.stripped_claim_ids, ())
+        self.assertEqual(report.citation_coverage, 0.0)
+        self.assertIn("CLAIM_UNSUPPORTED", report.blocking_reasons)
+
+    def test_contradiction_takes_precedence_over_normal_stripping(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        contradicted_claim = replace(
+            document_claim(ref),
+            claim_id="claim-contradicted",
+            criticality="NORMAL",
+            evidence_refs=(
+                replace(ref, content_sha256="b" * 64),
+            ),
+        )
+        unverifiable_claim = replace(
+            document_claim(ref),
+            claim_id="claim-unverifiable",
+            criticality="NORMAL",
+            normalized=NormalizedFact(
+                subject="湖南测试大学",
+                predicate="毕业要求",
+                object="必须通过英语六级",
+                unit=None,
+            ),
+            rendered_text="必须通过英语六级。",
+            evidence_refs=(),
+            rendered_bindings=(),
+        )
+
+        report = VerifyPackage(
+            document_package(
+                document,
+                ref,
+                claims=(contradicted_claim, unverifiable_claim),
+            ),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.stripped_claim_ids, ())
+        self.assertIn(
+            "EVIDENCE_HASH_MISMATCH",
+            report.blocking_reasons,
+        )
+
+    def test_critical_unverifiable_claim_has_stable_blocking_reason(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        claim = replace(
+            document_claim(ref),
+            normalized=NormalizedFact(
+                subject="湖南测试大学",
+                predicate="毕业要求",
+                object="必须通过英语六级",
+                unit=None,
+            ),
+            rendered_text="必须通过英语六级。",
+            rendered_bindings=(),
+        )
+
+        report = VerifyPackage(
+            document_package(document, ref, claims=(claim,)),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.claims[0].criticality, "CRITICAL")
+        self.assertEqual(report.claims[0].status, "UNVERIFIABLE")
+        self.assertEqual(report.stripped_claim_ids, ())
+        self.assertIn(
+            "CRITICAL_CLAIM_UNVERIFIABLE",
+            report.blocking_reasons,
+        )
+
     def test_repeated_verification_is_stable(self):
         document = document_evidence()
         ref = document_ref(document)
@@ -650,6 +840,90 @@ class VerifyPackageDocumentTests(unittest.TestCase):
         self.assertTrue(
             all(item.status != "VERIFIED" for item in report.claims)
         )
+
+    def test_duplicate_normal_claim_identity_cannot_be_stripped(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        claim = replace(
+            document_claim(ref),
+            claim_id="claim-duplicate",
+            criticality="NORMAL",
+        )
+
+        report = VerifyPackage(
+            document_package(
+                document,
+                ref,
+                claims=(claim, claim),
+            ),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.stripped_claim_ids, ())
+        self.assertIn("CLAIM_UNSUPPORTED", report.blocking_reasons)
+
+    def test_invalid_criticality_cannot_be_stripped(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        malformed_claim = replace(
+            document_claim(ref),
+            claim_id="claim-malformed",
+            criticality="UNKNOWN",
+        )
+
+        report = VerifyPackage(
+            document_package(
+                document,
+                ref,
+                claims=(document_claim(ref), malformed_claim),
+            ),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.stripped_claim_ids, ())
+        self.assertIn("CLAIM_UNSUPPORTED", report.blocking_reasons)
+
+    def test_duplicate_evidence_identity_cannot_be_stripped(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        duplicate_ref = document_ref(
+            document,
+            evidence_id="ev-duplicate",
+        )
+        normal_claim = replace(
+            document_claim(duplicate_ref),
+            claim_id="claim-normal",
+            criticality="NORMAL",
+        )
+
+        report = VerifyPackage(
+            document_package(
+                document,
+                ref,
+                registry=(
+                    ref,
+                    duplicate_ref,
+                    replace(
+                        duplicate_ref,
+                        producer_version="policy-retrieval-v2",
+                    ),
+                ),
+                claims=(
+                    replace(
+                        document_claim(ref),
+                        claim_id="claim-critical",
+                    ),
+                    normal_claim,
+                ),
+            ),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.stripped_claim_ids, ())
+        self.assertIn("CLAIM_UNSUPPORTED", report.blocking_reasons)
 
 
 class VerifyPackageStructuredTests(unittest.TestCase):
@@ -1556,3 +1830,134 @@ class VerifyPackageDerivedTests(unittest.TestCase):
 
         self.assertEqual(report.status, "PASS")
         self.assertEqual(report.claims[0].status, "VERIFIED")
+
+
+class VerifyPackageAggregationTests(unittest.TestCase):
+    def test_blocked_report_reasons_and_claims_have_stable_order(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        contradicted_claim = replace(
+            document_claim(ref),
+            claim_id="claim-b-contradicted",
+            evidence_refs=(
+                replace(ref, content_sha256="b" * 64),
+            ),
+        )
+        mismatched_claim = replace(
+            structured_claim(ref),
+            claim_id="claim-a-type-mismatch",
+        )
+        package = document_package(
+            document,
+            ref,
+            claims=(contradicted_claim, mismatched_claim),
+        )
+
+        first = VerifyPackage(package, today=date(2025, 6, 1))
+        second = VerifyPackage(package, today=date(2025, 6, 1))
+
+        self.assertEqual(first, second)
+        self.assertEqual(first.status, "BLOCKED")
+        self.assertEqual(
+            tuple(item.claim_id for item in first.claims),
+            (
+                "claim-a-type-mismatch",
+                "claim-b-contradicted",
+            ),
+        )
+        self.assertEqual(
+            first.blocking_reasons,
+            (
+                "CLAIM_UNSUPPORTED",
+                "CRITICAL_CLAIM_UNVERIFIABLE",
+                "EVIDENCE_HASH_MISMATCH",
+            ),
+        )
+
+    def test_mixed_three_evidence_types_produce_deterministic_partial(self):
+        document = document_evidence()
+        document_ref_value = document_ref(document)
+        document_claim_value = replace(
+            document_claim(document_ref_value),
+            claim_id="claim-a-document",
+        )
+
+        structured = structured_evidence()
+        structured_ref_value = structured_ref(structured)
+        structured_claim_value = replace(
+            structured_claim(structured_ref_value),
+            claim_id="claim-b-structured",
+        )
+
+        derived = derived_evidence()
+        derived_ref_value = derived_ref(derived)
+        derived_claim_value = derived_claim(derived_ref_value)
+        unknown_claim = replace(
+            derived_claim_value,
+            claim_id="claim-c-derived",
+            criticality="NORMAL",
+            normalized=replace(
+                derived_claim_value.normalized,
+                sample_years=(),
+            ),
+            rendered_bindings=tuple(
+                binding
+                for binding in derived_claim_value.rendered_bindings
+                if binding.fact_path != "normalized.sample_years"
+            ),
+        )
+        package = EvidencePackage(
+            release_id="rel-2025",
+            profile_version="profile-v1",
+            result_version="result-v1",
+            verifier_version="evidence-verifier-v1",
+            scope=VerificationScope(
+                province="湖南",
+                application_year=2025,
+                category="物理类",
+                batch="本科批",
+                school_id="1001",
+            ),
+            claims=(
+                unknown_claim,
+                structured_claim_value,
+                document_claim_value,
+            ),
+            evidence_registry=(
+                derived_ref_value,
+                structured_ref_value,
+                document_ref_value,
+            ),
+        )
+
+        first = VerifyPackage(
+            package,
+            today=date(2025, 6, 1),
+            structured_authority=FixedStructuredAuthority(structured),
+        )
+        second = VerifyPackage(
+            package,
+            today=date(2025, 6, 1),
+            structured_authority=FixedStructuredAuthority(structured),
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(first.status, "PARTIAL")
+        self.assertEqual(
+            tuple(item.claim_id for item in first.claims),
+            (
+                "claim-a-document",
+                "claim-b-structured",
+                "claim-c-derived",
+            ),
+        )
+        self.assertEqual(
+            tuple(item.status for item in first.claims),
+            ("VERIFIED", "VERIFIED", "UNVERIFIABLE"),
+        )
+        self.assertEqual(
+            first.stripped_claim_ids,
+            ("claim-c-derived",),
+        )
+        self.assertEqual(first.blocking_reasons, ())
+        self.assertEqual(first.citation_coverage, 1.0)

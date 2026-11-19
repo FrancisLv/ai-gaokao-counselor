@@ -128,6 +128,7 @@ class ClaimVerification:
     reason: str
     checked_against: tuple[str, ...]
     deterministic: bool
+    criticality: str = "UNKNOWN"
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +137,7 @@ class VerificationReport:
     claims: tuple[ClaimVerification, ...]
     blocking_reasons: tuple[str, ...]
     stripped_claim_ids: tuple[str, ...] = ()
+    citation_coverage: float = 0.0
 
 
 class EntailmentVerifier(Protocol):
@@ -191,28 +193,43 @@ def VerifyPackage(
     }
     report_claims: list[ClaimVerification] = []
     blocking_reasons: set[str] = set()
+    stripped_claim_ids: list[str] = []
+    if package_reason is not None:
+        blocking_reasons.add(package_reason)
+    if duplicate_evidence_ids:
+        blocking_reasons.add("CLAIM_UNSUPPORTED")
 
     for claim in sorted(package.claims, key=lambda item: item.claim_id):
         refs = sorted(claim.evidence_refs, key=lambda item: item.evidence_id)
         checked_against = tuple(ref.evidence_id for ref in refs)
+        claim_preflight_reason = _claim_preflight_reason(claim)
         if package_reason is not None:
             decision, reason, deterministic = (
                 "UNVERIFIABLE",
                 package_reason,
                 True,
             )
-        elif _claim_preflight_reason(claim) is not None:
+        elif claim_preflight_reason is not None:
             decision, reason, deterministic = (
                 "UNVERIFIABLE",
-                _claim_preflight_reason(claim) or "CLAIM_UNSUPPORTED",
+                claim_preflight_reason,
                 True,
             )
+            blocking_reasons.add(reason)
+        elif _claim_evidence_type_mismatch(claim):
+            decision, reason, deterministic = (
+                "UNVERIFIABLE",
+                "CLAIM_UNSUPPORTED",
+                True,
+            )
+            blocking_reasons.add(reason)
         elif claim.claim_id in duplicated_claim_ids:
             decision, reason, deterministic = (
                 "UNVERIFIABLE",
                 "CLAIM_UNSUPPORTED",
                 True,
             )
+            blocking_reasons.add(reason)
         elif duplicate_evidence_ids.intersection(checked_against):
             decision, reason, deterministic = (
                 "UNVERIFIABLE",
@@ -233,22 +250,64 @@ def VerifyPackage(
         report_claims.append(
             ClaimVerification(
                 claim_id=claim.claim_id,
+                criticality=claim.criticality,
                 status=decision,
                 reason=reason,
                 checked_against=checked_against,
                 deterministic=deterministic,
             )
         )
-        if decision != "VERIFIED":
+        if decision == "CONTRADICTED":
             blocking_reasons.add(reason)
+        elif decision == "UNVERIFIABLE":
+            if claim.criticality == "CRITICAL":
+                blocking_reasons.add("CRITICAL_CLAIM_UNVERIFIABLE")
+            else:
+                stripped_claim_ids.append(claim.claim_id)
 
     if not report_claims:
         blocking_reasons.add("CLAIM_UNSUPPORTED")
-    status = "PASS" if not blocking_reasons else "BLOCKED"
+    candidate_stripped_claim_ids = tuple(sorted(stripped_claim_ids))
+    candidate_stripped_claim_id_set = set(candidate_stripped_claim_ids)
+    candidate_retained_claims = tuple(
+        claim
+        for claim in package.claims
+        if claim.claim_id not in candidate_stripped_claim_id_set
+    )
+    if not candidate_retained_claims:
+        blocking_reasons.add("CLAIM_UNSUPPORTED")
+    if blocking_reasons:
+        status = "BLOCKED"
+        stripped_claim_ids = []
+    elif candidate_stripped_claim_ids:
+        status = "PARTIAL"
+        stripped_claim_ids = list(candidate_stripped_claim_ids)
+    else:
+        status = "PASS"
+    stripped_claim_id_set = set(stripped_claim_ids)
+    retained_claims = tuple(
+        claim
+        for claim in package.claims
+        if claim.claim_id not in stripped_claim_id_set
+    )
+    factual_claim_count = len(retained_claims)
+    cited_claim_count = sum(
+        bool(claim.evidence_refs)
+        for claim in retained_claims
+    )
+    citation_coverage = (
+        cited_claim_count / factual_claim_count
+        if factual_claim_count
+        else 0.0
+    )
+    if status == "BLOCKED":
+        citation_coverage = 0.0
     return VerificationReport(
         status=status,
         claims=tuple(report_claims),
         blocking_reasons=tuple(sorted(blocking_reasons)),
+        citation_coverage=citation_coverage,
+        stripped_claim_ids=tuple(sorted(stripped_claim_ids)),
     )
 
 
@@ -562,6 +621,20 @@ def _claim_preflight_reason(claim: Claim) -> str | None:
     if not claim.normalized.subject or not claim.normalized.predicate:
         return "CLAIM_UNSUPPORTED"
     return None
+
+
+def _claim_evidence_type_mismatch(claim: Claim) -> bool:
+    expected_type = {
+        "DOCUMENT_FACT": "DOCUMENT",
+        "STRUCTURED_FACT": "STRUCTURED",
+        "DERIVED_FACT": "DERIVED",
+    }.get(claim.claim_type)
+    if expected_type is None:
+        return False
+    return any(
+        ref.evidence_type != expected_type
+        for ref in claim.evidence_refs
+    )
 
 
 def _group_evidence(
