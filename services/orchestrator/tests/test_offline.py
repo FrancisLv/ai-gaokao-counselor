@@ -167,7 +167,7 @@ class HybridRetrievalTests(unittest.TestCase):
         # 短 token 过滤、去重保序、max_terms 截断
         self.assertEqual(extract_terms("a 清华 清华 北大 复旦 交大"), ["清华", "北大", "复旦", "交大"])
         self.assertEqual(extract_terms("清华，转专业；大类分流"), ["清华", "转专业", "大类分流"])
-        self.assertEqual(extract_terms("甲"), ["甲"])      # 无有效 token → 回退整句
+        self.assertEqual(extract_terms("甲"), [])          # 关键词 term 至少 2 个字符
         self.assertEqual(extract_terms("  色弱  "), ["色弱"])
         self.assertEqual(extract_terms("", max_terms=4), [])
 

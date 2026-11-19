@@ -960,3 +960,22 @@ sqlc 的 `:many` 先收集类型化结果 slice，再映射领域对象，相较
 
 - 开发 principal 来自 `VITE_PRINCIPAL_ID`；公网部署必须换为真实认证。
 - 前端不直连 orchestrator，不实现 M4 检索、资格规则或正式报告。
+
+## 30. M4a-01：release-bound 文档适用域与证据主路径
+
+**日期与范围**：2026-11-19。实现 issue #8 的最小可用 `RetrievePolicy` 路径；只接入 `mode=keyword`，不提前实现向量、RRF 或 rerank。
+
+### 实现要点
+
+- 新增 `migrations/15_policy_retrieval_release_scope.sql`：为 `policy_doc` 补齐类型、发布者、学校、抓取时间、内容 hash 与原件存储 URI；为 `policy_chunk` 补齐文本 hash、字符定位与 embedding/index 身份；新增 `policy_chunk_set`、`release_policy_doc` 和 `policy_applicability`。
+- `release_policy_doc` 以 `(release_id, doc_id)` 唯一映射一个 `chunk_set_version`，chunk 通过复合外键绑定所属文档与 chunk set，避免仅按共享 `doc_id` 混入旧分块。
+- 新增唯一在线检索 seam `rag/policy_retrieval.py::RetrievePolicy`：先校验 release 为 `PUBLISHED` 且未撤销，再拒绝缺失/越界 scope；适用域与学校、文档类型、有效区间均在相似度计算前执行参数化 SQL 硬过滤。
+- 关键词路最多保留 4 个去重且长度不少于 2 的 term，并转义 `%`、`_`、反斜杠；无候选或候选无法形成完整证据时返回 `NO_EVIDENCE`。
+- 每个结果投影为不可变 `DocumentEvidence` 与 `EvidenceRef`，绑定同一 `release_id`，校验正文 hash、完整来源字段、适用域和字符 locator；`evidence_id` 由文档类型、release、chunk、excerpt hash 与 locator 规范化生成。
+- `vector` / `hybrid` 在本片显式返回 `MODE_UNSUPPORTED`，不以空列表伪装成功；图节点/API 接线、向量路、RRF、rerank 和 golden set 不在本票范围。
+
+### 测试
+
+- 离线行为测试覆盖 release 状态、scope、`NO_EVIDENCE`、模式未支持、稳定证据映射。
+- PostgreSQL 隔离 schema 测试从 `00` 应用到 `15`，覆盖 chunk set 隔离、省份/科类/批次/学校/年份/文档类型硬过滤、全国与长期有效政策、通配符转义、不可证据化候选和重复查询确定性。
+- `ORCHESTRATOR_TEST_DSN` 缺省时数据库用例跳过；显式连接测试库时使用随机 schema，不读取生产数据或下载模型。
