@@ -3,6 +3,7 @@ package biz
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -253,6 +254,203 @@ func TestEvaluateEligibility_ProfileTypeMismatchIsUnknown(t *testing.T) {
 	})
 }
 
+func TestEvaluateEligibility_SingleSubjectMinPassFailAndMissing(t *testing.T) {
+	rule := RuleVersion{
+		RuleID:                "rule-math-min",
+		Version:               1,
+		RuleKey:               "math-min",
+		RuleType:              "SINGLE_SUBJECT_MIN",
+		RequiredProfileFields: []string{"single_subject_scores.数学"},
+		When: RuleExpression{
+			Operator: OperatorNot,
+			Child: &RuleExpression{
+				Operator: OperatorGTE,
+				Field:    "single_subject_scores.数学",
+				Value:    expressionLiteral(t, 120),
+			},
+		},
+		OutcomeWhenTrue:   OutcomeFail,
+		ReviewState:       ReviewStatePublished,
+		ExpressionVersion: ExpressionVersionV1,
+	}
+
+	cases := []struct {
+		name        string
+		facts       []ProfileFact
+		wantStatus  string
+		wantMissing []string
+	}{
+		{
+			name: "provided score meets minimum",
+			facts: []ProfileFact{{
+				FieldKey: "single_subject_scores.数学",
+				State:    ProfileProvided,
+				IntValue: 135,
+			}},
+			wantStatus: MajorPass,
+		},
+		{
+			name: "provided score is below minimum",
+			facts: []ProfileFact{{
+				FieldKey: "single_subject_scores.数学",
+				State:    ProfileProvided,
+				IntValue: 105,
+			}},
+			wantStatus: MajorFail,
+		},
+		{
+			name:        "missing score requires backfill",
+			wantStatus:  MajorMissingRequiredFact,
+			wantMissing: []string{"single_subject_scores.数学"},
+		},
+		{
+			name: "unknown score requires backfill",
+			facts: []ProfileFact{{
+				FieldKey: "single_subject_scores.数学",
+				State:    ProfileUnknown,
+			}},
+			wantStatus:  MajorMissingRequiredFact,
+			wantMissing: []string{"single_subject_scores.数学"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := evaluateEligibilityWithRule(t, rule, tc.facts...)
+			major := result.Groups[0].Majors[0]
+			if major.Status != tc.wantStatus {
+				t.Fatalf("major status = %q, want %q; unknown=%v missing=%v",
+					major.Status, tc.wantStatus, major.UnknownReasons, major.MissingFields)
+			}
+			if !slices.Equal(major.MissingFields, tc.wantMissing) {
+				t.Fatalf("missing fields = %v, want %v", major.MissingFields, tc.wantMissing)
+			}
+		})
+	}
+}
+
+func TestEvaluateEligibility_ConditionalFactsUseTypedRules(t *testing.T) {
+	cases := []struct {
+		name        string
+		ruleType    string
+		field       string
+		operator    string
+		value       string
+		factState   string
+		factValue   string
+		wantStatus  string
+		wantMissing []string
+	}{
+		{
+			name:       "color vision restriction matches",
+			ruleType:   "PHYSICAL_RESTRICTION",
+			field:      FieldColorVision,
+			operator:   OperatorEQ,
+			value:      "COLOR_BLIND",
+			factState:  ProfileProvided,
+			factValue:  "COLOR_BLIND",
+			wantStatus: MajorFail,
+		},
+		{
+			name:       "color vision restriction does not match normal vision",
+			ruleType:   "PHYSICAL_RESTRICTION",
+			field:      FieldColorVision,
+			operator:   OperatorEQ,
+			value:      "COLOR_BLIND",
+			factState:  ProfileProvided,
+			factValue:  "NORMAL",
+			wantStatus: MajorPass,
+		},
+		{
+			name:        "missing color vision requires backfill",
+			ruleType:    "PHYSICAL_RESTRICTION",
+			field:       FieldColorVision,
+			operator:    OperatorEQ,
+			value:       "COLOR_BLIND",
+			wantStatus:  MajorMissingRequiredFact,
+			wantMissing: []string{FieldColorVision},
+		},
+		{
+			name:       "gender restriction matches",
+			ruleType:   "GENDER_RESTRICTION",
+			field:      FieldGender,
+			operator:   OperatorEQ,
+			value:      "FEMALE",
+			factState:  ProfileProvided,
+			factValue:  "FEMALE",
+			wantStatus: MajorFail,
+		},
+		{
+			name:        "declined gender stays unknown",
+			ruleType:    "GENDER_RESTRICTION",
+			field:       FieldGender,
+			operator:    OperatorEQ,
+			value:       "FEMALE",
+			factState:   ProfileDeclined,
+			wantStatus:  MajorMissingRequiredFact,
+			wantMissing: []string{FieldGender},
+		},
+		{
+			name:       "invalid gender value is not treated as pass",
+			ruleType:   "GENDER_RESTRICTION",
+			field:      FieldGender,
+			operator:   OperatorEQ,
+			value:      "FEMALE",
+			factState:  ProfileProvided,
+			factValue:  "OTHER",
+			wantStatus: MajorUnknown,
+		},
+		{
+			name:       "household province restriction matches",
+			ruleType:   "OTHER_HARD",
+			field:      FieldHouseholdProvince,
+			operator:   OperatorNEQ,
+			value:      "湖南",
+			factState:  ProfileProvided,
+			factValue:  "湖北",
+			wantStatus: MajorFail,
+		},
+		{
+			name:        "missing school registration province requires backfill",
+			ruleType:    "OTHER_HARD",
+			field:       FieldSchoolRegistrationProvince,
+			operator:    OperatorEQ,
+			value:       "湖南",
+			wantStatus:  MajorMissingRequiredFact,
+			wantMissing: []string{FieldSchoolRegistrationProvince},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expression := RuleExpression{
+				Operator: tc.operator,
+				Field:    tc.field,
+				Value:    expressionLiteral(t, tc.value),
+			}
+			rule := eligibilityExpressionRule(expression, []string{tc.field})
+			rule.RuleType = tc.ruleType
+			var facts []ProfileFact
+			if tc.factState != "" {
+				facts = append(facts, ProfileFact{
+					FieldKey:    tc.field,
+					State:       tc.factState,
+					StringValue: tc.factValue,
+				})
+			}
+			result := evaluateEligibilityWithRule(t, rule, facts...)
+			major := result.Groups[0].Majors[0]
+			if major.Status != tc.wantStatus {
+				t.Fatalf("major status = %q, want %q; unknown=%v missing=%v",
+					major.Status, tc.wantStatus, major.UnknownReasons, major.MissingFields)
+			}
+			if !slices.Equal(major.MissingFields, tc.wantMissing) {
+				t.Fatalf("missing fields = %v, want %v", major.MissingFields, tc.wantMissing)
+			}
+		})
+	}
+}
+
 func TestEvaluateEligibility_PresentHonorsUnavailableFacts(t *testing.T) {
 	for _, state := range []string{ProfileUnknown, ProfileDeclined} {
 		t.Run(state, func(t *testing.T) {
@@ -384,11 +582,11 @@ func TestEvaluateEligibility_BlocksInvalidExpressionContract(t *testing.T) {
 			name: "unknown single-subject field",
 			expression: RuleExpression{
 				Operator: OperatorGTE,
-				Field:    "single_subject_scores.数学",
+				Field:    "single_subject_scores.综合",
 				Value:    expressionLiteral(t, 120),
 			},
 			expressionVersion: ExpressionVersionV1,
-			requiredFields:    []string{"single_subject_scores.数学"},
+			requiredFields:    []string{"single_subject_scores.综合"},
 			reason:            ReasonRuleUnknownField,
 		},
 		{
@@ -541,10 +739,17 @@ func evaluateEligibilityWithRules(t *testing.T, rules []RuleVersion, extraFacts 
 	ruleSet := EligibilityRuleSet{
 		ReleaseStatus: "PUBLISHED",
 		Rules:         rules,
-		Coverage: []RuleCoverage{{
-			RuleType: RuleTypeSubjectRequirement,
+		ProfileFields: BuiltinEligibilityProfileFields(),
+	}
+	requiredCoverage := []string{RuleTypeSubjectRequirement}
+	for _, rule := range rules {
+		requiredCoverage = append(requiredCoverage, rule.RuleType)
+	}
+	for _, ruleType := range stableStrings(requiredCoverage) {
+		ruleSet.Coverage = append(ruleSet.Coverage, RuleCoverage{
+			RuleType: ruleType,
 			Status:   CoverageFull,
-		}},
+		})
 	}
 	uc := NewEligibilityUsecase(fakeEligibilityRepo{set: ruleSet})
 	request := eligibilityFixtureRequest()

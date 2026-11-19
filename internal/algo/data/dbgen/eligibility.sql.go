@@ -68,6 +68,41 @@ func (q *Queries) ListEligibilityCoverage(ctx context.Context, releaseID string)
 	return items, nil
 }
 
+const listEligibilityProfileFields = `-- name: ListEligibilityProfileFields :many
+SELECT
+    field_key,
+    value_type,
+    allowed_values
+FROM eligibility_profile_field
+ORDER BY field_key
+`
+
+type ListEligibilityProfileFieldsRow struct {
+	FieldKey      string
+	ValueType     string
+	AllowedValues []string
+}
+
+func (q *Queries) ListEligibilityProfileFields(ctx context.Context) ([]ListEligibilityProfileFieldsRow, error) {
+	rows, err := q.db.Query(ctx, listEligibilityProfileFields)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListEligibilityProfileFieldsRow
+	for rows.Next() {
+		var i ListEligibilityProfileFieldsRow
+		if err := rows.Scan(&i.FieldKey, &i.ValueType, &i.AllowedValues); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPublishedEligibilityRules = `-- name: ListPublishedEligibilityRules :many
 SELECT
     rule_id,

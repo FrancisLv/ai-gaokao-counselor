@@ -365,3 +365,34 @@ class ProfileRuntime:
                 ).get("value", []),
             },
         }
+
+    def ToEligibilityFacts(self, *, lifecycle, fields):
+        if lifecycle != "CONFIRMED":
+            raise RunLifecycleError("PROFILE_NOT_CONFIRMED")
+
+        facts = []
+        for field_key in sorted(fields):
+            field = fields[field_key]
+            state = field.get("state")
+            if state not in {"PROVIDED", "UNKNOWN", "DECLINED", "DERIVED", "DEFAULT"}:
+                raise RunLifecycleError("PROFILE_INVALID_VALUE")
+            value = field.get("value")
+            if state in {"UNKNOWN", "DECLINED"}:
+                if value is not None:
+                    raise RunLifecycleError("PROFILE_INVALID_VALUE")
+            elif value is None:
+                raise RunLifecycleError("PROFILE_INVALID_VALUE")
+            elif isinstance(value, bool) or not isinstance(value, (str, int, list)):
+                raise RunLifecycleError("PROFILE_INVALID_VALUE")
+            elif isinstance(value, list) and not all(
+                isinstance(item, str) for item in value
+            ):
+                raise RunLifecycleError("PROFILE_INVALID_VALUE")
+            facts.append(
+                {
+                    "field_key": field_key,
+                    "state": state,
+                    "value": list(value) if isinstance(value, list) else value,
+                }
+            )
+        return facts

@@ -8,6 +8,7 @@ sql:
       - migrations/13_release_data_dimensions.sql
       - migrations/21_eligibility_rules.sql
       - migrations/23_rule_expression_contract.sql
+      - migrations/24_eligibility_profile_fields.sql
     queries: internal/algo/data/queries
     gen:
       go:

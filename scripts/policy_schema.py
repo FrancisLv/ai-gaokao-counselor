@@ -22,6 +22,7 @@ MIGRATIONS = (
     "migrations/20_policy_relevance_policy.sql",
     "migrations/21_eligibility_rules.sql",
     "migrations/23_rule_expression_contract.sql",
+    "migrations/24_eligibility_profile_fields.sql",
 )
 
 

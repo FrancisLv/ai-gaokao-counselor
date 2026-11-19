@@ -92,9 +92,22 @@ func (r *eligibilityRepo) LoadEligibilityRuleSet(ctx context.Context, releaseID 
 			Notes:              row.Notes,
 		})
 	}
+	fieldRows, err := r.d.queries.ListEligibilityProfileFields(ctx)
+	if err != nil {
+		return biz.EligibilityRuleSet{}, err
+	}
+	profileFields := make([]biz.ProfileFieldDefinition, 0, len(fieldRows))
+	for _, row := range fieldRows {
+		profileFields = append(profileFields, biz.ProfileFieldDefinition{
+			FieldKey:      row.FieldKey,
+			ValueType:     row.ValueType,
+			AllowedValues: append([]string(nil), row.AllowedValues...),
+		})
+	}
 	return biz.EligibilityRuleSet{
 		ReleaseStatus: status,
 		Rules:         rules,
 		Coverage:      coverage,
+		ProfileFields: profileFields,
 	}, nil
 }
