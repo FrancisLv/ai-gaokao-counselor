@@ -151,11 +151,18 @@ diagnostics:
 
 调用方不得依赖内部 SQL 行、向量距离或 rerank 模型的私有结构。诊断字段只用于测试和可观测。
 
+生产装配通过 `RunLifecycle.GetRetrievalRunBinding(...)` 从权威 run 记录、已确认
+profile revision 或 `POLICY_QA` task input 构造 `RetrievalRunBinding`；调用方不能
+传入省、年、科类、批次、principal 或 release 覆盖值。`build_run_bound_graph(...)`
+组合该 binding 与注入的 `RetrievePolicy`，启动图时仍由分 run 的在线 API 决定何时执行。
+
 ## 5. 检索流水线
 
 固定顺序：
 
-1. 校验 `release_id` 存在、已发布且未撤销。
+1. 在一个只读 `REPEATABLE READ` 事务快照内校验 `release_id` 存在、已发布且未撤销，
+   读取 release 检索配置，并完成后续候选查询；release 状态与映射变更不得在两次
+   语句之间产生不一致视图。
 2. 按 `document_type / school_id / regions / categories / batches / valid interval` 做 SQL 硬过滤。
 3. 在同一过滤结果内分别执行向量和关键词召回。
 4. 使用 RRF 融合：`score = Σ 1/(60 + rank)`。
@@ -175,6 +182,8 @@ diagnostics:
 - HNSW 只提供距离有序访问，无法直接完成 `(distance, chunk_id)` 复合排序。查询先用有界 `ann_candidates` CTE 取得不超过 `pool_k` 的距离候选，再在这个小池内按 `distance, chunk_id` 排序，避免全量物化候选破坏索引访问；
 - 查询事务内使用 `hnsw.iterative_scan=strict_order`。pgvector 的图遍历过滤发生在索引访问之后，因此严格迭代扫描必须继续访问，直到取得足够候选或验证候选已耗尽；`hnsw.max_scan_tuples` 不得沿用会静默截断正确结果的默认上限；
 - `hnsw.ef_search` 至少为 `max(40, pool_k)`，允许通过 release 级配置提高召回；任何参数调整都不能放宽适用域；
+- `release.rrf_k` 持久化融合常数，当前 schema 约束必须等于 `60`；缺失或不一致时
+  返回 `RETRIEVAL_CONFIG_MISMATCH`；
 - `release_policy_index` 记录 release 的 embedding 模型、向量维度和 index version；查询 embedding 必须由该模型生成；
 - release 映射的 `policy_chunk_set` 及其 chunk 身份必须与该 release 声明完全一致；
 - 模型或维度不匹配时返回 `INDEX_MODEL_MISMATCH`，不得降级混读；
@@ -187,6 +196,8 @@ diagnostics:
 - V1 使用 `pg_trgm` 的 `ILIKE + similarity`；
 - 查询切分最多保留 4 个不重复 term，每个至少 2 个字符；
 - SQL 参数化并转义 `% / _ / \`；
+- `school_ids` 非空时只额外允许校级文档；`school_id IS NULL` 的全国/省级政策不能
+  因为学校筛选而被删除；
 - 关键词路没有结果不构成“无限制”；
 - 只有 golden set 证明关键词路是瓶颈时，才评估 zhparser。
 
@@ -196,6 +207,8 @@ diagnostics:
 - 每一路各自先做稳定排序，名次从 1 开始；
 - 融合分为 `Σ 1/(60 + rank)`，同一候选两路命中时累加，缺一路时不获得该路分数；
 - 融合后必须保留两路原始 rank，供证据和调试；最终按融合分降序、`chunk_id` 升序稳定排序。
+- 内部候选保留 `vector_rank / keyword_rank / rrf_score`；这些字段服务审计与调试，
+  不属于调用方输出协议。
 
 ### 5.4 Rerank
 
@@ -241,7 +254,7 @@ diagnostics:
 | hybrid 的向量模型不可用 | 同范围关键词检索，`degraded_reason=VECTOR_UNAVAILABLE` |
 | 关键词索引不可用 | 同范围向量检索，`degraded_reason=KEYWORD_UNAVAILABLE` |
 | 两路均不可用或数据库不可达 | `RETRIEVAL_UNAVAILABLE`，不伪装为 `NO_EVIDENCE` |
-| 命中候选无法形成完整证据 | `EVIDENCE_PROJECTION_FAILED`，不跳过候选后伪装为 `NO_EVIDENCE` |
+| 硬过滤后所有候选都无法形成完整证据 | `NO_EVIDENCE`；不可投影元数据必须在候选基底前置过滤，不能因执行路径不同变成技术失败 |
 | rerank 配置缺失/模型不匹配 | 使用 RRF 顺序并记录 `RERANK_UNAVAILABLE` |
 | rerank 超时/执行失败 | 使用 RRF 顺序并分别记录 `RERANK_TIMEOUT` / `RERANK_FAILED` |
 | rerank 输出重复/未知/遗漏 | 拒绝部分应用，使用 RRF 顺序并记录 `RERANK_INVALID_OUTPUT` |

@@ -1,6 +1,7 @@
 """检索 golden set 的外部 seam 测试，默认不连接数据库或模型。"""
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 import hashlib
 import json
@@ -37,6 +38,8 @@ def evidence(
     chunk_id: str,
     doc_id: str,
     *,
+    release_id: str = "rel-test",
+    document_type: str = "charter",
     region: str = "湖南",
     category: str = "物理类",
     batch: str = "本科批",
@@ -49,7 +52,7 @@ def evidence(
         doc_id=doc_id,
         chunk_id=chunk_id,
         title="测试章程",
-        document_type="charter",
+        document_type=document_type,
         issuer="测试大学",
         issuer_type="university",
         issuer_id="issuer-001",
@@ -68,7 +71,7 @@ def evidence(
         char_start=0,
         char_end=len(text),
         excerpt=text,
-        release_id="rel-test",
+        release_id=release_id,
         document_content_sha256="b" * 64,
         raw_storage_uri="s3://test/document",
         chunk_set_version="chunks-v1",
@@ -76,7 +79,7 @@ def evidence(
     return EvidenceRef(
         evidence_id=f"evidence-{chunk_id}",
         evidence_type="DOCUMENT",
-        release_id="rel-test",
+        release_id=release_id,
         content_sha256="a" * 64,
         created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
         producer_version="test",
@@ -112,6 +115,12 @@ class GoldenContractFixture:
                 evidence(
                     chunk_id,
                     case["expected_doc_ids"][0],
+                    release_id=query.release_id,
+                    document_type=(
+                        query.document_types[0]
+                        if query.document_types
+                        else "charter"
+                    ),
                     region=(
                         "全国"
                         if "national_policy" in case["tags"]
@@ -142,6 +151,7 @@ class RetrievalDatasetTests(unittest.TestCase):
             "dataset_version": "retrieval-test-v1",
             "retrieval_cases_file": "qa.jsonl",
             "retrieval_cases_sha256": hashlib.sha256(qa_bytes).hexdigest(),
+            "dataset_sha256": hashlib.sha256(qa_bytes).hexdigest(),
             "case_count": 1,
             "created_at": "2026-11-19T00:00:00+08:00",
             "release_id": "rel-test",
@@ -169,6 +179,7 @@ class RetrievalDatasetTests(unittest.TestCase):
             "must_exclude_sources": ["school-999"],
             "tags": ["charter", "school_major"],
             "criticality": "CRITICAL",
+            "interference": [],
         }
 
     def test_dataset_hash_mismatch_is_rejected_before_retrieval(self):
@@ -186,7 +197,7 @@ class RetrievalDatasetTests(unittest.TestCase):
             ROOT
             / "data"
             / "golden"
-            / "retrieval-hunan-2025-v0.1.0-draft"
+            / "retrieval-hunan-2025-v0.2.0-draft"
         )
 
         self.assertEqual(len(dataset.cases), 30)
@@ -225,6 +236,22 @@ class RetrievalDatasetTests(unittest.TestCase):
                 for case in no_evidence
             )
         )
+        for case in dataset.cases:
+            self.assertIn("interference", case)
+            for tag, kind in (
+                ("cross_province", "province"),
+                ("cross_year", "year"),
+                ("cross_category", "category"),
+                ("wrong_school", "school_id"),
+            ):
+                if tag in case["tags"]:
+                    self.assertTrue(
+                        any(
+                            item["kind"] == kind
+                            for item in case["interference"]
+                        ),
+                        f"{case['case_id']} lacks {kind} interference",
+                    )
 
     def test_only_real_runs_with_a_signed_owner_are_authoritative(self):
         self.assertFalse(
@@ -251,7 +278,7 @@ class RetrievalDatasetTests(unittest.TestCase):
             ROOT
             / "data"
             / "golden"
-            / "retrieval-hunan-2025-v0.1.0-draft"
+            / "retrieval-hunan-2025-v0.2.0-draft"
         )
         retriever = GoldenContractFixture(dataset.cases)
 
@@ -297,6 +324,187 @@ class RetrievalDatasetTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "criticality"):
                 load_retrieval_dataset(root)
 
+    def test_scope_conflict_tags_require_verifiable_interference_metadata(self):
+        case = self.valid_case()
+        case["tags"] = ["charter", "cross_province"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_dataset(root, case)
+
+            with self.assertRaisesRegex(ValueError, "interference"):
+                load_retrieval_dataset(root)
+
+    def test_scope_conflict_interference_reproduces_a_detectable_leak(self):
+        dataset = load_retrieval_dataset(
+            ROOT
+            / "data"
+            / "golden"
+            / "retrieval-hunan-2025-v0.2.0-draft"
+        )
+        relevant = [
+            case
+            for case in dataset.cases
+            if set(case["tags"])
+            & {"cross_province", "cross_year", "cross_category", "wrong_school"}
+        ]
+        for case in relevant[:4]:
+            item = case["interference"][0]
+            changes = {}
+            expected_kind = None
+            if item["kind"] == "province":
+                changes["region"] = item["value"]
+                expected_kind = "province"
+            elif item["kind"] == "year":
+                changes["valid_from"] = date(item["value"], 1, 1)
+                changes["valid_to"] = date(item["value"], 12, 31)
+                expected_kind = "year"
+            elif item["kind"] == "category":
+                changes["category"] = item["value"]
+                expected_kind = "category"
+            elif item["kind"] == "school_id":
+                changes["school_id"] = item["value"]
+                expected_kind = "school"
+            if expected_kind is None:
+                continue
+            results = {}
+            for dataset_case in dataset.cases:
+                if "no_evidence" in dataset_case["tags"]:
+                    results[dataset_case["query"]] = PolicyRetrievalResult(
+                        "NO_EVIDENCE",
+                        dataset.manifest["release_id"],
+                    )
+                    continue
+                results[dataset_case["query"]] = PolicyRetrievalResult(
+                    "FOUND",
+                    dataset.manifest["release_id"],
+                    (
+                        evidence(
+                            dataset_case["expected_chunk_ids"][0],
+                            dataset_case["expected_doc_ids"][0],
+                            release_id=dataset.manifest["release_id"],
+                            document_type=(
+                                dataset_case["document_types"][0]
+                                if dataset_case["document_types"]
+                                else "charter"
+                            ),
+                            region=(
+                                "全国"
+                                if "national_policy" in dataset_case["tags"]
+                                else dataset_case["scope"]["province"]
+                            ),
+                            category=dataset_case["scope"]["category"],
+                            batch=dataset_case["scope"]["batch"],
+                            school_id=(
+                                dataset_case["school_ids"][0]
+                                if dataset_case["school_ids"]
+                                else None
+                            ),
+                        ),
+                    ),
+                )
+            results[case["query"]] = PolicyRetrievalResult(
+                "FOUND",
+                dataset.manifest["release_id"],
+                (
+                    evidence(
+                        case["expected_chunk_ids"][0],
+                        case["expected_doc_ids"][0],
+                        release_id=dataset.manifest["release_id"],
+                    ),
+                    evidence(
+                        "interference",
+                        "interference-doc",
+                        release_id=dataset.manifest["release_id"],
+                        **changes,
+                    ),
+                ),
+            )
+            retriever = DeterministicRetriever(results)
+
+            report = evaluate_retrieval(dataset, retriever, mode="hybrid")
+
+            matching_case = next(
+                result
+                for result in report.cases
+                if result.case_id == case["case_id"]
+            )
+            self.assertIn(
+                expected_kind,
+                {leak["kind"] for leak in matching_case.scope_leaks},
+            )
+            self.assertEqual(report.gate_status, "FAIL")
+
+    def test_authoritative_quality_gate_applies_mrr_threshold(self):
+        cases = []
+        for index in (1, 2):
+            case = self.valid_case()
+            case.update(
+                case_id=f"case-{index:03d}",
+                query=f"排名用例{index}",
+                expected_chunk_ids=[f"chunk-{index}"],
+                expected_doc_ids=[f"doc-{index}"],
+                tags=["charter"],
+            )
+            cases.append(case)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            qa_path = root / "qa.jsonl"
+            qa_bytes = "".join(
+                json.dumps(case, ensure_ascii=False, sort_keys=True) + "\n"
+                for case in cases
+            ).encode("utf-8")
+            qa_path.write_bytes(qa_bytes)
+            manifest = {
+                "dataset_version": "retrieval-test-v1",
+                "retrieval_cases_file": "qa.jsonl",
+                "retrieval_cases_sha256": hashlib.sha256(qa_bytes).hexdigest(),
+                "dataset_sha256": hashlib.sha256(qa_bytes).hexdigest(),
+                "case_count": 2,
+                "created_at": "2026-11-19T00:00:00+08:00",
+                "release_id": "rel-test",
+                "owner": "Francis",
+                "owner_status": "SIGNED_OFF",
+                "immutable": True,
+            }
+            (root / "manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            dataset = load_retrieval_dataset(root)
+
+        retriever = DeterministicRetriever(
+            {
+                "排名用例1": PolicyRetrievalResult(
+                    "FOUND",
+                    "rel-test",
+                    (
+                        evidence("chunk-1", "doc-1"),
+                        *(evidence(f"n1-{rank}", f"n1-doc-{rank}") for rank in range(4)),
+                    ),
+                ),
+                "排名用例2": PolicyRetrievalResult(
+                    "FOUND",
+                    "rel-test",
+                    (
+                        *(evidence(f"n2-{rank}", f"n2-doc-{rank}") for rank in range(4)),
+                        evidence("chunk-2", "doc-2"),
+                    ),
+                ),
+            }
+        )
+
+        report = evaluate_retrieval(
+            dataset,
+            retriever,
+            mode="keyword",
+            authoritative_quality=True,
+        )
+
+        self.assertEqual(report.metrics.recall_at_5, 1.0)
+        self.assertAlmostEqual(report.metrics.mrr, 0.6)
+        self.assertTrue(report.quality_gate_applied)
+        self.assertEqual(report.gate_status, "FAIL")
+
     def test_recall_mrr_and_no_evidence_use_the_contract_denominator(self):
         cases = []
         for index, (query, tags) in enumerate(
@@ -335,6 +543,7 @@ class RetrievalDatasetTests(unittest.TestCase):
                 "dataset_version": "retrieval-test-v1",
                 "retrieval_cases_file": "qa.jsonl",
                 "retrieval_cases_sha256": hashlib.sha256(qa_bytes).hexdigest(),
+                "dataset_sha256": hashlib.sha256(qa_bytes).hexdigest(),
                 "case_count": 3,
                 "created_at": "2026-11-19T00:00:00+08:00",
                 "release_id": "rel-test",
@@ -391,6 +600,7 @@ class RetrievalDatasetTests(unittest.TestCase):
             expected_chunk_ids=["chunk-1"],
             expected_doc_ids=["doc-1"],
             school_ids=["school-001"],
+            document_types=["charter"],
             must_exclude_sources=["blocked-doc"],
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -422,10 +632,44 @@ class RetrievalDatasetTests(unittest.TestCase):
                             "doc-s",
                             school_id="school-999",
                         ),
+                        evidence("wrong-release", "doc-r"),
+                        evidence("wrong-type", "doc-t"),
+                        evidence(
+                            "missing-school",
+                            "doc-m",
+                            school_id=None,
+                        ),
                         evidence("blocked", "blocked-doc"),
                     ),
                 )
             }
+        )
+        result = retriever.results["湘潭大学转专业政策"]
+        wrong_release = replace(
+            result.evidence[5],
+            release_id="rel-other",
+            document=replace(
+                result.evidence[5].document,
+                release_id="rel-other",
+            ),
+        )
+        wrong_type = replace(
+            result.evidence[6],
+            document=replace(
+                result.evidence[6].document,
+                document_type="policy",
+                issuer_type="provincial",
+            ),
+        )
+        retriever.results["湘潭大学转专业政策"] = replace(
+            result,
+            evidence=(
+                *result.evidence[:5],
+                wrong_release,
+                wrong_type,
+                result.evidence[7],
+                result.evidence[8],
+            ),
         )
 
         report = evaluate_retrieval(dataset, retriever, mode="keyword")
@@ -440,10 +684,42 @@ class RetrievalDatasetTests(unittest.TestCase):
                 "year",
                 "category",
                 "school",
+                "release",
+                "document_type",
+                "missing_school_identity",
                 "must_exclude_source",
             ],
         )
         self.assertEqual(report.cases[0].first_diff["field"], "scope_leaks")
+
+    def test_result_release_mismatch_fails_even_when_evidence_is_otherwise_valid(self):
+        case = self.valid_case()
+        case.update(
+            expected_chunk_ids=["chunk-1"],
+            expected_doc_ids=["doc-1"],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_dataset(root, case)
+            dataset = load_retrieval_dataset(root)
+
+        retriever = DeterministicRetriever(
+            {
+                case["query"]: PolicyRetrievalResult(
+                    "FOUND",
+                    "rel-other",
+                    (evidence("chunk-1", "doc-1"),),
+                )
+            }
+        )
+
+        report = evaluate_retrieval(dataset, retriever, mode="keyword")
+
+        self.assertEqual(report.gate_status, "FAIL")
+        self.assertIn(
+            "result_release",
+            {leak["kind"] for leak in report.cases[0].scope_leaks},
+        )
 
     def test_retrieval_fault_becomes_a_failed_case_not_a_crashed_report(self):
         case = self.valid_case()
@@ -541,12 +817,26 @@ class RetrievalDatasetTests(unittest.TestCase):
             "top_k": 20,
             "pool_k": 20,
         }
+        run_identity = {
+            "algorithm_config_version": "retrieval-algo-v1",
+            "model_route_version": "fixture-route-v1",
+            "price_table_version": "not-applicable-fixture",
+            "verifier_version": "not-applicable-retrieval-fixture",
+            "environment": identity,
+            "hardware_profile": {
+                "os": "Linux",
+                "cpu_count": 8,
+                "memory_bytes": 8589934592,
+            },
+            "baseline_eval_run_id": "eval_baseline",
+        }
 
         first = build_baseline(
             report,
             dataset,
             code_identity=identity,
             retrieval_config=retrieval,
+            run_identity=run_identity,
             generated_at="2026-11-19T12:00:00+08:00",
         )
         second = build_baseline(
@@ -554,6 +844,7 @@ class RetrievalDatasetTests(unittest.TestCase):
             dataset,
             code_identity=identity,
             retrieval_config=retrieval,
+            run_identity=run_identity,
             generated_at="2026-11-19T13:00:00+08:00",
         )
 
@@ -561,12 +852,31 @@ class RetrievalDatasetTests(unittest.TestCase):
         self.assertEqual(first["result_sha256"], second["result_sha256"])
         self.assertEqual(
             first["dataset"]["sha256"],
-            dataset.manifest["retrieval_cases_sha256"],
+            dataset.manifest["dataset_sha256"],
         )
         self.assertEqual(first["code_identity"]["git_sha"], identity["git_sha"])
         self.assertEqual(first["retrieval"]["embedder"], "deterministic-fixture-v1")
         self.assertFalse(first["retrieval"]["rerank_enabled"])
         self.assertEqual(first["retrieval"]["rrf_k"], 60)
+        self.assertEqual(
+            first["algorithm_config_version"],
+            "retrieval-algo-v1",
+        )
+        self.assertEqual(first["model_route_version"], "fixture-route-v1")
+        self.assertEqual(
+            first["price_table_version"],
+            "not-applicable-fixture",
+        )
+        self.assertEqual(
+            first["verifier_version"],
+            "not-applicable-retrieval-fixture",
+        )
+        self.assertEqual(
+            first["hardware_profile"]["cpu_count"],
+            8,
+        )
+        self.assertEqual(first["baseline_eval_run_id"], "eval_baseline")
+        self.assertEqual(first["environment"], identity)
         self.assertEqual(
             first["cases"][0]["actual_evidence"][0]["chunk_id"], "chunk-1"
         )
@@ -598,6 +908,7 @@ class RetrievalEvaluationPostgresTests(unittest.TestCase):
             "migrations/15_policy_retrieval_release_scope.sql",
             "migrations/16_policy_vector_release_identity.sql",
             "migrations/17_policy_rerank_release_identity.sql",
+            "migrations/18_policy_retrieval_config_identity.sql",
         ):
             self.apply_sql_file(migration)
         self.seed_release()

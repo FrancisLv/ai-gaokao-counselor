@@ -88,20 +88,43 @@ _SCOPE_FROM_AND_FILTERS = """
     WHERE m.release_id = %(release_id)s
       AND d.title IS NOT NULL
       AND d.document_type IS NOT NULL
+      AND d.document_type = ANY(
+          ARRAY['charter', 'policy', 'physical_exam', 'university_notice']
+      )
       AND d.issuer IS NOT NULL
       AND d.issuer_type IS NOT NULL
+      AND d.issuer_type = ANY(
+          ARRAY['national', 'provincial', 'university']
+      )
+      AND (
+          d.issuer_type <> 'university'
+          OR d.school_id IS NOT NULL
+      )
       AND d.issuer_id IS NOT NULL
       AND d.source_uri IS NOT NULL
       AND d.raw_storage_uri IS NOT NULL
       AND d.fetched_at IS NOT NULL
       AND d.content_sha256 IS NOT NULL
+      AND d.content_sha256 ~ '^[0-9a-f]{64}$'
       AND c.text IS NOT NULL
+      AND char_length(c.text) BETWEEN 1 AND 600
       AND c.text_sha256 IS NOT NULL
+      AND c.text_sha256 ~ '^[0-9a-f]{64}$'
       AND c.section_path IS NOT NULL
       AND c.chunk_set_version IS NOT NULL
       AND cs.index_version IS NOT NULL
+      AND (c.char_start IS NULL) = (c.char_end IS NULL)
+      AND (
+          c.char_start IS NULL
+          OR (
+              c.char_start >= 0
+              AND c.char_end >= c.char_start
+              AND c.char_end - c.char_start = char_length(c.text)
+          )
+      )
       AND (
           cardinality(%(school_ids)s::text[]) = 0
+          OR d.school_id IS NULL
           OR d.school_id = ANY(%(school_ids)s::text[])
       )
       AND (
@@ -220,6 +243,23 @@ class RetrievePolicy:
 
     def retrieve(self, query: PolicyRetrievalQuery) -> PolicyRetrievalResult:
         try:
+            with self._conn.transaction():
+                with self._conn.cursor() as cur:
+                    cur.execute(
+                        "SET TRANSACTION ISOLATION LEVEL "
+                        "REPEATABLE READ, READ ONLY"
+                    )
+                return self._retrieve_in_snapshot(query)
+        except psycopg.Error as exc:
+            raise PolicyRetrievalError(
+                "RETRIEVAL_UNAVAILABLE",
+                "policy retrieval database is unavailable",
+            ) from exc
+
+    def _retrieve_in_snapshot(
+        self, query: PolicyRetrievalQuery
+    ) -> PolicyRetrievalResult:
+        try:
             with self._conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     """
@@ -229,7 +269,8 @@ class RetrievePolicy:
                         rr.enabled AS rerank_enabled,
                         rr.model_name AS rerank_model,
                         rr.config_version AS rerank_config_version,
-                        rr.timeout_ms AS rerank_timeout_ms
+                        rr.timeout_ms AS rerank_timeout_ms,
+                        r.rrf_k
                     FROM release r
                     LEFT JOIN release_policy_rerank rr
                       ON rr.release_id = r.release_id
@@ -252,6 +293,16 @@ class RetrievePolicy:
             return PolicyRetrievalResult(
                 status="RELEASE_UNAVAILABLE",
                 release_id=query.release_id,
+            )
+        rrf_k = release.get("rrf_k")
+        if (
+            isinstance(rrf_k, bool)
+            or not isinstance(rrf_k, int)
+            or rrf_k != RRF_K
+        ):
+            raise PolicyRetrievalError(
+                "RETRIEVAL_CONFIG_MISMATCH",
+                "the bound release has no compatible RRF retrieval config",
             )
 
         scope = query.scope
@@ -327,7 +378,7 @@ class RetrievePolicy:
                     "all policy retrieval channels are unavailable",
                 )
 
-            rows = self._rrf_fuse(vector_rows, keyword_rows)
+            rows = self._rrf_fuse(vector_rows, keyword_rows, rrf_k=rrf_k)
             if rows and rerank_enabled:
                 rows, degraded_reason = self._rerank_pool(
                     query=query,
@@ -367,15 +418,25 @@ class RetrievePolicy:
                     "EVIDENCE_PROJECTION_FAILED",
                     "retrieved candidate could not be projected as evidence",
                 ) from exc
-            if projected is not None:
-                evidence.append(projected)
-            else:
-                raise PolicyRetrievalError(
-                    "EVIDENCE_PROJECTION_FAILED",
-                    "retrieved candidate could not be projected as evidence",
-                )
+            if projected is None:
+                continue
+            evidence.append(projected)
             if len(evidence) >= query.top_k:
                 break
+        if not evidence:
+            return PolicyRetrievalResult(
+                status="NO_EVIDENCE",
+                release_id=query.release_id,
+                diagnostics=PolicyRetrievalDiagnostics(
+                    vector_candidates=vector_count,
+                    keyword_candidates=keyword_count,
+                    rerank_enabled=rerank_enabled,
+                    rerank_model=rerank_model,
+                    rerank_config_version=rerank_config_version,
+                    rerank_timeout_ms=rerank_timeout_ms,
+                    degraded_reason=degraded_reason,
+                ),
+            )
         return PolicyRetrievalResult(
             status="FOUND",
             release_id=query.release_id,
@@ -392,28 +453,45 @@ class RetrievePolicy:
         )
 
     @staticmethod
-    def _rrf_fuse(vector_rows: list[dict], keyword_rows: list[dict]) -> list[dict]:
+    def _rrf_fuse(
+        vector_rows: list[dict],
+        keyword_rows: list[dict],
+        *,
+        rrf_k: int = RRF_K,
+    ) -> list[dict]:
         fused: dict[str, dict] = {}
         scores: dict[str, float] = {}
+        vector_ranks: dict[str, int] = {}
+        keyword_ranks: dict[str, int] = {}
 
         for rank, row in enumerate(vector_rows, start=1):
             chunk_id = row["chunk_id"]
-            fused.setdefault(chunk_id, row)
+            fused.setdefault(chunk_id, dict(row))
+            vector_ranks[chunk_id] = rank
             scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (
-                RRF_K + rank
+                rrf_k + rank
             )
         for rank, row in enumerate(keyword_rows, start=1):
             chunk_id = row["chunk_id"]
-            fused.setdefault(chunk_id, row)
+            fused.setdefault(chunk_id, dict(row))
+            keyword_ranks[chunk_id] = rank
             scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (
-                RRF_K + rank
+                rrf_k + rank
             )
 
         ordered_ids = sorted(fused, key=lambda chunk_id: (
             -scores[chunk_id],
             chunk_id,
         ))
-        return [fused[chunk_id] for chunk_id in ordered_ids]
+        return [
+            {
+                **fused[chunk_id],
+                "vector_rank": vector_ranks.get(chunk_id),
+                "keyword_rank": keyword_ranks.get(chunk_id),
+                "rrf_score": scores[chunk_id],
+            }
+            for chunk_id in ordered_ids
+        ]
 
     def _rerank_pool(
         self,
@@ -558,6 +636,30 @@ class RetrievePolicy:
                 "query embedding could not be generated",
             ) from exc
         vector = "[" + ",".join(f"{value:.6f}" for value in query_embedding) + "]"
+        sql, params = self._vector_query(
+            query,
+            vector,
+            identity,
+        )
+        with self._conn.transaction():
+            with self._conn.cursor(row_factory=dict_row) as cur:
+                # Accessing the vector operator loads the extension before its
+                # custom GUCs are set in a fresh backend.
+                cur.execute("SELECT NULL::vector <=> NULL::vector")
+                cur.execute(
+                    """
+                    SELECT
+                        set_config('hnsw.iterative_scan', 'strict_order', true),
+                        set_config('hnsw.max_scan_tuples', '2147483647', true),
+                        set_config('hnsw.ef_search', %s, true)
+                    """,
+                    (str(max(40, params["pool_k"])),),
+                )
+                cur.execute(sql, params)
+                rows = [dict(row) for row in cur.fetchall()]
+        return rows, len(rows)
+
+    def _vector_query(self, query, vector, identity):
         params = {
             "release_id": query.release_id,
             "query_embedding": vector,
@@ -590,23 +692,7 @@ class RetrievePolicy:
             FROM ann_candidates
             ORDER BY vector_distance, chunk_id ASC
         """
-        with self._conn.transaction():
-            with self._conn.cursor(row_factory=dict_row) as cur:
-                # Accessing the vector operator loads the extension before its
-                # custom GUCs are set in a fresh backend.
-                cur.execute("SELECT NULL::vector <=> NULL::vector")
-                cur.execute(
-                    """
-                    SELECT
-                        set_config('hnsw.iterative_scan', 'strict_order', true),
-                        set_config('hnsw.max_scan_tuples', '2147483647', true),
-                        set_config('hnsw.ef_search', %s, true)
-                    """,
-                    (str(max(40, params["pool_k"])),),
-                )
-                cur.execute(sql, params)
-                rows = [dict(row) for row in cur.fetchall()]
-        return rows, len(rows)
+        return sql, params
 
     def _keyword_candidates(
         self,
@@ -659,9 +745,10 @@ class RetrievePolicy:
             ORDER BY keyword_similarity DESC, chunk_id ASC
             LIMIT %(pool_k)s
         """
-        with self._conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(sql, params)
-            rows = [dict(row) for row in cur.fetchall()]
+        with self._conn.transaction():
+            with self._conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, params)
+                rows = [dict(row) for row in cur.fetchall()]
         count = int(rows[0]["candidate_count"]) if rows else 0
         return rows, count
 

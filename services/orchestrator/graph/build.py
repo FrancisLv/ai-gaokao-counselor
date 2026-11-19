@@ -59,3 +59,31 @@ def build_graph(
     g.add_edge("check_conditional", END)  # TODO: 接 STRATEGIZING…
 
     return g.compile()
+
+
+async def build_run_bound_graph(
+    *,
+    lifecycle,
+    principal_id: str,
+    run_id,
+    retrieve_policy: retrieve.RetrievePolicyPort,
+    school_ids: tuple[str, ...] = (),
+    document_types: tuple[str, ...] = (),
+    mode: str = "hybrid",
+    top_k: int = 5,
+    pool_k: int = 20,
+):
+    """生产装配入口：从 RunLifecycle 权威记录生成 binding 后构图。"""
+    binding = await lifecycle.GetRetrievalRunBinding(
+        principal_id=principal_id,
+        run_id=run_id,
+        school_ids=school_ids,
+        document_types=document_types,
+        mode=mode,
+        top_k=top_k,
+        pool_k=pool_k,
+    )
+    return build_graph(
+        retrieve_policy=retrieve_policy,
+        retrieval_binding=binding,
+    )

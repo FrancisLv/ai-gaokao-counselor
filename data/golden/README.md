@@ -5,16 +5,16 @@
 评测集按不可变版本目录存放。当前检索集版本：
 
 ```text
-retrieval-hunan-2025-v0.1.0-draft/
+retrieval-hunan-2025-v0.2.0-draft/
   qa.jsonl
   manifest.json
 ```
 
 每个版本目录至少包含：
 
-- `qa.jsonl`：检索用例，至少包含 `case_id / query / scope / expected_chunk_ids / expected_doc_ids / must_exclude_sources / tags / criticality`
+- `qa.jsonl`：检索用例，至少包含 `case_id / query / scope / expected_chunk_ids / expected_doc_ids / must_exclude_sources / tags / criticality / interference`
 - `cases.jsonl`：端到端用例，至少包含 `case_id / input_profile / scripted_model_responses / expected / tags / criticality`
-- `manifest.json`：记录 `dataset_version`、Case 文件 SHA256、case count、release、标注人、owner 状态和创建时间
+- `manifest.json`：记录 `dataset_version`、dataset/Case 文件 SHA256、case count、release、标注人、owner 状态和创建时间
 
 当前检索草稿的 `owner_status` 为 `PENDING_SIGNOFF`。在 Francis 完成定标前，只能用于
 harness 冒烟、diff 和待审阅基线，不能宣称正式检索质量门禁。全国/省级长期政策用例
@@ -50,6 +50,16 @@ scripts/run_retrieval_eval.py \
 真实基线与 fixture 基线必须分开保存。fixture 输出中的
 `retrieval.authoritative_quality=false` 表示它只验证执行器、指标、scope leak 和
 报告格式，不代表真实数据上的 recall 或 MRR。
+
+当前冻结 fixture baseline：
+
+```text
+baselines/retrieval-hunan-2025-v0.2.0-draft.rerank-off.fixture.json
+```
+
+baseline 记录 dataset SHA、code identity、model route、price table、verifier、
+algorithm config、hardware/environment、baseline identity，以及 retrieval 的
+embedding/rerank/RRF/index 配置。
 
 用途（见架构文档第 11 章）：
 - 检索质量：recall@k、MRR、citation accuracy

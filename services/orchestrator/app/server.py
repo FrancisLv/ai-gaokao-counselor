@@ -48,6 +48,40 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
         self._lifecycle = lifecycle
         self._graph = graph or build_graph()
 
+    async def BuildRetrievalGraph(
+        self,
+        *,
+        principal_id: str,
+        run_id: UUID,
+        retrieve_policy,
+        school_ids: tuple[str, ...] = (),
+        document_types: tuple[str, ...] = (),
+        mode: str = "hybrid",
+        top_k: int = 5,
+        pool_k: int = 20,
+    ):
+        """为后续 run-bound 在线 API 提供生产构图 adapter。
+
+        StartGraph/SubmitRun 当前先受理未确认画像；待在线 API 接入后，由服务端
+        在对应 run 进入检索阶段时调用本方法，不接受客户端 binding 覆盖。
+        """
+        from graph.build import build_run_bound_graph
+
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            raise RuntimeError("RUN_LIFECYCLE_UNAVAILABLE")
+        return await build_run_bound_graph(
+            lifecycle=lifecycle,
+            principal_id=principal_id,
+            run_id=run_id,
+            retrieve_policy=retrieve_policy,
+            school_ids=school_ids,
+            document_types=document_types,
+            mode=mode,
+            top_k=top_k,
+            pool_k=pool_k,
+        )
+
     async def StartGraph(self, request, context) -> AsyncIterator["orchestrator_pb2.GraphEvent"]:
         lifecycle = await self._require_lifecycle(context)
         principal_id = await self._principal(context)

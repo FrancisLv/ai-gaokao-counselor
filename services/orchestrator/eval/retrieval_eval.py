@@ -53,6 +53,7 @@ class RetrievalEvaluationReport:
     no_evidence_failed: int
     cases: tuple[RetrievalCaseResult, ...]
     gate_status: str
+    quality_gate_applied: bool = False
 
 
 _SUPPORTED_PROVINCES = frozenset({"湖南"})
@@ -64,8 +65,10 @@ _SUPPORTED_DOCUMENT_TYPES = frozenset(
 _CRITICALITIES = frozenset({"CRITICAL", "NORMAL"})
 _OWNER_STATUSES = frozenset({"DRAFT", "PENDING_SIGNOFF", "SIGNED_OFF"})
 _RECALL_AT_5_MIN = 0.80
+_MRR_MIN = 0.65
 _REQUIRED_MANIFEST_FIELDS = (
     "dataset_version",
+    "dataset_sha256",
     "retrieval_cases_file",
     "retrieval_cases_sha256",
     "case_count",
@@ -84,6 +87,7 @@ _REQUIRED_CASE_FIELDS = (
     "must_exclude_sources",
     "tags",
     "criticality",
+    "interference",
 )
 
 
@@ -102,6 +106,10 @@ def load_retrieval_dataset(dataset_dir: str | Path) -> RetrievalDataset:
     if actual_sha256 != manifest["retrieval_cases_sha256"]:
         raise ValueError(
             "retrieval cases sha256 does not match the immutable manifest"
+        )
+    if manifest["dataset_sha256"] != actual_sha256:
+        raise ValueError(
+            "dataset_sha256 does not match the retrieval-only dataset"
         )
     cases = tuple(
         json.loads(line)
@@ -138,6 +146,15 @@ def _validate_manifest(manifest: dict) -> None:
         )
     ):
         raise ValueError("manifest.retrieval_cases_sha256 is invalid")
+    if (
+        not isinstance(manifest["dataset_sha256"], str)
+        or len(manifest["dataset_sha256"]) != 64
+        or any(
+            char not in "0123456789abcdef"
+            for char in manifest["dataset_sha256"]
+        )
+    ):
+        raise ValueError("manifest.dataset_sha256 is invalid")
     try:
         datetime.fromisoformat(manifest["created_at"])
     except (TypeError, ValueError) as exc:
@@ -214,6 +231,26 @@ def _validate_case(case: dict) -> None:
         )
     ):
         raise ValueError(f"{case_id}: school_ids must be a string list")
+    interference = case.get("interference")
+    if not isinstance(interference, list):
+        raise ValueError(f"{case_id}: interference must be a list")
+    for item in interference:
+        if (
+            not isinstance(item, dict)
+            or item.get("kind")
+            not in {
+                "province",
+                "year",
+                "category",
+                "batch",
+                "school_id",
+                "document_type",
+            }
+            or item.get("value") in (None, "")
+        ):
+            raise ValueError(
+                f"{case_id}: interference entries require kind and value"
+            )
 
     scope = case["scope"]
     if not isinstance(scope, dict):
@@ -242,6 +279,46 @@ def _validate_case(case: dict) -> None:
         raise ValueError(
             f"{case_id}: scope.batch is unsupported"
         )
+    for item in interference:
+        kind = item["kind"]
+        value = item["value"]
+        if kind == "province" and value in {"全国", scope["province"]}:
+            raise ValueError(
+                f"{case_id}: province interference must conflict with scope"
+            )
+        if kind == "year" and (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value == scope["application_year"]
+        ):
+            raise ValueError(
+                f"{case_id}: year interference must conflict with scope"
+            )
+        if kind == "category" and value in {"不限", scope["category"]}:
+            raise ValueError(
+                f"{case_id}: category interference must conflict with scope"
+            )
+        if kind == "batch" and value in {"不限", scope["batch"]}:
+            raise ValueError(
+                f"{case_id}: batch interference must conflict with scope"
+            )
+        if kind == "school_id" and value in set(case.get("school_ids", ())):
+            raise ValueError(
+                f"{case_id}: school interference must conflict with school_ids"
+            )
+    required_interference = {
+        "cross_province": "province",
+        "cross_year": "year",
+        "cross_category": "category",
+        "wrong_school": "school_id",
+    }
+    for tag, kind in required_interference.items():
+        if tag in case["tags"] and not any(
+            item["kind"] == kind for item in interference
+        ):
+            raise ValueError(
+                f"{case_id}: {tag} requires {kind} interference metadata"
+            )
     expected = set(case["expected_chunk_ids"]) | set(
         case["expected_doc_ids"]
     ) | set(case.get("school_ids", ()))
@@ -259,6 +336,7 @@ def evaluate_retrieval(
     *,
     mode: str = "hybrid",
     rerank_enabled: bool = False,
+    authoritative_quality: bool = False,
 ) -> RetrievalEvaluationReport:
     if rerank_enabled:
         raise ValueError("rerank_enabled=true is not accepted by this baseline")
@@ -323,7 +401,12 @@ def evaluate_retrieval(
                 or item.document.doc_id in expected_ids
             )
         ]
-        scope_leaks = _scope_leaks(case, result.evidence)
+        scope_leaks = _scope_leaks(
+            case,
+            result.evidence,
+            expected_release_id=release_id,
+            result_release_id=result.release_id,
+        )
         if result.evidence:
             cases_with_evidence += 1
         if scope_leaks:
@@ -444,8 +527,10 @@ def evaluate_retrieval(
         if (
             eligible_case_count > 0
             and recall_at_5 >= _RECALL_AT_5_MIN
+            and (not authoritative_quality or mrr >= _MRR_MIN)
             and no_evidence_failed == 0
             and metrics.scope_leak_rate == 0
+            and all(case.first_diff is None for case in case_results)
         )
         else "FAIL"
     )
@@ -458,14 +543,29 @@ def evaluate_retrieval(
         no_evidence_failed=no_evidence_failed,
         cases=tuple(case_results),
         gate_status=gate_status,
+        quality_gate_applied=authoritative_quality,
     )
 
 
-def _scope_leaks(case: dict, evidence_items) -> tuple[dict, ...]:
+def _scope_leaks(
+    case: dict,
+    evidence_items,
+    *,
+    expected_release_id: str,
+    result_release_id: str,
+) -> tuple[dict, ...]:
     scope = case["scope"]
     allowed_schools = set(case.get("school_ids", ()))
     excluded_sources = set(case["must_exclude_sources"])
     leaks = []
+    if result_release_id != expected_release_id:
+        leaks.append(
+            {
+                "kind": "result_release",
+                "chunk_id": None,
+                "doc_id": None,
+            }
+        )
     for item in evidence_items:
         document = item.document
         applicability = document.applicability
@@ -473,6 +573,11 @@ def _scope_leaks(case: dict, evidence_items) -> tuple[dict, ...]:
             "chunk_id": document.chunk_id,
             "doc_id": document.doc_id,
         }
+        if (
+            item.release_id != expected_release_id
+            or document.release_id != expected_release_id
+        ):
+            leaks.append({"kind": "release", **common})
         if (
             "全国" not in applicability.regions
             and scope["province"] not in applicability.regions
@@ -496,12 +601,21 @@ def _scope_leaks(case: dict, evidence_items) -> tuple[dict, ...]:
             and scope["batch"] not in applicability.batches
         ):
             leaks.append({"kind": "batch", **common})
+        expected_types = set(case.get("document_types", ()))
+        if expected_types and document.document_type not in expected_types:
+            leaks.append({"kind": "document_type", **common})
         if (
             allowed_schools
             and document.school_id is not None
             and document.school_id not in allowed_schools
         ):
             leaks.append({"kind": "school", **common})
+        school_specific = (
+            document.document_type in {"charter", "university_notice"}
+            or document.issuer_type == "university"
+        )
+        if allowed_schools and school_specific and document.school_id is None:
+            leaks.append({"kind": "missing_school_identity", **common})
         if (
             document.doc_id in excluded_sources
             or document.chunk_id in excluded_sources
@@ -520,8 +634,26 @@ def build_baseline(
     *,
     code_identity: dict,
     retrieval_config: dict,
+    run_identity: dict,
     generated_at: str,
 ) -> dict:
+    required_run_identity = (
+        "algorithm_config_version",
+        "model_route_version",
+        "price_table_version",
+        "verifier_version",
+        "environment",
+        "hardware_profile",
+        "baseline_eval_run_id",
+    )
+    missing_run_identity = [
+        key for key in required_run_identity if key not in run_identity
+    ]
+    if missing_run_identity:
+        raise ValueError(
+            "run_identity is missing required fields: "
+            + ", ".join(missing_run_identity)
+        )
     cases = []
     for case_result in report.cases:
         cases.append(
@@ -568,11 +700,11 @@ def build_baseline(
         )
 
     payload = {
-        "schema_version": "retrieval-eval-baseline-v1",
+        "schema_version": "retrieval-eval-baseline-v2",
         "generated_at": generated_at,
         "dataset": {
             "version": dataset.manifest["dataset_version"],
-            "sha256": dataset.manifest["retrieval_cases_sha256"],
+            "sha256": dataset.manifest["dataset_sha256"],
             "case_count": dataset.manifest["case_count"],
             "owner": dataset.manifest["owner"],
             "owner_status": dataset.manifest["owner_status"],
@@ -580,8 +712,18 @@ def build_baseline(
         "release_id": report.release_id,
         "code_identity": code_identity,
         "retrieval": retrieval_config,
+        "algorithm_config_version": run_identity[
+            "algorithm_config_version"
+        ],
+        "model_route_version": run_identity["model_route_version"],
+        "price_table_version": run_identity["price_table_version"],
+        "verifier_version": run_identity["verifier_version"],
+        "environment": run_identity["environment"],
+        "hardware_profile": run_identity["hardware_profile"],
+        "baseline_eval_run_id": run_identity["baseline_eval_run_id"],
         "thresholds": {
             "recall_at_5_min": _RECALL_AT_5_MIN,
+            "mrr_min": _MRR_MIN,
             "scope_leak_rate_max": 0.0,
         },
         "metrics": {
@@ -594,6 +736,7 @@ def build_baseline(
         "no_evidence_passed": report.no_evidence_passed,
         "no_evidence_failed": report.no_evidence_failed,
         "gate_status": report.gate_status,
+        "quality_gate_applied": report.quality_gate_applied,
         "failed_case_ids": [
             case_result.case_id
             for case_result in report.cases

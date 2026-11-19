@@ -1,0 +1,1230 @@
+{
+  "schema_version": "retrieval-eval-baseline-v2",
+  "generated_at": "2026-11-19T05:35:37.585749+00:00",
+  "dataset": {
+    "version": "retrieval-hunan-2025-v0.2.0-draft",
+    "sha256": "dc6475a722a5e40bca9e22c5df3e1a36dcd28f79bb67b157ab2d67b2ed8ad453",
+    "case_count": 30,
+    "owner": "Francis",
+    "owner_status": "PENDING_SIGNOFF"
+  },
+  "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+  "code_identity": {
+    "git_sha": "abc47ebf321474b00996d325737def9bb8d3fe63",
+    "worktree_dirty": true,
+    "source_tree_sha256": "2efd03709203dc2ab74ae8160984e77505e0b2fc973697e04803157ea18b56e7",
+    "python_version": "3.11.17",
+    "platform": "macOS-26.4.1-arm64-arm-64bit"
+  },
+  "retrieval": {
+    "mode": "hybrid",
+    "embedder": "deterministic-fixture-v1",
+    "rerank_enabled": false,
+    "rerank_model": null,
+    "rrf_k": 60,
+    "index_version": "fixture-index-v1",
+    "as_of": "2025-11-19",
+    "top_k": 20,
+    "pool_k": 20,
+    "execution": "deterministic-contract-fixture",
+    "authoritative_quality": false
+  },
+  "algorithm_config_version": "retrieval-golden-v1",
+  "model_route_version": "local-embedding-v1",
+  "price_table_version": "not-applicable-local-retrieval",
+  "verifier_version": "not-applicable-retrieval-only",
+  "environment": {
+    "python_version": "3.11.17",
+    "platform": "macOS-26.4.1-arm64-arm-64bit",
+    "offline": true
+  },
+  "hardware_profile": {
+    "machine": "arm64",
+    "processor": "arm",
+    "cpu_count": 18
+  },
+  "baseline_eval_run_id": null,
+  "thresholds": {
+    "recall_at_5_min": 0.8,
+    "mrr_min": 0.65,
+    "scope_leak_rate_max": 0.0
+  },
+  "metrics": {
+    "retrieval_recall_at_5": 1.0,
+    "retrieval_recall_at_20": 1.0,
+    "retrieval_mrr": 1.0,
+    "retrieval_scope_leak_rate": 0.0
+  },
+  "eligible_case_count": 28,
+  "no_evidence_passed": 2,
+  "no_evidence_failed": 0,
+  "gate_status": "PASS",
+  "quality_gate_applied": false,
+  "failed_case_ids": [],
+  "cases": [
+    {
+      "case_id": "retrieval-001",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_eafdeb597333_c0008"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_eafdeb597333"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-001:doc_2025_eafdeb597333_c0008",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_eafdeb597333_c0008",
+          "doc_id": "doc_2025_eafdeb597333",
+          "school_id": "385",
+          "title": "fixture:retrieval-001",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-001",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-002",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_eafdeb597333_c0004"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_eafdeb597333"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-002:doc_2025_eafdeb597333_c0004",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_eafdeb597333_c0004",
+          "doc_id": "doc_2025_eafdeb597333",
+          "school_id": "385",
+          "title": "fixture:retrieval-002",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-002",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-003",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_eafdeb597333_c0005"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_eafdeb597333"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-003:doc_2025_eafdeb597333_c0005",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_eafdeb597333_c0005",
+          "doc_id": "doc_2025_eafdeb597333",
+          "school_id": "385",
+          "title": "fixture:retrieval-003",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-003",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-004",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_eafdeb597333_c0016"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_eafdeb597333"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-004:doc_2025_eafdeb597333_c0016",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_eafdeb597333_c0016",
+          "doc_id": "doc_2025_eafdeb597333",
+          "school_id": "385",
+          "title": "fixture:retrieval-004",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-004",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-005",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_1a91a6f3cc9b_c0014"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_1a91a6f3cc9b"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-005:doc_2025_1a91a6f3cc9b_c0014",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_1a91a6f3cc9b_c0014",
+          "doc_id": "doc_2025_1a91a6f3cc9b",
+          "school_id": "391",
+          "title": "fixture:retrieval-005",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-005",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-006",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_1a91a6f3cc9b_c0015",
+        "doc_2025_1a91a6f3cc9b_c0016"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_1a91a6f3cc9b"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-006:doc_2025_1a91a6f3cc9b_c0015",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_1a91a6f3cc9b_c0015",
+          "doc_id": "doc_2025_1a91a6f3cc9b",
+          "school_id": "391",
+          "title": "fixture:retrieval-006",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-006",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        },
+        {
+          "evidence_id": "fixture:retrieval-006:doc_2025_1a91a6f3cc9b_c0016",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_1a91a6f3cc9b_c0016",
+          "doc_id": "doc_2025_1a91a6f3cc9b",
+          "school_id": "391",
+          "title": "fixture:retrieval-006",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-006",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-007",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_1a91a6f3cc9b_c0010"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_1a91a6f3cc9b"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-007:doc_2025_1a91a6f3cc9b_c0010",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_1a91a6f3cc9b_c0010",
+          "doc_id": "doc_2025_1a91a6f3cc9b",
+          "school_id": "391",
+          "title": "fixture:retrieval-007",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-007",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "历史类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-008",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_1a91a6f3cc9b_c0012"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_1a91a6f3cc9b"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-008:doc_2025_1a91a6f3cc9b_c0012",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_1a91a6f3cc9b_c0012",
+          "doc_id": "doc_2025_1a91a6f3cc9b",
+          "school_id": "391",
+          "title": "fixture:retrieval-008",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-008",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-009",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_05dfbb2c95b0_c0005"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_05dfbb2c95b0"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-009:doc_2025_05dfbb2c95b0_c0005",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_05dfbb2c95b0_c0005",
+          "doc_id": "doc_2025_05dfbb2c95b0",
+          "school_id": "44",
+          "title": "fixture:retrieval-009",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-009",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-010",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_05dfbb2c95b0_c0006"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_05dfbb2c95b0"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-010:doc_2025_05dfbb2c95b0_c0006",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_05dfbb2c95b0_c0006",
+          "doc_id": "doc_2025_05dfbb2c95b0",
+          "school_id": "44",
+          "title": "fixture:retrieval-010",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-010",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-011",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_05dfbb2c95b0_c0007"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_05dfbb2c95b0"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-011:doc_2025_05dfbb2c95b0_c0007",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_05dfbb2c95b0_c0007",
+          "doc_id": "doc_2025_05dfbb2c95b0",
+          "school_id": "44",
+          "title": "fixture:retrieval-011",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-011",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-012",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_05dfbb2c95b0_c0006"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_05dfbb2c95b0"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-012:doc_2025_05dfbb2c95b0_c0006",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_05dfbb2c95b0_c0006",
+          "doc_id": "doc_2025_05dfbb2c95b0",
+          "school_id": "44",
+          "title": "fixture:retrieval-012",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-012",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-013",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_36d92dfdff56_c0011"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_36d92dfdff56"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-013:doc_2025_36d92dfdff56_c0011",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_36d92dfdff56_c0011",
+          "doc_id": "doc_2025_36d92dfdff56",
+          "school_id": "58",
+          "title": "fixture:retrieval-013",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-013",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "历史类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-014",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_36d92dfdff56_c0008"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_36d92dfdff56"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-014:doc_2025_36d92dfdff56_c0008",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_36d92dfdff56_c0008",
+          "doc_id": "doc_2025_36d92dfdff56",
+          "school_id": "58",
+          "title": "fixture:retrieval-014",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-014",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "历史类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-015",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_36d92dfdff56_c0009"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_36d92dfdff56"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-015:doc_2025_36d92dfdff56_c0009",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_36d92dfdff56_c0009",
+          "doc_id": "doc_2025_36d92dfdff56",
+          "school_id": "58",
+          "title": "fixture:retrieval-015",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-015",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-016",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_36d92dfdff56_c0011"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_36d92dfdff56"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-016:doc_2025_36d92dfdff56_c0011",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_36d92dfdff56_c0011",
+          "doc_id": "doc_2025_36d92dfdff56",
+          "school_id": "58",
+          "title": "fixture:retrieval-016",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-016",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-017",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_726bf18a4a49_c0007"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_726bf18a4a49"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-017:doc_2025_726bf18a4a49_c0007",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_726bf18a4a49_c0007",
+          "doc_id": "doc_2025_726bf18a4a49",
+          "school_id": "402",
+          "title": "fixture:retrieval-017",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-017",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-018",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_726bf18a4a49_c0004"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_726bf18a4a49"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-018:doc_2025_726bf18a4a49_c0004",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_726bf18a4a49_c0004",
+          "doc_id": "doc_2025_726bf18a4a49",
+          "school_id": "402",
+          "title": "fixture:retrieval-018",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-018",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "历史类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-019",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_726bf18a4a49_c0008",
+        "doc_2025_726bf18a4a49_c0009"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_726bf18a4a49"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-019:doc_2025_726bf18a4a49_c0008",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_726bf18a4a49_c0008",
+          "doc_id": "doc_2025_726bf18a4a49",
+          "school_id": "402",
+          "title": "fixture:retrieval-019",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-019",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        },
+        {
+          "evidence_id": "fixture:retrieval-019:doc_2025_726bf18a4a49_c0009",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_726bf18a4a49_c0009",
+          "doc_id": "doc_2025_726bf18a4a49",
+          "school_id": "402",
+          "title": "fixture:retrieval-019",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-019",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-020",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_220060bad19e_c0006"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_220060bad19e"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-020:doc_2025_220060bad19e_c0006",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_220060bad19e_c0006",
+          "doc_id": "doc_2025_220060bad19e",
+          "school_id": "123",
+          "title": "fixture:retrieval-020",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-020",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-021",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_220060bad19e_c0005"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_220060bad19e"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-021:doc_2025_220060bad19e_c0005",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_220060bad19e_c0005",
+          "doc_id": "doc_2025_220060bad19e",
+          "school_id": "123",
+          "title": "fixture:retrieval-021",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-021",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-022",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_220060bad19e_c0004"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_220060bad19e"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-022:doc_2025_220060bad19e_c0004",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_220060bad19e_c0004",
+          "doc_id": "doc_2025_220060bad19e",
+          "school_id": "123",
+          "title": "fixture:retrieval-022",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-022",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "历史类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-023",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_654d7a89f7c7_c0015"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_654d7a89f7c7"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-023:doc_2025_654d7a89f7c7_c0015",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_654d7a89f7c7_c0015",
+          "doc_id": "doc_2025_654d7a89f7c7",
+          "school_id": "389",
+          "title": "fixture:retrieval-023",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-023",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-024",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_654d7a89f7c7_c0016"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_654d7a89f7c7"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-024:doc_2025_654d7a89f7c7_c0016",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_654d7a89f7c7_c0016",
+          "doc_id": "doc_2025_654d7a89f7c7",
+          "school_id": "389",
+          "title": "fixture:retrieval-024",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-024",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-025",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_a10dc101f3e9_c0009"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_a10dc101f3e9"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-025:doc_2025_a10dc101f3e9_c0009",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_a10dc101f3e9_c0009",
+          "doc_id": "doc_2025_a10dc101f3e9",
+          "school_id": "388",
+          "title": "fixture:retrieval-025",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-025",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-026",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "doc_2025_553501b7d6a3_c0009"
+      ],
+      "expected_doc_ids": [
+        "doc_2025_553501b7d6a3"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-026:doc_2025_553501b7d6a3_c0009",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "doc_2025_553501b7d6a3_c0009",
+          "doc_id": "doc_2025_553501b7d6a3",
+          "school_id": "392",
+          "title": "fixture:retrieval-026",
+          "document_type": "charter",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-026",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "历史类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-027",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "draft_policy_national_physical_exam_c0001"
+      ],
+      "expected_doc_ids": [
+        "draft_policy_national_physical_exam"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-027:draft_policy_national_physical_exam_c0001",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "draft_policy_national_physical_exam_c0001",
+          "doc_id": "draft_policy_national_physical_exam",
+          "school_id": null,
+          "title": "fixture:retrieval-027",
+          "document_type": "policy",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-027",
+          "regions": [
+            "全国"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-028",
+      "status": "FOUND",
+      "hit_at_5": true,
+      "hit_at_20": true,
+      "reciprocal_rank": 1.0,
+      "expected_chunk_ids": [
+        "draft_policy_hunan_3plus1plus2_c0001"
+      ],
+      "expected_doc_ids": [
+        "draft_policy_hunan_3plus1plus2"
+      ],
+      "actual_evidence": [
+        {
+          "evidence_id": "fixture:retrieval-028:draft_policy_hunan_3plus1plus2_c0001",
+          "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
+          "chunk_id": "draft_policy_hunan_3plus1plus2_c0001",
+          "doc_id": "draft_policy_hunan_3plus1plus2",
+          "school_id": null,
+          "title": "fixture:retrieval-028",
+          "document_type": "policy",
+          "section_path": "fixture",
+          "excerpt": "fixture evidence for retrieval-028",
+          "regions": [
+            "湖南"
+          ],
+          "categories": [
+            "物理类"
+          ],
+          "batches": [
+            "本科批"
+          ],
+          "valid_from": "2025-01-01",
+          "valid_to": "2025-12-31"
+        }
+      ],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-029",
+      "status": "NO_EVIDENCE",
+      "hit_at_5": false,
+      "hit_at_20": false,
+      "reciprocal_rank": 0.0,
+      "expected_chunk_ids": [],
+      "expected_doc_ids": [],
+      "actual_evidence": [],
+      "scope_leaks": [],
+      "first_diff": null
+    },
+    {
+      "case_id": "retrieval-030",
+      "status": "NO_EVIDENCE",
+      "hit_at_5": false,
+      "hit_at_20": false,
+      "reciprocal_rank": 0.0,
+      "expected_chunk_ids": [],
+      "expected_doc_ids": [],
+      "actual_evidence": [],
+      "scope_leaks": [],
+      "first_diff": null
+    }
+  ],
+  "result_sha256": "edcea96deaf86fdbd4ff4d565bbff958fa9ad2ec414be3701af90ca428e2b6a7",
+  "eval_run_id": "eval_edcea96deaf86fdbd4ff4d565bbff958fa9ad2ec414be3701af90ca428e2b6a7"
+}
