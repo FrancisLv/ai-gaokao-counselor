@@ -24,7 +24,7 @@
 四服务一句话快照：
 
 - **svc-algo（Go）**：✅ 四 RPC 全部实现（`RankConvert / EstimateProb / CheckConstraints / OptimizeWishlist`），薄 service + biz usecase 分层，是当前**唯一成体系的已实现能力**。
-- **svc-orchestrator（Python/LangGraph）**：🟡 图骨架 4 节点 + 确定性完整性闸门 + 离线混合检索器可用；但**所有业务节点是 TODO 桩**，无 checkpointer、无 interrupt、未调用 algo / llmgw。
+- **svc-orchestrator（Python/LangGraph）**：🟡 RunLifecycle 已提供持久 run/interrupt/租约与受控算法预览，`RetrievePolicy` 与在线检索节点已接线；自然语言画像、完整 POLICY_QA 子图、Strategy/Critic/report 等业务节点仍待实现，未调用 llmgw。
 - **svc-gateway（Go）**：⛔ 三个入口方法（`CreatePlan / ConfirmProfile / BackfillProfile`）全部 `return errors.New("TODO")`。
 - **svc-llm-gateway（Go）**：⛔ `Chat / StreamChat` 全部 TODO；仅有 `llm_call_log` 记账表 schema，无路由 / 缓存 / 预占结算。
 
@@ -194,10 +194,10 @@
 - `internal/llmgw/service.go:17,24,35` — Chat/StreamChat TODO + 治理组件 TODO
 - `internal/algo/service/algo.go:36,54,76,86` — 四 RPC 实现
 - `api/algo/v1/algo.proto:35,84,117,140,146,153,159,178,193` — UserProfile/ProbEstimate/OptimizationReport/RejectedCandidate/RankConvert/EstimateProb/OptimizeWishlist 契约
-- `services/orchestrator/app/server.py:36,43,44` — ResumeGraph TODO / interrupt TODO / 事件转推
-- `services/orchestrator/graph/build.py:17-19,26,38,46,48` — 护栏常量 / 放行逻辑 / 缺失节点 / END / 无 checkpointer
+- `services/orchestrator/app/server.py` — RunLifecycle 传输适配与 run-bound 检索构图入口
+- `services/orchestrator/graph/build.py` — 护栏常量 / 条件边 / run-bound 检索节点注入
 - `services/orchestrator/graph/state.py:12,29,66,83,90` — GLOBAL_REQUIRED / TypedDict / degraded / check_completeness / score_or_rank
-- `services/orchestrator/graph/nodes/{intake,profile_confirm,check_conditional,retrieve}.py` — 四节点 TODO 桩
+- `services/orchestrator/graph/nodes/retrieve.py` — 仅经 `RetrievePolicy` 的在线检索节点；其余图业务节点仍待实现
 - `services/orchestrator/rag/retrieve.py:6,24,160,201` — trgm 替代 tsvector / meta 过滤字段 / policy_chunk 查询
 - `services/orchestrator/rag/policy_retrieval.py` — release-bound `RetrievePolicy` 唯一主 seam、硬过滤与文档证据投影
 - `services/orchestrator/tests/test_policy_retrieval.py` — release/scope/适用域/hash/locator/NO_EVIDENCE、关键词与 pgvector、索引身份故障和确定性外部行为测试

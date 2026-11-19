@@ -1239,3 +1239,23 @@ rerank 模型质量。
 - golden set v0.2 仍为 `PENDING_SIGNOFF`，fixture baseline 不是正式质量结论。
 - 公共 POLICY_QA Submit API 仍需后续编排票提供 query text 和结构化筛选字段；当前
   binding 已保证即使内部 task input 存在筛选值，也不会由调用方直接覆盖。
+
+## 39. M4a 双轴复核收口
+
+**日期与范围**：2026-11-19。针对第二轮双轴 review 的剩余硬发现做最终收口。
+
+### 修复
+
+- `GENERATE_PLAN`、`REVISE_PLAN` 等任务也从持久 task input 读取学校与文档类型筛选；
+  不再只对 `POLICY_QA` 生效，调用方仍不能传入覆盖参数。
+- 校级文档判定同时检查 `document_type` 与 `issuer_type`。`charter` /
+  `university_notice` 即使被误标为 national/provincial，缺少 `school_id` 也不得进入
+  正式结果；真正的 national/provincial `policy` 仍可在学校筛选下命中。
+- `gap-analysis.md` 同步当前 RunLifecycle、政策检索 seam、在线检索节点与剩余待办，
+  删除“所有业务节点均为 TODO”等陈旧表述。
+- 测试中的科类字段统一使用 `category`，移除废弃 `track`。
+
+### 测试
+
+- 新增“省级误标的校级章程缺 school_id”真实库回归，并保留全国/省级长期政策正向用例。
+- 新增 `GENERATE_PLAN` 从持久 task input 读取学校/文档类型筛选的 run-bound 图测试。

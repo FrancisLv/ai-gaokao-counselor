@@ -340,7 +340,7 @@ class RetrievalNodeTests(unittest.IsolatedAsyncioTestCase):
                 profile={
                     "province": "湖南",
                     "year": "2025",
-                    "track": "物理类",
+                    "category": "物理类",
                     "score": 600,
                     "subjects": ["物理", "化学", "生物"],
                 }

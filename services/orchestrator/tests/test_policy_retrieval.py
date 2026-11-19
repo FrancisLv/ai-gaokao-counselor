@@ -1587,6 +1587,34 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             ["doc-national-policy"],
         )
 
+    def test_mislabeled_university_document_still_requires_school_identity(self):
+        release_id = self._seed_release("rel-mislabeled-university-test")
+        self._seed_policy_document(
+            release_id,
+            "doc-mislabeled-university",
+            document_type="charter",
+            issuer_type="provincial",
+            school_id=None,
+        )
+
+        result = RetrievePolicy(
+            self.conn,
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(
+            PolicyRetrievalQuery(
+                principal_id="principal-test",
+                query_text="转专业",
+                scope=ApplicabilityScope("湖南", 2025, "物理类", "本科批"),
+                release_id=release_id,
+                mode="keyword",
+                school_ids=("1001",),
+                document_types=("charter",),
+            )
+        )
+
+        self.assertEqual(result.status, "NO_EVIDENCE")
+        self.assertEqual(result.evidence, ())
+
     def test_vector_mode_hard_filters_before_ranking_high_similarity_decoys(self):
         release_id = self._seed_release("rel-vector-scope-test")
         for doc_id, changes in (
@@ -2128,6 +2156,7 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             release_id,
             "doc-national",
             school_id=None,
+            document_type="policy",
             issuer_type="national",
             regions=("全国",),
             categories=("不限",),
@@ -2139,6 +2168,7 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             release_id,
             "doc-province",
             school_id=None,
+            document_type="policy",
             issuer_type="provincial",
             regions=("湖南",),
             categories=("不限",),
@@ -2150,6 +2180,7 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             release_id,
             "doc-expired",
             school_id=None,
+            document_type="policy",
             regions=("全国",),
             categories=("不限",),
             batches=("不限",),

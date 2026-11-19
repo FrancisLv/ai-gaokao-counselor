@@ -99,7 +99,10 @@ _SCOPE_FROM_AND_FILTERS = """
           ARRAY['national', 'provincial', 'university']
       )
       AND (
-          d.issuer_type <> 'university'
+          (
+              d.issuer_type <> 'university'
+              AND d.document_type NOT IN ('charter', 'university_notice')
+          )
           OR d.school_id IS NOT NULL
       )
       AND d.issuer_id IS NOT NULL
@@ -127,8 +130,14 @@ _SCOPE_FROM_AND_FILTERS = """
       )
       AND (
           cardinality(%(school_ids)s::text[]) = 0
-          OR d.school_id IS NULL
           OR d.school_id = ANY(%(school_ids)s::text[])
+          OR (
+              d.school_id IS NULL
+              AND d.issuer_type <> 'university'
+              AND d.document_type NOT IN (
+                  'charter', 'university_notice'
+              )
+          )
       )
       AND (
           cardinality(%(document_types)s::text[]) = 0

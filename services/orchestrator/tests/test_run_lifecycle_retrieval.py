@@ -44,6 +44,8 @@ class RunLifecycleRetrievalBindingTests(RunLifecyclePostgresTest):
                     batch="本科批",
                     score=600,
                     subjects=("物理", "化学", "生物"),
+                    school_ids=("1001",),
+                    document_types=("charter",),
                 ),
                 idempotency_key="retrieval-binding-submit",
             )
@@ -82,7 +84,7 @@ class RunLifecycleRetrievalBindingTests(RunLifecyclePostgresTest):
                 "profile": {
                     "province": "湖南",
                     "year": "2025",
-                    "track": "物理类",
+                    "category": "物理类",
                     "score": 600,
                     "subjects": ["物理", "化学", "生物"],
                 },
@@ -97,8 +99,8 @@ class RunLifecycleRetrievalBindingTests(RunLifecyclePostgresTest):
         self.assertEqual(query.scope.application_year, 2025)
         self.assertEqual(query.scope.category, "物理类")
         self.assertEqual(query.scope.batch, "本科批")
-        self.assertEqual(query.school_ids, ())
-        self.assertEqual(query.document_types, ())
+        self.assertEqual(query.school_ids, ("1001",))
+        self.assertEqual(query.document_types, ("charter",))
         self.assertEqual(updated["retrieval_status"], "NO_EVIDENCE")
 
     async def test_policy_qa_binding_uses_trusted_task_scope(self):

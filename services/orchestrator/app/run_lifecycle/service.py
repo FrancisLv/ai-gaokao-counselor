@@ -296,10 +296,16 @@ class RunLifecycle:
 
             confirmed_profile = None
             task_scope = None
-            school_ids: tuple[str, ...] = ()
-            document_types: tuple[str, ...] = ()
+            task_input = dict(row["task_input"])
+            school_ids = self._trusted_string_tuple(
+                task_input.get("school_ids", ()),
+                "school_ids",
+            )
+            document_types = self._trusted_string_tuple(
+                task_input.get("document_types", ()),
+                "document_types",
+            )
             if row["task_kind"] == "POLICY_QA":
-                task_input = dict(row["task_input"])
                 required = (
                     task_input.get("province"),
                     task_input.get("application_year"),
@@ -313,14 +319,6 @@ class RunLifecycle:
                     application_year=int(required[1]),
                     category=str(required[2]),
                     batch=str(required[3]),
-                )
-                school_ids = self._trusted_string_tuple(
-                    task_input.get("school_ids", ()),
-                    "school_ids",
-                )
-                document_types = self._trusted_string_tuple(
-                    task_input.get("document_types", ()),
-                    "document_types",
                 )
             else:
                 profile_version = row["confirmed_profile_version"]
