@@ -1377,3 +1377,37 @@ RunLifecycle 接线。
 
 - 当前只验证 `SUBJECT_REQUIREMENT` 与 FULL 覆盖；完整 AST、PARTIAL/NONE、更多
   条件字段、专业五态组汇总和正式 run 接线仍由 M4b-02~07 完成。
+
+## 43. M4b-04：受限表达式与三值逻辑
+
+**日期与范围**：2026-11-19，对应 issue #18。把规则条件收敛为 typed AST，
+实现字段 allowlist、Kleene 三值求值和资源上限；不实现 RuleVersion 生命周期、
+覆盖不足语义、条件字段接入、组级五态或 RunLifecycle 接线。
+
+### 实现
+
+- `RuleExpression` 增加 field/value/values/left/right 类型化节点，支持 `AND / OR / NOT / EQ / NEQ / IN / GTE / LTE / PRESENT / CONTAINS_ALL / CONTAINS_ANY / SUBJECT_MATCH`。
+- AST 使用 `expression_version=1`；字段必须同时属于 Profile allowlist 与规则的
+  `required_profile_fields`，声明集合必须与 AST 实际引用完全一致。
+- `AND` 在任一分支 NO_MATCH 时为 NO_MATCH，`OR` 在任一分支 MATCH 时为 MATCH；
+  已知 FAIL 优先于其他规则产生的缺失事实，避免结果被输入顺序覆盖。
+- 缺失、UNKNOWN、DECLINED 产生缺失字段；字段存在但类型错误产生 UNKNOWN，不做宽松转换。
+- 表达式 JSON 使用严格解码，拒绝未允许键；资源上限为深度 16、节点 64、
+  列表 32 项、单字符串 256 字节、JSON 32 KiB。
+- 迁移 23 新增 `expression_version` 与 32 KiB schema 约束；数据层把残留解析错误
+  归一为 `ValidationReason`，由唯一 `EvaluateEligibility` seam 返回 BLOCKED。
+
+### 验证
+
+- biz 表驱动测试覆盖 AND/OR/NOT 全三值组合、全部原子 operator、`PRESENT` 三态、
+  类型不匹配、FAIL 优先级、未知字段/operator、非法 arity、资源超限与确定性。
+- service seam 测试验证非法 AST 映射为 BLOCKED；真实 PostgreSQL + bufconn 测试验证
+  typed AST 重复调用逐项一致，以及含额外 SQL 键的持久化规则被稳定阻断。
+- storage contract 测试验证 `expression_version != 1` 与超过 32 KiB 的表达式被 schema 拒绝。
+- `00→23` fresh-schema 测试通过；新增迁移已加入 sqlc、RunLifecycle 测试迁移链与
+  policy acceptance schema helper。
+
+### 边界
+
+- 条件字段的实际画像快照接入、FULL/PARTIAL/NONE 覆盖、RuleVersion 生命周期、
+  专业五态汇总和 RunLifecycle 正式门禁仍由其他 M4b 票完成。

@@ -2,6 +2,7 @@ package biz
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,9 +43,14 @@ type RuleScope struct {
 }
 
 type RuleExpression struct {
-	Operator           string          `json:"op"`
-	SubjectRequirement string          `json:"subject_req,omitempty"`
-	Child              *RuleExpression `json:"child,omitempty"`
+	Operator           string            `json:"op"`
+	Field              string            `json:"field,omitempty"`
+	Value              json.RawMessage   `json:"value,omitempty"`
+	Values             []json.RawMessage `json:"values,omitempty"`
+	SubjectRequirement string            `json:"subject_req,omitempty"`
+	Child              *RuleExpression   `json:"child,omitempty"`
+	Left               *RuleExpression   `json:"left,omitempty"`
+	Right              *RuleExpression   `json:"right,omitempty"`
 }
 
 type EvidenceRef struct {
@@ -65,6 +71,8 @@ type RuleVersion struct {
 	OutcomeWhenTrue       string
 	ReasonCode            string
 	ReviewState           string
+	ExpressionVersion     int
+	ValidationReason      string
 	SourceEvidence        []EvidenceRef
 }
 
@@ -162,8 +170,20 @@ const (
 const (
 	RuleTypeSubjectRequirement = "SUBJECT_REQUIREMENT"
 	OperatorSubjectMatch       = "SUBJECT_MATCH"
+	OperatorAND                = "AND"
+	OperatorOR                 = "OR"
 	OperatorNot                = "NOT"
+	OperatorEQ                 = "EQ"
+	OperatorNEQ                = "NEQ"
+	OperatorIN                 = "IN"
+	OperatorGTE                = "GTE"
+	OperatorLTE                = "LTE"
+	OperatorPRESENT            = "PRESENT"
+	OperatorCONTAINS_ALL       = "CONTAINS_ALL"
+	OperatorCONTAINS_ANY       = "CONTAINS_ANY"
 	OutcomeFail                = "FAIL"
+
+	ExpressionVersionV1 = 1
 
 	ReviewStatePublished = "PUBLISHED"
 	CoverageFull         = "FULL"
@@ -177,14 +197,16 @@ const (
 	ProfileDerived            = "DERIVED"
 	ProfileDefault            = "DEFAULT"
 
-	FieldSubjects = "subjects"
-	FieldCategory = "category"
+	FieldSubjects        = "subjects"
+	FieldCategory        = "category"
+	FieldApplicationYear = "application_year"
 )
 
 const (
 	ReasonRuleCoverageMissing = "RULE_COVERAGE_MISSING"
 	ReasonProfileFactMissing  = "PROFILE_FACT_MISSING"
 	ReasonRuleExpression      = "RULE_EXPRESSION_INVALID"
+	ReasonRuleUnknownField    = "RULE_UNKNOWN_FIELD"
 	ReasonReleaseRevoked      = "RELEASE_REVOKED"
 	ReasonReleaseUnavailable  = "RELEASE_UNAVAILABLE"
 )
@@ -234,6 +256,12 @@ func (u *EligibilityUsecase) EvaluateEligibility(ctx context.Context, req Eligib
 	facts := profileFactIndex(req.ProfileFacts)
 	rules := sortedRules(set.Rules)
 	result.Diagnostics.EvaluatedRuleCount = len(rules)
+	if reason := validateEligibilityRules(rules); reason != "" {
+		result.Status = EligibilityBlocked
+		result.Diagnostics.UnknownCount = candidateMajorCount(req.CandidateGroups)
+		result.Groups = blockedGroups(req.CandidateGroups, reason)
+		return result, nil
+	}
 	for _, group := range req.CandidateGroups {
 		ground := evaluateGroup(req.Scope, group, rules, set.Coverage, facts)
 		result.Groups = append(result.Groups, ground)
@@ -304,25 +332,40 @@ func evaluateMajor(scope EligibilityScope, group CandidateGroup, major Candidate
 		out.EvidenceRefs = appendUniqueEvidence(out.EvidenceRefs, rule.SourceEvidence...)
 	}
 
+	hasFailure := false
+	hasMissing := false
+	hasUnknown := false
 	for _, rule := range applicable {
 		decision, missing := evaluateExpression(rule.When, major, facts)
 		switch {
 		case len(missing) > 0:
-			out.Status = MajorMissingRequiredFact
+			hasMissing = true
 			out.MissingFields = append(out.MissingFields, missing...)
 			out.UnknownReasons = append(out.UnknownReasons, ReasonProfileFactMissing)
 		case decision == "MATCH" && (rule.OutcomeWhenTrue == "" || rule.OutcomeWhenTrue == OutcomeFail):
-			out.Status = MajorFail
+			hasFailure = true
 			out.FailureRuleKeys = append(out.FailureRuleKeys, rule.RuleKey)
 		case decision == "MATCH":
-			out.Status = MajorUnknown
+			hasUnknown = true
 			out.UnknownReasons = append(out.UnknownReasons, ReasonRuleExpression)
 		case decision == "INDETERMINATE":
-			out.Status = MajorUnknown
+			hasUnknown = true
 			out.UnknownReasons = append(out.UnknownReasons, ReasonRuleExpression)
 		}
 	}
-	if out.Status == MajorFail || out.Status == MajorMissingRequiredFact || out.Status == MajorUnknown {
+	if hasFailure {
+		out.Status = MajorFail
+		out.FailureRuleKeys = stableStrings(out.FailureRuleKeys)
+		out.UnknownReasons = nil
+		out.MissingFields = nil
+		return out
+	}
+	if hasMissing || hasUnknown {
+		if hasMissing {
+			out.Status = MajorMissingRequiredFact
+		} else {
+			out.Status = MajorUnknown
+		}
 		out.FailureRuleKeys = stableStrings(out.FailureRuleKeys)
 		out.UnknownReasons = stableStrings(out.UnknownReasons)
 		out.MissingFields = stableStrings(out.MissingFields)
@@ -345,45 +388,6 @@ func evaluateMajor(scope EligibilityScope, group CandidateGroup, major Candidate
 	}
 	out.Status = MajorPass
 	return out
-}
-
-func evaluateExpression(expr RuleExpression, major CandidateMajor, facts map[string]ProfileFact) (string, []string) {
-	switch expr.Operator {
-	case OperatorNot:
-		if expr.Child == nil {
-			return "INDETERMINATE", nil
-		}
-		decision, missing := evaluateExpression(*expr.Child, major, facts)
-		switch decision {
-		case "MATCH":
-			return "NO_MATCH", missing
-		case "NO_MATCH":
-			return "MATCH", missing
-		default:
-			return "INDETERMINATE", missing
-		}
-	case OperatorSubjectMatch:
-		subjects, missingSubjects := profileStringList(facts, FieldSubjects)
-		_, missingCategory := profileString(facts, FieldCategory)
-		missing := append(missingSubjects, missingCategory...)
-		if len(missing) > 0 {
-			return "INDETERMINATE", missing
-		}
-		requirements := []string{major.SubjectRequirement}
-		if strings.TrimSpace(expr.SubjectRequirement) != "" {
-			requirements = []string{expr.SubjectRequirement}
-		}
-		matched, _, parseErr := matchCandidateSubjects(subjects, requirements)
-		if parseErr != nil {
-			return "INDETERMINATE", nil
-		}
-		if matched {
-			return "MATCH", nil
-		}
-		return "NO_MATCH", nil
-	default:
-		return "INDETERMINATE", nil
-	}
 }
 
 func (s RuleScope) Applies(scope EligibilityScope, group CandidateGroup, major CandidateMajor) bool {
@@ -411,22 +415,6 @@ func profileFactIndex(facts []ProfileFact) map[string]ProfileFact {
 		index[fact.FieldKey] = fact
 	}
 	return index
-}
-
-func profileString(facts map[string]ProfileFact, key string) (string, []string) {
-	fact, ok := facts[key]
-	if !ok || !usableProfileState(fact.State) || strings.TrimSpace(fact.StringValue) == "" {
-		return "", []string{key}
-	}
-	return fact.StringValue, nil
-}
-
-func profileStringList(facts map[string]ProfileFact, key string) ([]string, []string) {
-	fact, ok := facts[key]
-	if !ok || !usableProfileState(fact.State) || len(fact.StringValues) == 0 {
-		return nil, []string{key}
-	}
-	return append([]string(nil), fact.StringValues...), nil
 }
 
 func usableProfileState(state string) bool {
@@ -530,4 +518,12 @@ func blockedGroups(groups []CandidateGroup, reason string) []GroupEligibility {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].GroupKey < out[j].GroupKey })
 	return out
+}
+
+func candidateMajorCount(groups []CandidateGroup) int {
+	count := 0
+	for _, group := range groups {
+		count += len(group.Majors)
+	}
+	return count
 }

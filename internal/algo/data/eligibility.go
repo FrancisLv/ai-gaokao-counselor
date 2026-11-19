@@ -36,17 +36,18 @@ func (r *eligibilityRepo) LoadEligibilityRuleSet(ctx context.Context, releaseID 
 	}
 	rules := make([]biz.RuleVersion, 0, len(ruleRows))
 	for _, row := range ruleRows {
+		validationReason := ""
 		var scope biz.RuleScope
 		if err := json.Unmarshal(row.Scope, &scope); err != nil {
 			return biz.EligibilityRuleSet{}, err
 		}
 		var required []string
 		if err := json.Unmarshal(row.RequiredProfileFields, &required); err != nil {
-			return biz.EligibilityRuleSet{}, err
+			validationReason = biz.ReasonRuleExpression
 		}
 		var expression biz.RuleExpression
 		if err := json.Unmarshal(row.Expression, &expression); err != nil {
-			return biz.EligibilityRuleSet{}, err
+			validationReason = biz.ReasonRuleExpression
 		}
 		var evidence []biz.EvidenceRef
 		if err := json.Unmarshal(row.SourceEvidence, &evidence); err != nil {
@@ -63,6 +64,8 @@ func (r *eligibilityRepo) LoadEligibilityRuleSet(ctx context.Context, releaseID 
 			OutcomeWhenTrue:       row.OutcomeWhenTrue,
 			ReasonCode:            row.ReasonCode,
 			ReviewState:           row.ReviewStatus,
+			ExpressionVersion:     int(row.ExpressionVersion),
+			ValidationReason:      validationReason,
 			SourceEvidence:        evidence,
 		})
 	}

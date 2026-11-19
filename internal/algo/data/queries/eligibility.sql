@@ -12,6 +12,7 @@ SELECT
     scope,
     required_profile_fields,
     expression,
+    expression_version,
     outcome_when_true,
     reason_code,
     review_status,

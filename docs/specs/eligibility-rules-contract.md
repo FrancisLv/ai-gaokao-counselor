@@ -54,6 +54,7 @@ RuleVersion
     major_code | null
   required_profile_fields: list<field_key>
   when: RuleExpression
+  expression_version: int32
   outcome_when_true: FAIL
   reason_code: stable string
   source_evidence: list<EvidenceRef>
@@ -86,10 +87,17 @@ SUBJECT_MATCH(subject_req, profile.subjects)
 表达式规则：
 
 - `field` 必须属于 `required_profile_fields`；
+- 表达式使用 `expression_version=1` 的 typed AST；未声明版本的规则不得进入在线评估；
+- `AND / OR` 使用 left/right，`NOT` 使用 child；原子节点按字段类型接受标量或列表字面量；
+- `required_profile_fields` 必须与 AST 实际引用字段集合完全一致，重复、遗漏或多余均拒绝发布；
 - 字段值缺失 -> `UNKNOWN`；
 - 值类型不匹配 -> `UNKNOWN`，不是 `FAIL`；
+- `PRESENT` 对缺失、`UNKNOWN`、`DECLINED` 或类型错误均不得返回 MATCH；
+- `AND` / `OR` / `NOT` 使用 Kleene 三值逻辑：确定的 NO_MATCH 或 MATCH 不被无关 INDETERMINATE 分支污染；
 - 结构化字段必须绑定 `structured evidence`；
 - 表达式执行器只能读取 allowlist 字段。
+- 资源上限固定为深度 16、节点数 64、单个列表字面量 32 项、单个字符串 256 字节、表达式 JSON 32 KiB；
+- JSON 中出现未允许的节点键、operator、字段、错误 arity 或超限内容时拒绝发布；运行时残留异常返回稳定 BLOCKED / `RULE_EXPRESSION_INVALID`，未知字段返回 `RULE_UNKNOWN_FIELD`。
 
 ### 3.3 规则集与覆盖声明
 

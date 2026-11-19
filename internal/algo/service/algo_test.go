@@ -45,6 +45,8 @@ func TestService_EvaluateEligibility(t *testing.T) {
 		Rules: []biz.RuleVersion{{
 			RuleID: "rule-subject", Version: 1, RuleKey: "subject-requirement",
 			RuleType: biz.RuleTypeSubjectRequirement, ReviewState: biz.ReviewStatePublished,
+			RequiredProfileFields: []string{biz.FieldSubjects, biz.FieldCategory},
+			ExpressionVersion:     biz.ExpressionVersionV1,
 			When: biz.RuleExpression{Operator: biz.OperatorNot, Child: &biz.RuleExpression{
 				Operator: biz.OperatorSubjectMatch,
 			}},
@@ -86,6 +88,49 @@ func TestService_EvaluateEligibility(t *testing.T) {
 	}
 	if got := reply.GetGroups()[0].GetMajors()[0].GetStatus(); got != algov1.MajorEligibilityStatus_MAJOR_ELIGIBILITY_STATUS_PASS {
 		t.Fatalf("major status = %v, want PASS", got)
+	}
+}
+
+func TestService_EvaluateEligibility_BlocksInvalidASTContract(t *testing.T) {
+	uc := biz.NewEligibilityUsecase(serviceEligibilityRepo{set: biz.EligibilityRuleSet{
+		ReleaseStatus: "PUBLISHED",
+		Rules: []biz.RuleVersion{{
+			RuleID: "rule-invalid", Version: 1, RuleKey: "invalid-expression",
+			RuleType: biz.RuleTypeSubjectRequirement, ReviewState: biz.ReviewStatePublished,
+			RequiredProfileFields: []string{biz.FieldCategory},
+			ExpressionVersion:     biz.ExpressionVersionV1,
+			When: biz.RuleExpression{
+				Operator: "SQL",
+				Field:    biz.FieldCategory,
+			},
+		}},
+		Coverage: []biz.RuleCoverage{{RuleType: biz.RuleTypeSubjectRequirement, Status: biz.CoverageFull}},
+	}})
+	svc := NewAlgo(nil, nil, nil, uc)
+	reply, err := svc.EvaluateEligibility(context.Background(), &algov1.EvaluateEligibilityRequest{
+		ReleaseId: "rel-test", ConfirmedProfileVersion: "profile-v1",
+		ProfileLifecycle: algov1.EligibilityProfileLifecycle_ELIGIBILITY_PROFILE_LIFECYCLE_CONFIRMED,
+		Scope:            &algov1.EligibilityScope{Province: "湖南", ApplicationYear: 2025, Category: "物理类", Batch: "本科批"},
+		ProfileFacts: []*algov1.EligibilityProfileFact{{
+			FieldKey: biz.FieldCategory, State: algov1.EligibilityProfileFieldState_ELIGIBILITY_PROFILE_FIELD_STATE_PROVIDED,
+			StringValue: "物理类",
+		}},
+		CandidateGroups: []*algov1.EligibilityCandidateGroup{{
+			UniversityId: 1, UniversityCode: "1001", UniversityName: "测试大学", MajorGroup: "01",
+			Majors: []*algov1.EligibilityCandidateMajor{{
+				MajorCode: "080901", MajorName: "计算机科学与技术", InCurrentPlan: true,
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("EvaluateEligibility: %v", err)
+	}
+	if reply.GetStatus() != algov1.EligibilityResultStatus_ELIGIBILITY_RESULT_STATUS_BLOCKED {
+		t.Fatalf("status = %v, want BLOCKED", reply.GetStatus())
+	}
+	reasons := reply.GetGroups()[0].GetMajors()[0].GetUnknownReasons()
+	if len(reasons) != 1 || reasons[0] != biz.ReasonRuleExpression {
+		t.Fatalf("reasons = %v, want [%s]", reasons, biz.ReasonRuleExpression)
 	}
 }
 
