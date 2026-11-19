@@ -200,6 +200,12 @@ RequiredNotice
   evidence_refs: list<EvidenceRef>
 ```
 
+必需说明的证据绑定必须实际支持 `normalized_text`。`DOCUMENT` 证据要求 excerpt
+含该规范化文本且 hash 一致；`STRUCTURED` 证据要求字段路径明确指向规范文本或对应
+notice 类型（如 `normalized_text`、`notice.disclaimer`、`risk_notice`），值为与
+`normalized_text` 完全一致的字符串，并绑定同一行/快照 hash。缺少 payload、
+类型不匹配或绑定无关结构化行时返回 `REQUIRED_NOTICE_MISMATCH`。
+
 ```text
 VerificationReport
   status: PASS | BLOCKED | PARTIAL
@@ -247,8 +253,8 @@ ClaimVerification
 - 不存在 `CONTRADICTED` claim；
 - 所有证据可解析且属于同一 `release_id`；
 - 资格整体为 `COMPLETE`；候选组只能是 `PASS`，或没有 `UNKNOWN` 且保留受限专业说明的
-  `PASS_PARTIAL`。任何组 `UNKNOWN / FAIL`、专业 `MISSING_REQUIRED_FACT`、覆盖缺失或
-  非 `FULL`、规则冲突均阻断；
+  `PASS_PARTIAL`。任何组 `UNKNOWN / FAIL`、专业 `MISSING_REQUIRED_FACT`、覆盖缺失、
+  `rule_type` 为空/空白或非 `FULL`、受限专业代码为空/空白、规则冲突均阻断；
 - 结果引用的确认 Profile、release、result version、算法配置版本/hash 和 verifier
   版本一致；`DERIVED` 证据的配置 hash 也必须与 gate context 一致；
 - `DISCLAIMER`、`RISK_NOTICE` 和 `NO_ADMISSION_GUARANTEE` 均存在，规范化文本 hash

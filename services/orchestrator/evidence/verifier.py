@@ -765,18 +765,68 @@ def _required_notice_gate_reasons(
             ):
                 reasons.add("REQUIRED_NOTICE_MISSING")
                 continue
-            document = ref.document
-            if document is None:
-                continue
-            if (
-                document.release_id != context.release_id
-                or not _valid_document_identity(document)
-                or _sha256(document.excerpt) != document.excerpt_sha256
-                or ref.content_sha256 != document.excerpt_sha256
-                or notice.normalized_text not in document.excerpt
-            ):
+            if not _required_notice_evidence_supports(notice, ref):
                 reasons.add("REQUIRED_NOTICE_MISMATCH")
     return reasons
+
+
+def _required_notice_evidence_supports(
+    notice: RequiredNotice,
+    ref: EvidenceRef,
+) -> bool:
+    document = ref.document
+    if ref.evidence_type == "DOCUMENT" and document is not None:
+        return (
+            document.release_id == ref.release_id
+            and _valid_document_identity(document)
+            and _sha256(document.excerpt) == document.excerpt_sha256
+            and ref.content_sha256 == document.excerpt_sha256
+            and notice.normalized_text in document.excerpt
+        )
+    structured = ref.structured
+    if ref.evidence_type == "STRUCTURED" and structured is not None:
+        return (
+            structured.release_id == ref.release_id
+            and _valid_structured_identity(structured)
+            and ref.content_sha256
+            == structured.row_or_snapshot_sha256
+            and _structured_notice_field_supports(notice, structured)
+        )
+    return False
+
+
+def _structured_notice_field_supports(
+    notice: RequiredNotice,
+    evidence: StructuredEvidence,
+) -> bool:
+    notice_field = notice.notice_type.lower()
+    allowed_fields = {
+        "normalized_text",
+        "notice_text",
+        "required_notice",
+        "required_notice_text",
+        notice_field,
+        f"notice_{notice_field}",
+        f"required_notice_{notice_field}",
+    }
+    field_path = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        evidence.field_path.strip().lower(),
+    ).strip("_")
+    if (
+        field_path not in allowed_fields
+        and not any(
+            field_path.endswith(f"_{allowed}")
+            for allowed in allowed_fields
+        )
+    ):
+        return False
+    return (
+        evidence.unit is None
+        and isinstance(evidence.value, str)
+        and evidence.value == notice.normalized_text
+    )
 
 
 def _notice_text_satisfies_type(notice: RequiredNotice) -> bool:
@@ -813,7 +863,8 @@ def _qualification_gate_reasons(
     if not qualification.coverage:
         reasons.add("ELIGIBILITY_COVERAGE_MISSING")
     elif any(
-        coverage.status != "FULL"
+        not coverage.rule_type.strip()
+        or coverage.status != "FULL"
         for coverage in qualification.coverage
     ):
         reasons.add("ELIGIBILITY_COVERAGE_INCOMPLETE")
@@ -861,12 +912,18 @@ def _qualification_gate_reasons(
                 for major in group.majors
                 if major.status in {"FAIL", "NOT_APPLICABLE"}
             }
-            if any(
-                not any(
-                    major_code in restriction
-                    for restriction in group.restrictions
+            if (
+                any(
+                    not major_code.strip()
+                    for major_code in restricted_major_codes
                 )
-                for major_code in restricted_major_codes
+                or any(
+                    not any(
+                        major_code in restriction
+                        for restriction in group.restrictions
+                    )
+                    for major_code in restricted_major_codes
+                )
             ):
                 reasons.add("ELIGIBILITY_RESTRICTED_MAJORS_MISSING")
         for major in group.majors:
