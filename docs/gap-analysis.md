@@ -71,7 +71,7 @@
 | FR | 现状 | 证据（文件:行） | 剩余工作 | 关联 | 里程碑 |
 | --- | --- | --- | --- | --- | --- |
 | FR-18 报告生成（P0） | ⛔ | `build.py:38` report 节点 TODO；`state.py:62` 有 `report` 字段但无生成逻辑 | report 节点 + 强制免责声明 + 禁「保证录取」；数值由结构化模板渲染 | P1-05 | M5 |
-| FR-19 事实校验 Verifier（P0） | 🟡 Verifier seam 已闭合 | `services/orchestrator/evidence/verifier.py` 已实现唯一 `VerifyPackage` seam、三类证据、确定性重算/比对、普通剥离和 `formal-gate-v1` 资格/版本/说明门禁；`build.py:38` verify 节点仍为 TODO | 将报告接入图内 verify 节点与正式发布链路；实现打回重写≤2、回算≤2、超限剥离；补证据包持久化与发布事务 | P1-05 | M4/M5 |
+| FR-19 事实校验 Verifier（P0） | 🟡 Verifier 与正式发布闭环已接 | `services/orchestrator/evidence/verifier.py` 实现唯一 `VerifyPackage` seam、三类证据、确定性重算/比对、普通剥离和 `formal-gate-v1` 资格/版本/说明门禁；`RunLifecycle.PublishFormalResult` 只消费该报告，`migrations/27_formal_evidence_results.sql` 以 insert-only 证据包/报告、不可变结果和独立 ACTIVE/STALE 状态原子发布 `V1_FORMAL`，GET/Watch 返回同一版本与摘要；真实 PG 覆盖 PASS、PARTIAL 剥离、BLOCKED、重试冲突、release 撤销及发布/取消竞态 | `build.py:38` verify 节点仍为 TODO；后续接入图内报告生成、重写≤2、回算≤2 与最终文案剥离 | P1-05 | M4/M5 |
 | FR-20 LLM 治理与成本闸门（P0） | ⛔ 仅记账表 | `internal/llmgw/service.go:24,35` `Chat/StreamChat` TODO；`00_schema.sql:353` `llm_call_log` 有 trace/role/model/prompt_hash/token/cost/latency，但**无原子预占+结算、无 logical_call_id/attempt_id**；`:409` `data_version` 为可变 int（非不可变 release_id） | role→model 路由；prompt_hash 缓存（key 携 `release_id`）；Budget Guard 原子预占+结算+账本；早期 Python 直连标注「无完整治理实验链路」 | P1-11, P1-12 | M4/M5 |
 | FR-21 限流与并发保护（P0） | ⛔ | `internal/gateway/service.go:16` 注释「限流器」为 TODO(M2) | 令牌桶限流 + 并发闸门（超限排队非 500）；公网发布前置 | P1-08 | M2/M4 |
 | FR-22 降级与故障处理（P0） | 🟡 | `state.py:66` 有 `degraded` 字段；PRD §7.4 隐私条款已按 R9 回填；但无实际降级路径逻辑（节点全 TODO） | 六类故障降级路径实现；体检/健康最小化+同意+限期+脱敏落地 | P1-03, P1-04, P1-06 | M5 |

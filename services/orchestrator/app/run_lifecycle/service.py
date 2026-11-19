@@ -23,6 +23,16 @@ from api.algo.v1 import algo_pb2
 from api.common.v1 import common_pb2
 from app.run_lifecycle.algo import AlgoClient
 from app.run_lifecycle.events import append_event
+from app.run_lifecycle.formal import (
+    FormalPublication,
+    FormalResultView,
+    PublishFormalResultCommand,
+    canonical_payload,
+    canonical_source_package,
+    payload_sha256,
+    retained_package,
+    verification_summary,
+)
 from app.run_lifecycle.models import (
     AlgorithmPreviewPayload,
     AnswerFields,
@@ -43,6 +53,14 @@ from app.run_lifecycle.models import (
 )
 from app.run_lifecycle.profile import ProfileRuntime, build_profile_fields
 from app.run_lifecycle.profile_graph import build_profile_graph
+from evidence import (
+    DerivedEvidenceRecomputer,
+    EntailmentVerifier,
+    EvidencePackage,
+    StructuredEvidenceAuthority,
+    VerificationReport,
+    VerifyPackage,
+)
 from rag.policy_retrieval import (
     ApplicabilityScope,
     PolicyRetrievalError,
@@ -71,6 +89,9 @@ class RunLifecycle:
         clock: Callable[[], datetime] | None = None,
         algo_client: AlgoClient | None = None,
         policy_retriever: PolicyRetriever | None = None,
+        entailment_verifier: EntailmentVerifier | None = None,
+        structured_evidence_authority: StructuredEvidenceAuthority | None = None,
+        derived_evidence_recomputer: DerivedEvidenceRecomputer | None = None,
     ) -> None:
         if not dsn:
             raise ValueError("RunLifecycle 需要 PostgreSQL DSN")
@@ -81,6 +102,9 @@ class RunLifecycle:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._algo_client = algo_client
         self._policy_retriever = policy_retriever
+        self._entailment_verifier = entailment_verifier
+        self._structured_evidence_authority = structured_evidence_authority
+        self._derived_evidence_recomputer = derived_evidence_recomputer
         self._saver_cm = None
         self._saver: AsyncPostgresSaver | None = None
         self._profile_graph = None
@@ -89,6 +113,9 @@ class RunLifecycle:
 
     async def _after_claim_hook(self, run_id: UUID, lease_epoch: int) -> None:
         """测试 adapter 可覆写的执行点；生产默认无副作用。"""
+
+    async def _before_formal_publish_hook(self, run_id: UUID) -> None:
+        """测试 adapter 可覆写的验证完成、发布事务开始前执行点。"""
 
     def _checkpoint_persisted_hook(self, run_id: UUID) -> None:
         """测试 adapter 可覆写的崩溃注入点。"""
@@ -245,9 +272,25 @@ class RunLifecycle:
                            r.active_execution_remaining_ms, r.cancel_requested_at,
                            r.result_version, r.result_kind,
                            rr.payload AS result_payload,
+                           package.package_sha256,
+                           report.report_sha256,
+                           report.report_json AS verification_report,
+                           result_state.status AS result_state,
+                           result_state.reason AS stale_reason,
                            r.created_at, r.updated_at, r.expires_at
                     FROM run r
                     LEFT JOIN run_result rr ON rr.result_version = r.result_version
+                    LEFT JOIN run_evidence_package package
+                           ON package.result_version = rr.result_version
+                    LEFT JOIN run_verification_report report
+                           ON report.result_version = rr.result_version
+                    LEFT JOIN LATERAL (
+                        SELECT state.status, state.reason
+                        FROM run_result_state_event state
+                        WHERE state.result_version = rr.result_version
+                        ORDER BY state.event_id DESC
+                        LIMIT 1
+                    ) result_state ON TRUE
                     WHERE r.run_id = %s AND r.principal_id = %s
                     """,
                     (run_id, principal_id),
@@ -260,6 +303,25 @@ class RunLifecycle:
                 result = ResultReference(
                     result_version=row["result_version"],
                     result_kind=row["result_kind"],
+                )
+            formal_result = None
+            if (
+                result is not None
+                and result.result_kind == "V1_FORMAL"
+                and row["package_sha256"] is not None
+                and row["report_sha256"] is not None
+                and row["verification_report"] is not None
+            ):
+                formal_result = FormalResultView(
+                    result_version=result.result_version,
+                    result_kind=result.result_kind,
+                    release_id=row["release_id"],
+                    confirmed_profile_version=row["confirmed_profile_version"],
+                    evidence_package_sha256=row["package_sha256"],
+                    verification_report_sha256=row["report_sha256"],
+                    verification_summary=row["verification_report"],
+                    result_state=row["result_state"] or "ACTIVE",
+                    stale_reason=row["stale_reason"],
                 )
             interrupt_row = await (
                 await conn.execute(
@@ -301,6 +363,7 @@ class RunLifecycle:
                 current_interrupt=current_interrupt,
                 result=result,
                 result_payload=row["result_payload"],
+                formal_result=formal_result,
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
                 expires_at=row["expires_at"],
@@ -418,6 +481,610 @@ class RunLifecycle:
             )
         finally:
             await conn.close()
+
+    async def PublishFormalResult(
+        self,
+        command: PublishFormalResultCommand,
+    ) -> FormalPublication:
+        """消费 VerifyPackage 结论并原子发布不可变 V1_FORMAL 结果。"""
+        try:
+            result_version = UUID(command.package.result_version)
+            profile_version = UUID(command.package.profile_version)
+        except (TypeError, ValueError) as exc:
+            raise RunLifecycleError(
+                "VALIDATION_FAILED",
+                "正式结果版本或 Profile 版本非法",
+            ) from exc
+
+        source_package_sha256 = payload_sha256(
+            canonical_source_package(command.package)
+        )
+        conn = await self._connect()
+        try:
+            existing = await self._find_formal_publication(
+                conn,
+                principal_id=command.principal_id,
+                run_id=command.run_id,
+                result_version=result_version,
+            )
+        finally:
+            await conn.close()
+        if existing is not None:
+            return self._replayed_formal_publication(
+                existing,
+                source_package_sha256=source_package_sha256,
+            )
+
+        report = VerifyPackage(
+            command.package,
+            entailment_verifier=self._entailment_verifier,
+            structured_authority=self._structured_evidence_authority,
+            derived_recomputer=self._derived_evidence_recomputer,
+        )
+        await self._before_formal_publish_hook(command.run_id)
+        if report.status == "BLOCKED":
+            return await self._fail_blocked_formal_package(
+                command,
+                report=report,
+                result_version=result_version,
+            )
+
+        published_package = canonical_source_package(
+            retained_package(command.package, report)
+        )
+        package_sha256 = payload_sha256(published_package)
+        report_payload = verification_summary(report)
+        report_sha256 = payload_sha256(report)
+        result_summary = {
+            "result_version": str(result_version),
+            "result_kind": "V1_FORMAL",
+            "release_id": command.package.release_id,
+            "confirmed_profile_version": str(profile_version),
+            "evidence_package_sha256": package_sha256,
+            "verification_report_sha256": report_sha256,
+            "verification_summary": report_payload,
+            "result_state": "ACTIVE",
+            "stale_reason": None,
+        }
+
+        conn = await self._connect()
+        try:
+            async with conn.transaction():
+                run = await (
+                    await conn.execute(
+                        """
+                        SELECT run_id, session_id, state, stage, state_version,
+                               release_id, confirmed_profile_version,
+                               lease_owner, lease_epoch, cancel_requested_at
+                        FROM run
+                        WHERE run_id = %s AND principal_id = %s
+                        FOR UPDATE
+                        """,
+                        (command.run_id, command.principal_id),
+                    )
+                ).fetchone()
+                if run is None:
+                    raise RunLifecycleError("RUN_NOT_FOUND")
+
+                concurrent = await self._find_formal_publication(
+                    conn,
+                    principal_id=command.principal_id,
+                    run_id=command.run_id,
+                    result_version=result_version,
+                )
+                if concurrent is not None:
+                    return self._replayed_formal_publication(
+                        concurrent,
+                        source_package_sha256=source_package_sha256,
+                    )
+
+                if (
+                    run["state"] == "RUNNING"
+                    and run["lease_owner"] == self._worker_owner
+                    and run["lease_epoch"] == command.expected_lease_epoch
+                    and run["cancel_requested_at"] is not None
+                ):
+                    cancelled_version = run["state_version"] + 1
+                    cancelled = await (
+                        await conn.execute(
+                            """
+                            UPDATE run
+                            SET state = 'CANCELLED',
+                                terminal_reason = 'CANCELLED_BY_USER',
+                                state_version = %s,
+                                lease_owner = NULL,
+                                lease_expires_at = NULL,
+                                active_execution_started_at = NULL,
+                                updated_at = NOW()
+                            WHERE run_id = %s
+                              AND state = 'RUNNING'
+                              AND state_version = %s
+                              AND lease_owner = %s
+                              AND lease_epoch = %s
+                              AND cancel_requested_at IS NOT NULL
+                            RETURNING run_id
+                            """,
+                            (
+                                cancelled_version,
+                                command.run_id,
+                                run["state_version"],
+                                self._worker_owner,
+                                command.expected_lease_epoch,
+                            ),
+                        )
+                    ).fetchone()
+                    if cancelled is None:
+                        raise RunLifecycleError("RUN_STATE_CONFLICT")
+                    await append_event(
+                        conn,
+                        run_id=command.run_id,
+                        event_type="STATE_CHANGED",
+                        stage=run["stage"],
+                        state_version=cancelled_version,
+                        payload={
+                            "from_state": "RUNNING",
+                            "to_state": "CANCELLED",
+                            "terminal_reason": "CANCELLED_BY_USER",
+                        },
+                    )
+                    return FormalPublication(
+                        accepted=False,
+                        reason="CANCELLED",
+                        run_id=command.run_id,
+                        result_version=result_version,
+                        result_kind=None,
+                        verification_status=report.status,
+                        evidence_package_sha256="",
+                        verification_report_sha256=report_sha256,
+                        stripped_claim_ids=(),
+                    )
+
+                try:
+                    await self._require_formal_publish_binding(
+                        conn,
+                        command=command,
+                        run=run,
+                        profile_version=profile_version,
+                    )
+                except RunLifecycleError as exc:
+                    if exc.reason != "RELEASE_REVOKED":
+                        raise
+                    failed_version = run["state_version"] + 1
+                    failed = await (
+                        await conn.execute(
+                            """
+                            UPDATE run
+                            SET state = 'FAILED',
+                                stage = 'PUBLISH_BLOCKED',
+                                terminal_reason = 'RELEASE_REVOKED',
+                                state_version = %s,
+                                lease_owner = NULL,
+                                lease_expires_at = NULL,
+                                active_execution_started_at = NULL,
+                                updated_at = NOW()
+                            WHERE run_id = %s
+                              AND state = 'RUNNING'
+                              AND state_version = %s
+                              AND lease_owner = %s
+                              AND lease_epoch = %s
+                            RETURNING run_id
+                            """,
+                            (
+                                failed_version,
+                                command.run_id,
+                                run["state_version"],
+                                self._worker_owner,
+                                command.expected_lease_epoch,
+                            ),
+                        )
+                    ).fetchone()
+                    if failed is None:
+                        raise RunLifecycleError("RUN_STATE_CONFLICT")
+                    await append_event(
+                        conn,
+                        run_id=command.run_id,
+                        event_type="ERROR",
+                        stage="PUBLISH_BLOCKED",
+                        state_version=failed_version,
+                        payload={
+                            "code": "RELEASE_REVOKED",
+                            "message": "绑定 release 已撤销，正式结果不得发布",
+                            "retryable": False,
+                        },
+                    )
+                    return FormalPublication(
+                        accepted=False,
+                        reason="RELEASE_REVOKED",
+                        run_id=command.run_id,
+                        result_version=result_version,
+                        result_kind=None,
+                        verification_status=report.status,
+                        evidence_package_sha256="",
+                        verification_report_sha256=report_sha256,
+                        stripped_claim_ids=(),
+                    )
+                next_version = run["state_version"] + 1
+                inserted_result = await (
+                    await conn.execute(
+                        """
+                        INSERT INTO run_result (
+                            result_version, run_id, release_id,
+                            confirmed_profile_version, result_kind, payload,
+                            verification_summary, unverified_conditions,
+                            source_package_sha256, evidence_package_sha256,
+                            verification_report_sha256
+                        )
+                        VALUES (
+                            %s, %s, %s, %s, 'V1_FORMAL',
+                            %s, %s, %s, %s, %s, %s
+                        )
+                        ON CONFLICT DO NOTHING
+                        RETURNING result_version
+                        """,
+                        (
+                            result_version,
+                            command.run_id,
+                            command.package.release_id,
+                            profile_version,
+                            Jsonb(result_summary),
+                            Jsonb(report_payload),
+                            Jsonb(list(report.blocking_reasons)),
+                            source_package_sha256,
+                            package_sha256,
+                            report_sha256,
+                        ),
+                    )
+                ).fetchone()
+                if inserted_result is None:
+                    raise RunLifecycleError("RESULT_VERSION_CONFLICT")
+                await conn.execute(
+                    """
+                    INSERT INTO run_evidence_package (
+                        result_version, run_id, release_id,
+                        confirmed_profile_version, result_kind,
+                        source_package_sha256, package_sha256, package_json
+                    )
+                    VALUES (%s, %s, %s, %s, 'V1_FORMAL', %s, %s, %s)
+                    """,
+                    (
+                        result_version,
+                        command.run_id,
+                        command.package.release_id,
+                        profile_version,
+                        source_package_sha256,
+                        package_sha256,
+                        Jsonb(canonical_payload(published_package)),
+                    ),
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO run_verification_report (
+                        result_version, run_id, status, report_sha256,
+                        report_json, stripped_claim_ids
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        result_version,
+                        command.run_id,
+                        report.status,
+                        report_sha256,
+                        Jsonb(report_payload),
+                        Jsonb(list(report.stripped_claim_ids)),
+                    ),
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO run_result_state_event (
+                        result_version, status, reason
+                    )
+                    VALUES (%s, 'ACTIVE', NULL)
+                    """,
+                    (result_version,),
+                )
+                updated = await (
+                    await conn.execute(
+                        """
+                        UPDATE run
+                        SET state = 'SUCCEEDED',
+                            stage = 'FORMAL_READY',
+                            terminal_reason = NULL,
+                            state_version = %s,
+                            result_version = %s,
+                            result_kind = 'V1_FORMAL',
+                            lease_owner = NULL,
+                            lease_expires_at = NULL,
+                            active_execution_started_at = NULL,
+                            updated_at = NOW()
+                        WHERE run_id = %s
+                          AND state = 'RUNNING'
+                          AND state_version = %s
+                          AND lease_owner = %s
+                          AND lease_epoch = %s
+                          AND release_id = %s
+                          AND confirmed_profile_version = %s
+                          AND cancel_requested_at IS NULL
+                        RETURNING run_id
+                        """,
+                        (
+                            next_version,
+                            result_version,
+                            command.run_id,
+                            command.expected_state_version,
+                            self._worker_owner,
+                            command.expected_lease_epoch,
+                            command.package.release_id,
+                            profile_version,
+                        ),
+                    )
+                ).fetchone()
+                if updated is None:
+                    raise RunLifecycleError("RUN_STATE_CONFLICT")
+                await append_event(
+                    conn,
+                    run_id=command.run_id,
+                    event_type="STATE_CHANGED",
+                    stage="FORMAL_READY",
+                    state_version=next_version,
+                    payload={
+                        "from_state": "RUNNING",
+                        "to_state": "SUCCEEDED",
+                    },
+                )
+                await append_event(
+                    conn,
+                    run_id=command.run_id,
+                    event_type="RESULT",
+                    stage="FORMAL_READY",
+                    state_version=next_version,
+                    payload={
+                        "result_version": str(result_version),
+                        "result_kind": "V1_FORMAL",
+                        "formal_result": result_summary,
+                    },
+                    payload_version=3,
+                )
+        finally:
+            await conn.close()
+
+        return FormalPublication(
+            accepted=True,
+            reason=None,
+            run_id=command.run_id,
+            result_version=result_version,
+            result_kind="V1_FORMAL",
+            verification_status=report.status,
+            evidence_package_sha256=package_sha256,
+            verification_report_sha256=report_sha256,
+            stripped_claim_ids=report.stripped_claim_ids,
+        )
+
+    async def _require_formal_publish_binding(
+        self,
+        conn,
+        *,
+        command: PublishFormalResultCommand,
+        run: dict[str, Any],
+        profile_version: UUID,
+    ) -> None:
+        if (
+            run["state"] != "RUNNING"
+            or run["state_version"] != command.expected_state_version
+            or run["lease_owner"] != self._worker_owner
+            or run["lease_epoch"] != command.expected_lease_epoch
+            or run["cancel_requested_at"] is not None
+        ):
+            raise RunLifecycleError("RUN_STATE_CONFLICT")
+        if run["release_id"] != command.package.release_id:
+            raise RunLifecycleError("RELEASE_MISMATCH")
+        if run["confirmed_profile_version"] != profile_version:
+            raise RunLifecycleError("PROFILE_VERSION_MISMATCH")
+        profile = await (
+            await conn.execute(
+                """
+                SELECT revision.lifecycle, confirmation.confirmation_id
+                FROM profile_revision revision
+                JOIN profile_confirmation confirmation
+                  ON confirmation.profile_version = revision.profile_version
+                WHERE revision.profile_version = %s
+                """,
+                (profile_version,),
+            )
+        ).fetchone()
+        if profile is None or profile["lifecycle"] != "CONFIRMED":
+            raise RunLifecycleError("PROFILE_NOT_CONFIRMED")
+        release = await (
+            await conn.execute(
+                """
+                SELECT status, revoked_at
+                FROM release
+                WHERE release_id = %s
+                FOR SHARE
+                """,
+                (command.package.release_id,),
+            )
+        ).fetchone()
+        if (
+            release is None
+            or release["status"] != "PUBLISHED"
+            or release["revoked_at"] is not None
+        ):
+            raise RunLifecycleError("RELEASE_REVOKED")
+
+    async def _find_formal_publication(
+        self,
+        conn,
+        *,
+        principal_id: str,
+        run_id: UUID,
+        result_version: UUID,
+    ) -> dict[str, Any] | None:
+        return await (
+            await conn.execute(
+                """
+                SELECT result.result_version, result.run_id, result.release_id,
+                       result.confirmed_profile_version, result.result_kind,
+                       result.source_package_sha256,
+                       package.package_sha256,
+                       report.report_sha256, report.status,
+                       report.stripped_claim_ids,
+                       run.state
+                FROM run_result result
+                JOIN run ON run.run_id = result.run_id
+                JOIN run_evidence_package package
+                  ON package.result_version = result.result_version
+                JOIN run_verification_report report
+                  ON report.result_version = result.result_version
+                WHERE result.result_version = %s
+                  AND result.run_id = %s
+                  AND run.principal_id = %s
+                """,
+                (result_version, run_id, principal_id),
+            )
+        ).fetchone()
+
+    def _replayed_formal_publication(
+        self,
+        row: dict[str, Any],
+        *,
+        source_package_sha256: str,
+    ) -> FormalPublication:
+        if (
+            row["state"] != "SUCCEEDED"
+            or row["source_package_sha256"] != source_package_sha256
+        ):
+            raise RunLifecycleError("RESULT_VERSION_CONFLICT")
+        return FormalPublication(
+            accepted=True,
+            reason=None,
+            run_id=row["run_id"],
+            result_version=row["result_version"],
+            result_kind=row["result_kind"],
+            verification_status=row["status"],
+            evidence_package_sha256=row["package_sha256"],
+            verification_report_sha256=row["report_sha256"],
+            stripped_claim_ids=tuple(row["stripped_claim_ids"]),
+            replayed=True,
+        )
+
+    async def _fail_blocked_formal_package(
+        self,
+        command: PublishFormalResultCommand,
+        *,
+        report: VerificationReport,
+        result_version: UUID,
+    ) -> FormalPublication:
+        report_payload = verification_summary(report)
+        conn = await self._connect()
+        try:
+            async with conn.transaction():
+                run = await (
+                    await conn.execute(
+                        """
+                        SELECT run_id, state, stage, state_version, release_id,
+                               confirmed_profile_version, lease_owner,
+                               lease_epoch, cancel_requested_at
+                        FROM run
+                        WHERE run_id = %s AND principal_id = %s
+                        FOR UPDATE
+                        """,
+                        (command.run_id, command.principal_id),
+                    )
+                ).fetchone()
+                if run is None:
+                    raise RunLifecycleError("RUN_NOT_FOUND")
+                if (
+                    run["state"] != "RUNNING"
+                    or run["state_version"] != command.expected_state_version
+                    or run["lease_owner"] != self._worker_owner
+                    or run["lease_epoch"] != command.expected_lease_epoch
+                    or run["release_id"] != command.package.release_id
+                    or (
+                        run["confirmed_profile_version"] is not None
+                        and str(run["confirmed_profile_version"])
+                        != str(command.package.profile_version)
+                    )
+                ):
+                    raise RunLifecycleError("RUN_STATE_CONFLICT")
+                if run["cancel_requested_at"] is not None:
+                    raise RunLifecycleError("RUN_STATE_CONFLICT")
+                next_version = run["state_version"] + 1
+                failed = await (
+                    await conn.execute(
+                        """
+                        UPDATE run
+                        SET state = 'FAILED',
+                            stage = 'VERIFICATION_BLOCKED',
+                            terminal_reason = 'VALIDATION_FAILED',
+                            state_version = %s,
+                            lease_owner = NULL,
+                            lease_expires_at = NULL,
+                            active_execution_started_at = NULL,
+                            updated_at = NOW()
+                        WHERE run_id = %s
+                          AND state = 'RUNNING'
+                          AND state_version = %s
+                          AND lease_owner = %s
+                          AND lease_epoch = %s
+                          AND cancel_requested_at IS NULL
+                        RETURNING run_id
+                        """,
+                        (
+                            next_version,
+                            command.run_id,
+                            command.expected_state_version,
+                            self._worker_owner,
+                            command.expected_lease_epoch,
+                        ),
+                    )
+                ).fetchone()
+                if failed is None:
+                    raise RunLifecycleError("RUN_STATE_CONFLICT")
+                await append_event(
+                    conn,
+                    run_id=command.run_id,
+                    event_type="ERROR",
+                    stage="VERIFICATION_BLOCKED",
+                    state_version=next_version,
+                    payload={
+                        "code": "VALIDATION_FAILED",
+                        "message": "正式证据包未通过发布门禁",
+                        "retryable": False,
+                        "verification_summary": report_payload,
+                    },
+                    payload_version=2,
+                )
+        finally:
+            await conn.close()
+        return FormalPublication(
+            accepted=False,
+            reason="VALIDATION_FAILED",
+            run_id=command.run_id,
+            result_version=result_version,
+            result_kind=None,
+            verification_status="BLOCKED",
+            evidence_package_sha256="",
+            verification_report_sha256=payload_sha256(report),
+            stripped_claim_ids=(),
+        )
+
+    @staticmethod
+    def _formal_result_payload(view: FormalResultView) -> dict[str, Any]:
+        return {
+            "result_version": str(view.result_version),
+            "result_kind": view.result_kind,
+            "release_id": view.release_id,
+            "confirmed_profile_version": str(
+                view.confirmed_profile_version
+            ),
+            "evidence_package_sha256": view.evidence_package_sha256,
+            "verification_report_sha256": (
+                view.verification_report_sha256
+            ),
+            "verification_summary": view.verification_summary,
+            "result_state": view.result_state,
+            "stale_reason": view.stale_reason,
+        }
 
     @staticmethod
     def _trusted_string_tuple(value, field: str) -> tuple[str, ...]:

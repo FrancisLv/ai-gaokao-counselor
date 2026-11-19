@@ -1,5 +1,10 @@
 """持久 run 生命周期的唯一公开 seam。"""
 
+from app.run_lifecycle.formal import (
+    FormalPublication,
+    FormalResultView,
+    PublishFormalResultCommand,
+)
 from app.run_lifecycle.models import (
     AnswerFields,
     CancelRunCommand,
@@ -25,7 +30,10 @@ __all__ = [
     "ConfirmProfileAnswer",
     "DeclineFieldsAnswer",
     "InterruptView",
+    "FormalPublication",
+    "FormalResultView",
     "PolicyQaInput",
+    "PublishFormalResultCommand",
     "RejectOrEditProfileAnswer",
     "ResultReference",
     "ResumeRunCommand",

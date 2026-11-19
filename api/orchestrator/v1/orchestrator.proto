@@ -300,6 +300,31 @@ message PolicyEvidenceResult {
   string relevance_policy_version = 15;
 }
 
+message FormalClaimVerification {
+  string claim_id = 1;
+  string criticality = 2;
+  string status = 3;
+  string reason = 4;
+  repeated string checked_against = 5;
+  bool deterministic = 6;
+}
+
+message FormalResultSummary {
+  string result_version = 1;
+  string result_kind = 2;
+  string release_id = 3;
+  string confirmed_profile_version = 4;
+  string evidence_package_sha256 = 5;
+  string verification_report_sha256 = 6;
+  string verification_status = 7;
+  repeated FormalClaimVerification claims = 8;
+  repeated string blocking_reasons = 9;
+  repeated string stripped_claim_ids = 10;
+  double citation_coverage = 11;
+  string result_state = 12;
+  string stale_reason = 13;
+}
+
 message RunViewReply {
   string run_id = 1;
   string session_id = 2;
@@ -319,6 +344,7 @@ message RunViewReply {
   AlgorithmPreview result_preview = 16;
   google.protobuf.Timestamp expires_at = 17;
   PolicyEvidenceResult policy_evidence = 18;
+  FormalResultSummary formal_result = 19;
 }
 
 message StateChangedPayload {
@@ -354,5 +380,6 @@ message RunEvent {
     ErrorPayload error = 11;
     AlgorithmPreview result = 12;
     PolicyEvidenceResult policy_evidence = 13;
+    FormalResultSummary formal_result = 14;
   }
 }

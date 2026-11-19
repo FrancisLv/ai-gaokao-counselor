@@ -436,6 +436,14 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
         if view.result is not None:
             reply.result.result_version = str(view.result.result_version)
             reply.result.result_kind = view.result.result_kind
+        if view.formal_result is not None:
+            reply.formal_result.CopyFrom(
+                OrchestratorServicer._formal_result_message(
+                    OrchestratorServicer._formal_view_payload(
+                        view.formal_result
+                    )
+                )
+            )
         if view.result_payload is not None:
             if view.result is not None and view.result.result_kind == "POLICY_EVIDENCE":
                 reply.policy_evidence.CopyFrom(
@@ -443,7 +451,7 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
                         view.result_payload
                     )
                 )
-            else:
+            elif view.result is None or view.result.result_kind != "V1_FORMAL":
                 reply.result_preview.CopyFrom(
                     OrchestratorServicer._algorithm_preview_message(
                         view.result_payload
@@ -486,6 +494,13 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
                         retrieval
                     )
                 )
+            elif event.payload.get("result_kind") == "V1_FORMAL":
+                formal_result = event.payload.get("formal_result") or {}
+                reply.formal_result.CopyFrom(
+                    OrchestratorServicer._formal_result_message(
+                        formal_result
+                    )
+                )
             else:
                 preview = event.payload.get("preview") or {}
                 reply.result.CopyFrom(
@@ -503,6 +518,59 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
     def _policy_evidence_message(payload: dict):
         message = orchestrator_pb2.PolicyEvidenceResult()
         json_format.ParseDict(payload, message)
+        return message
+
+    @staticmethod
+    def _formal_view_payload(formal_result) -> dict:
+        return {
+            "result_version": str(formal_result.result_version),
+            "result_kind": formal_result.result_kind,
+            "release_id": formal_result.release_id,
+            "confirmed_profile_version": str(
+                formal_result.confirmed_profile_version
+            ),
+            "evidence_package_sha256": (
+                formal_result.evidence_package_sha256
+            ),
+            "verification_report_sha256": (
+                formal_result.verification_report_sha256
+            ),
+            "verification_summary": formal_result.verification_summary,
+            "result_state": formal_result.result_state,
+            "stale_reason": formal_result.stale_reason,
+        }
+
+    @staticmethod
+    def _formal_result_message(payload: dict):
+        summary = payload.get("verification_summary") or {}
+        message = orchestrator_pb2.FormalResultSummary()
+        json_format.ParseDict(
+            {
+                "resultVersion": payload.get("result_version", ""),
+                "resultKind": payload.get("result_kind", ""),
+                "releaseId": payload.get("release_id", ""),
+                "confirmedProfileVersion": payload.get(
+                    "confirmed_profile_version",
+                    "",
+                ),
+                "evidencePackageSha256": payload.get(
+                    "evidence_package_sha256",
+                    "",
+                ),
+                "verificationReportSha256": payload.get(
+                    "verification_report_sha256",
+                    "",
+                ),
+                "verificationStatus": summary.get("status", ""),
+                "claims": summary.get("claims", []),
+                "blockingReasons": summary.get("blocking_reasons", []),
+                "strippedClaimIds": summary.get("stripped_claim_ids", []),
+                "citationCoverage": summary.get("citation_coverage", 0.0),
+                "resultState": payload.get("result_state", "ACTIVE"),
+                "staleReason": payload.get("stale_reason") or "",
+            },
+            message,
+        )
         return message
 
     @staticmethod

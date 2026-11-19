@@ -57,6 +57,9 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await conn.execute(
                 """
                 DROP TABLE IF EXISTS
+                    run_result_state_event,
+                    run_verification_report,
+                    run_evidence_package,
                     eligibility_profile_field_template,
                     eligibility_profile_field,
                     rule_coverage,
@@ -161,6 +164,8 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await conn.execute(migration.read_text(encoding="utf-8"))
             migration = ROOT / "migrations" / "26_release_bound_profile_fields.sql"
             await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "27_formal_evidence_results.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS release_component (
@@ -180,7 +185,11 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
         sql = (ROOT / relative_path).read_text(encoding="utf-8")
         await conn.execute(sql)
 
-    async def reset_to_fresh_schema(self) -> None:
+    async def reset_to_fresh_schema(
+        self,
+        *,
+        apply_formal_result_migration: bool = True,
+    ) -> None:
         conn = await self._connect()
         try:
             database = (await (await conn.execute("SELECT current_database() AS name")).fetchone())["name"]
@@ -211,6 +220,11 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await self._apply_sql_file(conn, "migrations/24_eligibility_profile_fields.sql")
             await self._apply_sql_file(conn, "migrations/25_rule_coverage_contract.sql")
             await self._apply_sql_file(conn, "migrations/26_release_bound_profile_fields.sql")
+            if apply_formal_result_migration:
+                await self._apply_sql_file(
+                    conn,
+                    "migrations/27_formal_evidence_results.sql",
+                )
         finally:
             await conn.close()
 

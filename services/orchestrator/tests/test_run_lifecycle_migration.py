@@ -7,7 +7,7 @@ from run_lifecycle_support import RunLifecyclePostgresTest
 
 
 class FreshSchemaTests(RunLifecyclePostgresTest):
-    async def test_run_lifecycle_works_on_fresh_schema_from_00_to_26(self):
+    async def test_run_lifecycle_works_on_fresh_schema_from_00_to_27(self):
         from app.run_lifecycle import RunLifecycle, StructuredProfileInput, SubmitRunCommand
 
         await self.reset_to_fresh_schema()
@@ -37,6 +37,116 @@ class FreshSchemaTests(RunLifecyclePostgresTest):
         )
         self.assertEqual(view.release_id, release_id)
         self.assertEqual(view.state, "QUEUED")
+
+    async def test_formal_result_migration_upgrades_26_and_preserves_old_results(self):
+        from uuid import uuid4
+
+        from psycopg.types.json import Jsonb
+
+        from app.run_lifecycle import RunLifecycle, StructuredProfileInput, SubmitRunCommand
+
+        await self.reset_to_fresh_schema(apply_formal_result_migration=False)
+        release_id = await self.seed_release()
+        lifecycle = RunLifecycle(self.dsn)
+        receipt = await lifecycle.SubmitRun(
+            SubmitRunCommand(
+                principal_id="upgrade-principal",
+                session_id=None,
+                task_kind="GENERATE_PLAN",
+                input=StructuredProfileInput(
+                    province="湖南",
+                    application_year=2025,
+                    category="物理类",
+                    batch="本科批",
+                    score=600,
+                    subjects=("物理", "化学", "生物"),
+                ),
+                idempotency_key="upgrade-existing-run",
+            )
+        )
+        result_version = uuid4()
+        conn = await self._connect()
+        try:
+            await conn.execute(
+                """
+                INSERT INTO run_result (
+                    result_version, run_id, release_id,
+                    confirmed_profile_version, result_kind, payload,
+                    verification_summary, unverified_conditions
+                )
+                VALUES (
+                    %s, %s, %s, NULL, 'POLICY_EVIDENCE', %s, '[]'::jsonb,
+                    '[]'::jsonb
+                )
+                """,
+                (
+                    result_version,
+                    receipt.run_id,
+                    release_id,
+                    Jsonb(
+                        {
+                            "result_version": str(result_version),
+                            "result_kind": "POLICY_EVIDENCE",
+                            "retrieval_status": "NO_EVIDENCE",
+                            "evidence": [],
+                        }
+                    ),
+                ),
+            )
+            await conn.execute(
+                """
+                UPDATE run
+                SET state = 'SUCCEEDED',
+                    stage = 'EVIDENCE_READY',
+                    result_version = %s,
+                    result_kind = 'POLICY_EVIDENCE',
+                    state_version = state_version + 1
+                WHERE run_id = %s
+                """,
+                (result_version, receipt.run_id),
+            )
+            await self._apply_sql_file(
+                conn,
+                "migrations/27_formal_evidence_results.sql",
+            )
+            tables = await (
+                await conn.execute(
+                    """
+                    SELECT tablename
+                    FROM pg_tables
+                    WHERE schemaname = 'public'
+                      AND tablename IN (
+                          'run_evidence_package',
+                          'run_verification_report',
+                          'run_result_state_event'
+                      )
+                    ORDER BY tablename
+                    """
+                )
+            ).fetchall()
+        finally:
+            await conn.close()
+
+        view = await lifecycle.GetRun(
+            principal_id="upgrade-principal",
+            run_id=receipt.run_id,
+        )
+        self.assertEqual(
+            [row["tablename"] for row in tables],
+            [
+                "run_evidence_package",
+                "run_result_state_event",
+                "run_verification_report",
+            ],
+        )
+        self.assertEqual(view.state, "SUCCEEDED")
+        self.assertEqual(view.result.result_version, result_version)
+        self.assertEqual(view.result.result_kind, "POLICY_EVIDENCE")
+        self.assertEqual(
+            view.result_payload["retrieval_status"],
+            "NO_EVIDENCE",
+        )
+        self.assertIsNone(view.formal_result)
 
     async def test_official_saver_tables_are_installed_without_reusing_plan_checkpoint(self):
         from app.run_lifecycle import RunLifecycle, StructuredProfileInput, SubmitRunCommand

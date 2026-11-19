@@ -5,6 +5,8 @@ from datetime import datetime
 from typing import Any, Literal, NotRequired, TypedDict
 from uuid import UUID
 
+from app.run_lifecycle.formal import FormalResultView
+
 
 TaskKind = Literal["GENERATE_PLAN", "POLICY_QA", "EXPLAIN_RESULT", "REVISE_PLAN"]
 RunState = Literal[
@@ -155,6 +157,18 @@ class PolicyEvidencePayload(TypedDict, total=False):
     evidence: list[PolicyEvidenceItemPayload]
 
 
+class FormalResultPayload(TypedDict):
+    result_version: str
+    result_kind: str
+    release_id: str
+    confirmed_profile_version: str
+    evidence_package_sha256: str
+    verification_report_sha256: str
+    verification_summary: dict[str, Any]
+    result_state: str
+    stale_reason: str | None
+
+
 RunEventPayload = (
     dict[str, Any]
     | ProgressPayload
@@ -289,7 +303,13 @@ class RunView:
     cancel_requested_at: datetime | None
     current_interrupt: InterruptView | None
     result: ResultReference | None
-    result_payload: AlgorithmPreviewPayload | PolicyEvidencePayload | None
+    result_payload: (
+        AlgorithmPreviewPayload
+        | PolicyEvidencePayload
+        | FormalResultPayload
+        | None
+    )
+    formal_result: FormalResultView | None
     created_at: datetime
     updated_at: datetime
     expires_at: datetime

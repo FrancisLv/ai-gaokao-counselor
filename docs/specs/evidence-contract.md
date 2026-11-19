@@ -273,6 +273,13 @@ ClaimVerification
 - 原始对象存储、数据库行和派生快照的 hash 必须长期可追溯；
 - 删除用户数据时，公共文档证据可保留，用户画像和派生输入按保留策略处理。
 
+运行实现使用 `run_result` 固化结果身份，`run_evidence_package` 与
+`run_verification_report` 分别保存已剥离证据包和完整验证报告；两张表均以数据库
+触发器拒绝 UPDATE/DELETE。`run_result_state_event` 追加 `ACTIVE / STALE` 状态，
+release 撤销只追加 `STALE / RELEASE_REVOKED`，不修改发布正文。同一
+`result_version` 的输入摘要冲突返回 `RESULT_VERSION_CONFLICT`，同摘要重试只重放
+原结果和原 RESULT 事件。
+
 ## 9. 稳定错误
 
 | reason | 含义 |
@@ -309,6 +316,7 @@ ClaimVerification
 | `REQUIRED_NOTICE_MISSING` | 必需说明或其证据缺失 |
 | `REQUIRED_NOTICE_MISMATCH` | 必需说明内容或 hash 被改写 |
 | `ADMISSION_GUARANTEE_FORBIDDEN` | 出现录取保证或等价承诺 |
+| `RESULT_VERSION_CONFLICT` | 已发布 `result_version` 被绑定到不同输入摘要或其他 run |
 
 ## 10. 验收测试
 

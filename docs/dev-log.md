@@ -1829,3 +1829,44 @@ LLM 规则生成。
 - 按严格 TDD 先为三个缺口各加 `VerifyPackage` 失败测试，确认旧实现分别误报
   `PASS`，修复后转绿。
 - `test_evidence_verification.py` 70 tests OK。
+
+## 56. M4c-06：不可变证据包与 V1_FORMAL 原子发布
+
+**日期与范围**：2026-11-20，对应 issue #30。将既有 `VerifyPackage` 报告接入
+`RunLifecycle.PublishFormalResult`，只新增正式发布边界，不新增第二个事实校验入口，
+不改写 `ALGORITHM_PREVIEW / POLICY_EVIDENCE` 的既有语义。
+
+### 实现
+
+- `PublishFormalResult` 只接受 `PASS` 与合法 `PARTIAL`；`BLOCKED` 在同一事务将 run
+  失败为 `VALIDATION_FAILED`，不创建可查询的正式结果。PARTIAL 持久化剥离后的
+  Claim/Evidence 和完整报告，保留稳定 `stripped_claim_ids`。
+- 新增迁移 `27_formal_evidence_results.sql`：`run_result` 支持 `V1_FORMAL`；
+  `run_evidence_package`、`run_verification_report` 与 `run_result_state_event`
+  保存正文、摘要和独立状态。结果正文、证据包、报告与状态事件均由触发器拒绝
+  UPDATE/DELETE；release 撤销只追加 `STALE / RELEASE_REVOKED`。
+- 发布事务再次校验 principal、state version、lease owner/epoch、确认 Profile、
+  cancel 标志和 release 有效性；发布与取消竞争由行锁及条件更新裁决。成功时结果、
+  证据包、报告、run 状态、ACTIVE 状态和 RESULT 事件同一事务提交。
+- 输入摘要按 Claim、EvidenceRef、必需说明、资格组/专业和限制信息稳定排序后计算。
+  同一 `result_version` 同摘要重试不重新执行验证、不追加第二份正文或 RESULT 事件；
+  同版本不同输入摘要或跨 run 复用返回 `RESULT_VERSION_CONFLICT`。
+- orchestrator proto 加法新增 `FormalResultSummary`；gRPC GET 与 Watch 返回同一
+  `result_version`、证据包/报告摘要、逐 Claim 状态、阻断原因和剥离 ID。既有结果
+  类型继续走原映射，旧结果不会被提升为 `V1_FORMAL`。
+
+### 验证
+
+- 严格 TDD 先覆盖成功发布、发布/取消竞态、Profile/lease/state、release 撤销、
+  PARTIAL、BLOCKED、结果版本冲突、规范化重放、数据库不可变、release 失效标记和
+  gRPC GET/Watch 一致性，再实现对应行为。
+- `test_run_lifecycle_formal.py` 11 tests OK。
+- 全部 `test_run*.py` 真实 PostgreSQL 回归：92 tests OK，1 个依赖外部 algo 地址
+  的用例按既有条件跳过。
+- 迁移覆盖 fresh `00 → 27` 与 `26 → 27` 升级，并验证升级前 `POLICY_EVIDENCE`
+  结果仍可读取且 `formal_result` 为空。
+
+### 边界
+
+- LangGraph 图内 verify/report 节点、报告重写与回算上限仍由后续 M5/FR-18/FR-19
+  工作接入；本票只闭合已生成证据包的正式发布边界。

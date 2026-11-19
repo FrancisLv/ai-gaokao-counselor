@@ -11,6 +11,10 @@
 
 `RunLifecycle` 是一个深模块：对外只暴露五个操作，内部隐藏状态机、租约、幂等、事件序号、中断消费、检查点关联和发布条件。
 
+worker 的正式发布使用内部命令 `PublishFormalResult`。它不是新增客户端入口：
+调用方只提交绑定当前 run 的 `EvidencePackage`，`RunLifecycle` 通过唯一
+`VerifyPackage` seam 取得报告后决定发布或失败，不能自行声明报告已通过。
+
 ```text
 SubmitRun(command)  -> RunReceipt
 ResumeRun(command)  -> RunReceipt
@@ -293,6 +297,9 @@ expires_at
 | `run_event` | 持久事件与单调 `event_seq` |
 | `profile_revision` | 不可变画像版本 |
 | `result_version` | 已通过门禁的不可变结果引用 |
+| `run_evidence_package` | `V1_FORMAL` 已剥离证据包正文与输入/发布摘要，insert-only |
+| `run_verification_report` | `V1_FORMAL` 完整 `VerificationReport` 与摘要，insert-only |
+| `run_result_state_event` | 发布结果后的 `ACTIVE / STALE` 独立追加状态 |
 
 事务要求：
 
@@ -300,6 +307,10 @@ expires_at
 - 创建 interrupt 前，LangGraph checkpoint 必须已经持久化；若跨存储不能共事务，必须有幂等物化和恢复对账。
 - Resume receipt、interrupt 消费和 QUEUED 状态必须原子提交。
 - 结果发布必须同时校验 lease epoch、state_version、confirmed profile 和 release 有效性。
+- `V1_FORMAL` 必须在同一事务写入结果、证据包、验证报告、`run.state=SUCCEEDED`、
+  `result_version`、ACTIVE 状态和 RESULT 事件；数据库触发器拒绝重写正文。
+- 同一 `result_version` 只能映射一份规范化输入摘要；重试重放原结果与事件，摘要冲突
+  返回 `RESULT_VERSION_CONFLICT`。发布与取消竞争只有一个终态提交成功。
 - Redis 仅作通知或可重建投影，不是权威状态。
 
 ## 10. 稳定错误码
@@ -316,6 +327,9 @@ expires_at
 | `IDEMPOTENCY_CONFLICT` | 同幂等键对应不同请求 |
 | `RELEASE_REVOKED` | 绑定 release 已撤销 |
 | `RELEASE_UNAVAILABLE` | Submit 时没有可绑定的有效 release |
+| `RELEASE_MISMATCH` | 正式证据包与 run 绑定的 release 不一致 |
+| `PROFILE_VERSION_MISMATCH` | 正式证据包与 run 的确认 Profile 不一致 |
+| `RESULT_VERSION_CONFLICT` | `result_version` 已绑定不同输入摘要或其他 run |
 | `PROFILE_NOT_CONFIRMED` | 数据依赖节点尝试读取未确认画像 |
 | `QUEUE_OVERLOADED` | 无可用执行容量 |
 | `EVENT_CURSOR_EXPIRED` | Watch 游标超出保留窗口 |
