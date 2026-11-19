@@ -1634,3 +1634,34 @@ LLM 规则生成。
 - Go 纯逻辑与全部 M4b 真实 PostgreSQL 集成测试通过；fresh schema 从 00→26 通过。
 - Python 全量通过；完整 RunLifecycle 真实库套件 80 tests OK，仅真实
   svc-algo TCP 用例因未设置地址按约定跳过。
+
+## 50. M4c-01：VerifyPackage 文档事实闭环
+
+**日期与范围**：2026-11-19，对应 issue #25。建立三类证据共用的证据包与 Claim
+运行时形状，只实现 `DocumentEvidence` 校验；正式发布门禁和持久化仍由后续票完成。
+
+### 实现
+
+- 唯一事实校验入口为 `VerifyPackage(EvidencePackage) -> VerificationReport`。
+  三类证据分派、Claim 顺序、引用检查和稳定原因均隐藏在 verifier 内部。
+- 文档 Claim 校验同一 `release_id`、EvidenceRef/原件的 excerpt hash、section path
+  与字符 locator、省份/科类/批次/学校/年份/生效区间，以及原文对 Claim 的支持关系。
+- 悬空、跨 release、身份字段缺失和无法核验文本均 fail-closed；重复 Claim/evidence
+  ID 不得通过。可选文本 entailment adapter 必须带版本，并在报告标记
+  `deterministic=false`。
+- 报告按 Claim ID 与 Evidence ID 稳定排序；同一输入重复校验得到相同状态、原因和
+  检查顺序。现有 `DocumentEvidence`、`RetrievePolicy`、`ALGORITHM_PREVIEW` 和
+  `POLICY_EVIDENCE` 行为保持兼容。
+
+### 验证
+
+- 新增 `VerifyPackage` 行为测试覆盖成功、hash/locator、错误学校/年份/适用域、
+  悬空与跨 release、重复 Claim、身份缺失、文本不可核验、版本化 entailment 和
+  确定性重放。
+- `make py-check py-test` 通过：212 tests OK，112 个依赖真实库/外部服务的用例按
+  既有约定跳过。
+
+### 边界
+
+- 本票未实现 `StructuredEvidence`、`DerivedEvidence`、`PASS/BLOCKED/PARTIAL`
+  完整剥离状态机、资格/说明统一门禁或正式结果持久化。
