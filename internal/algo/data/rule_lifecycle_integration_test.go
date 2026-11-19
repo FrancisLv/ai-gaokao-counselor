@@ -148,6 +148,10 @@ func TestIntegration_RuleLifecycleAuditAndPublishGuards(t *testing.T) {
 			}},
 		}},
 	}
+	request.ProfileSnapshotSHA256 = biz.EligibilityProfileSnapshotSHA256(
+		request.ConfirmedProfileVersion,
+		request.ProfileFacts,
+	)
 	uc := biz.NewEligibilityUsecase(NewEligibilityRepo(d))
 	result, err := uc.EvaluateEligibility(context.Background(), request)
 	if err != nil {
@@ -198,7 +202,7 @@ func TestIntegration_RuleLifecycleRejectsDirectPublishAndMissingCoverage(t *test
 		) VALUES (
 			'rule-direct-publish', 1, 'subject-requirement', 'SUBJECT_REQUIREMENT',
 			'{}'::jsonb, '["subjects","category"]'::jsonb,
-			'{"op":"NOT","child":{"op":"SUBJECT_MATCH"}}'::jsonb, 'FAIL',
+			'{"op":"NOT","child":{"op":"SUBJECT_MATCH","subject_req":"首选物理，再选化学"}}'::jsonb, 'FAIL',
 			'SUBJECT_NOT_MATCHED', 'PUBLISHED', $1,
 			'[{"evidence_id":"ev-direct"}]'::jsonb, 'editor',
 			'reviewer', NOW(), 'publisher', NOW()
@@ -354,6 +358,14 @@ func insertLifecycleRelease(t *testing.T, pool *pgxpool.Pool, releaseID string) 
 	); err != nil {
 		t.Fatalf("insert release: %v", err)
 	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO release_scope (
+			release_id, province, application_year, category, batch
+		) VALUES ($1, '湖南', 2025, '物理类', '本科批')
+		ON CONFLICT DO NOTHING`, releaseID,
+	); err != nil {
+		t.Fatalf("insert release scope: %v", err)
+	}
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
 	})
@@ -380,7 +392,10 @@ func lifecycleRuleDraft(releaseID, ruleID, ruleKey string) RuleDraft {
 		RequiredProfileFields: []string{"subjects", "category"},
 		Expression: biz.RuleExpression{
 			Operator: biz.OperatorNot,
-			Child:    &biz.RuleExpression{Operator: biz.OperatorSubjectMatch},
+			Child: &biz.RuleExpression{
+				Operator:           biz.OperatorSubjectMatch,
+				SubjectRequirement: "首选物理，再选化学",
+			},
 		},
 		OutcomeWhenTrue: biz.OutcomeFail,
 		ReasonCode:      "SUBJECT_NOT_MATCHED",

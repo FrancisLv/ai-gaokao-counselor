@@ -9,13 +9,18 @@ import (
 )
 
 type fakeEligibilityRepo struct {
-	set EligibilityRuleSet
-	err error
+	set            EligibilityRuleSet
+	err            error
+	scopeSupported *bool
 }
 
-func (f fakeEligibilityRepo) LoadEligibilityRuleSet(context.Context, string) (EligibilityRuleSet, error) {
+func (f fakeEligibilityRepo) LoadEligibilityRuleSet(context.Context, string, EligibilityScope) (EligibilityRuleSet, error) {
 	if len(f.set.ProfileFields) == 0 {
 		f.set.ProfileFields = BuiltinEligibilityProfileFields()
+	}
+	f.set.ReleaseScopeSupported = true
+	if f.scopeSupported != nil {
+		f.set.ReleaseScopeSupported = *f.scopeSupported
 	}
 	return f.set, f.err
 }
@@ -27,41 +32,26 @@ func TestEvaluateEligibility_SubjectRulePassAndFail(t *testing.T) {
 	); !matched || err != nil {
 		t.Fatalf("subject fixture invalid: matched=%v reason=%q err=%v", matched, reason, err)
 	}
-	uc := NewEligibilityUsecase(fakeEligibilityRepo{set: EligibilityRuleSet{
-		ReleaseStatus: "PUBLISHED",
-		Rules: []RuleVersion{{
-			RuleID:   "rule-subject",
-			Version:  1,
-			RuleKey:  "subject-requirement",
-			RuleType: RuleTypeSubjectRequirement,
-			RequiredProfileFields: []string{
-				FieldSubjects,
-				FieldCategory,
-			},
-			When: RuleExpression{Operator: OperatorNot, Child: &RuleExpression{
-				Operator: OperatorSubjectMatch,
-			}},
-			ReasonCode:        "SUBJECT_NOT_MATCHED",
-			OutcomeWhenTrue:   OutcomeFail,
-			ReviewState:       ReviewStatePublished,
-			ExpressionVersion: ExpressionVersionV1,
-			SourceEvidence: []EvidenceRef{{
-				EvidenceID:   "ev-subject",
-				EvidenceType: "DOCUMENT",
-				ReleaseID:    "rel-test",
-				ContentSHA:   "sha256:subject",
-			}},
-		}},
-		Coverage: []RuleCoverage{{
-			RuleType: RuleTypeSubjectRequirement,
-			Status:   CoverageFull,
-		}},
-	}})
+	set := eligibilityFixtureRuleSet()
+	set = appendSubjectRule(
+		set,
+		"rule-subject-080902",
+		"080902",
+		"首选物理，再选思想政治",
+	)
+	uc := NewEligibilityUsecase(fakeEligibilityRepo{set: set})
 
 	result, err := uc.EvaluateEligibility(context.Background(), EligibilityRequest{
 		ReleaseID:               "rel-test",
 		ConfirmedProfileVersion: "profile-v1",
 		ProfileLifecycle:        ProfileLifecycleConfirmed,
+		ProfileSnapshotSHA256: EligibilityProfileSnapshotSHA256(
+			"profile-v1",
+			[]ProfileFact{
+				profileFactStrings(FieldSubjects, "物理", "化学", "生物"),
+				profileFactString(FieldCategory, "物理类"),
+			},
+		),
 		Scope: EligibilityScope{
 			Province: "湖南", ApplicationYear: 2025, Category: "物理类", Batch: "本科批",
 		},
@@ -90,7 +80,7 @@ func TestEvaluateEligibility_SubjectRulePassAndFail(t *testing.T) {
 		t.Fatalf("EvaluateEligibility: %v", err)
 	}
 	if result.Status != EligibilityComplete {
-		t.Fatalf("status = %q, want COMPLETE", result.Status)
+		t.Fatalf("status = %q, want COMPLETE; groups=%+v", result.Status, result.Groups)
 	}
 	if len(result.Groups) != 2 {
 		t.Fatalf("groups = %d, want 2", len(result.Groups))
@@ -105,7 +95,8 @@ func TestEvaluateEligibility_SubjectRulePassAndFail(t *testing.T) {
 	if len(failed.FailureRuleKeys) != 1 || failed.FailureRuleKeys[0] != "subject-requirement" {
 		t.Fatalf("failure_rule_keys = %v", failed.FailureRuleKeys)
 	}
-	if len(failed.EvidenceRefs) != 1 || failed.EvidenceRefs[0].EvidenceID != "ev-subject" {
+	if len(failed.EvidenceRefs) != 1 ||
+		failed.EvidenceRefs[0].EvidenceID != "ev-rule-subject-080902" {
 		t.Fatalf("evidence_refs = %+v", failed.EvidenceRefs)
 	}
 }
@@ -143,9 +134,12 @@ func TestEvaluateEligibility_BlocksReleaseAndDoesNotTreatUnknownAsPass(t *testin
 				RuleType: RuleTypeSubjectRequirement, ReviewState: ReviewStatePublished,
 				RequiredProfileFields: []string{FieldSubjects, FieldCategory},
 				ExpressionVersion:     ExpressionVersionV1,
-				When:                  RuleExpression{Operator: OperatorNot, Child: &RuleExpression{Operator: OperatorSubjectMatch}},
-				OutcomeWhenTrue:       OutcomeFail,
-				ReasonCode:            "SUBJECT_NOT_MATCHED",
+				When: RuleExpression{Operator: OperatorNot, Child: &RuleExpression{
+					Operator:           OperatorSubjectMatch,
+					SubjectRequirement: "首选物理，再选化学",
+				}},
+				OutcomeWhenTrue: OutcomeFail,
+				ReasonCode:      "SUBJECT_NOT_MATCHED",
 				SourceEvidence: []EvidenceRef{{
 					EvidenceID: "ev-missing-coverage", EvidenceType: "DOCUMENT",
 					ReleaseID: "rel-test", ContentSHA: "sha256:missing-coverage",
@@ -177,7 +171,8 @@ func TestEvaluateEligibility_BlocksReleaseAndDoesNotTreatUnknownAsPass(t *testin
 				ExpressionVersion:     ExpressionVersionV1,
 				OutcomeWhenTrue:       "PASS",
 				When: RuleExpression{Operator: OperatorNot, Child: &RuleExpression{
-					Operator: OperatorSubjectMatch,
+					Operator:           OperatorSubjectMatch,
+					SubjectRequirement: "首选物理，再选化学",
 				}},
 				SourceEvidence: []EvidenceRef{{
 					EvidenceID: "ev-invalid-outcome", EvidenceType: "DOCUMENT",
@@ -199,17 +194,19 @@ func TestEvaluateEligibility_BlocksReleaseAndDoesNotTreatUnknownAsPass(t *testin
 }
 
 func eligibilityFixtureRequest() EligibilityRequest {
+	facts := []ProfileFact{
+		profileFactStrings(FieldSubjects, "物理", "化学", "生物"),
+		profileFactString(FieldCategory, "物理类"),
+	}
 	return EligibilityRequest{
 		ReleaseID:               "rel-test",
 		ConfirmedProfileVersion: "profile-v1",
 		ProfileLifecycle:        ProfileLifecycleConfirmed,
+		ProfileSnapshotSHA256:   EligibilityProfileSnapshotSHA256("profile-v1", facts),
 		Scope: EligibilityScope{
 			Province: "湖南", ApplicationYear: 2025, Category: "物理类", Batch: "本科批",
 		},
-		ProfileFacts: []ProfileFact{
-			profileFactStrings(FieldSubjects, "物理", "化学", "生物"),
-			profileFactString(FieldCategory, "物理类"),
-		},
+		ProfileFacts: facts,
 		CandidateGroups: []CandidateGroup{{
 			UniversityID: 1, UniversityCode: "1001", UniversityName: "测试大学", MajorGroup: "01",
 			Majors: []CandidateMajor{{

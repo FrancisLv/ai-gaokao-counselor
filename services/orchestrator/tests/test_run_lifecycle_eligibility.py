@@ -232,6 +232,7 @@ class EligibilityRunLifecycleTests(RunLifecyclePostgresTest):
             "subjects",
             {fact.field_key for fact in request.profile_facts},
         )
+        self.assertRegex(request.profile_snapshot_sha256, r"^[0-9a-f]{64}$")
         self.assertEqual(
             [item.candidate.university_code for item in algo.calls[3][1].candidates],
             ["U001"],

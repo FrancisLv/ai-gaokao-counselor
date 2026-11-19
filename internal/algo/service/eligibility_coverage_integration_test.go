@@ -55,7 +55,7 @@ func TestIntegration_EvaluateEligibility_RuleCoverage(t *testing.T) {
 		publishEligibilityRuleFixture(
 			t, pool, releaseID, ruleID, "subject-requirement",
 			"SUBJECT_REQUIREMENT", `["subjects","category"]`,
-			`{"op":"NOT","child":{"op":"SUBJECT_MATCH"}}`, 1,
+			`{"op":"NOT","child":{"op":"SUBJECT_MATCH","subject_req":"首选物理，再选化学"}}`, 1,
 		)
 
 		first, err := client.EvaluateEligibility(context.Background(), eligibilityCoverageRequest(releaseID))
@@ -193,6 +193,14 @@ func seedCoverageRelease(t *testing.T, pool *pgxpool.Pool) string {
 	); err != nil {
 		t.Fatalf("insert staging release: %v", err)
 	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO release_scope (
+			release_id, province, application_year, category, batch
+		) VALUES ($1, '湖南', 2025, '物理类', '本科批')`,
+		releaseID,
+	); err != nil {
+		t.Fatalf("insert staging release scope: %v", err)
+	}
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
 	})
@@ -294,7 +302,7 @@ func insertEligibilityCoverage(
 }
 
 func eligibilityCoverageRequest(releaseID string) *algov1.EvaluateEligibilityRequest {
-	return &algov1.EvaluateEligibilityRequest{
+	request := &algov1.EvaluateEligibilityRequest{
 		ReleaseId: releaseID, ConfirmedProfileVersion: "profile-coverage-v1",
 		ProfileLifecycle: algov1.EligibilityProfileLifecycle_ELIGIBILITY_PROFILE_LIFECYCLE_CONFIRMED,
 		Scope:            &algov1.EligibilityScope{Province: "湖南", ApplicationYear: 2025, Category: "物理类", Batch: "本科批"},
@@ -316,4 +324,6 @@ func eligibilityCoverageRequest(releaseID string) *algov1.EvaluateEligibilityReq
 			}},
 		}},
 	}
+	setEligibilityProfileDigest(request)
+	return request
 }

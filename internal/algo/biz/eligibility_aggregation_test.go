@@ -12,7 +12,8 @@ func TestEvaluateEligibility_EmptyCandidateGroupIsBlocked(t *testing.T) {
 
 	result, err := NewEligibilityUsecase(fakeEligibilityRepo{
 		set: eligibilityFixtureRuleSet(),
-	}).EvaluateEligibility(context.Background(), req)
+	}).
+		EvaluateEligibility(context.Background(), req)
 	if err != nil {
 		t.Fatalf("EvaluateEligibility: %v", err)
 	}
@@ -36,7 +37,8 @@ func TestEvaluateEligibility_DuplicateMajorIdentityIsBlocked(t *testing.T) {
 
 	result, err := NewEligibilityUsecase(fakeEligibilityRepo{
 		set: eligibilityFixtureRuleSet(),
-	}).EvaluateEligibility(context.Background(), req)
+	}).
+		EvaluateEligibility(context.Background(), req)
 	if err != nil {
 		t.Fatalf("EvaluateEligibility: %v", err)
 	}
@@ -91,9 +93,14 @@ func TestEvaluateEligibility_AggregatesMajorStatesIntoPassPartial(t *testing.T) 
 		},
 	}
 
-	result, err := NewEligibilityUsecase(fakeEligibilityRepo{
-		set: eligibilityFixtureRuleSet(),
-	}).EvaluateEligibility(context.Background(), req)
+	set := appendSubjectRule(
+		eligibilityFixtureRuleSet(),
+		"rule-subject-political",
+		"080902",
+		"首选物理，再选思想政治",
+	)
+	result, err := NewEligibilityUsecase(fakeEligibilityRepo{set: set}).
+		EvaluateEligibility(context.Background(), req)
 	if err != nil {
 		t.Fatalf("EvaluateEligibility: %v", err)
 	}
@@ -125,7 +132,9 @@ func TestEvaluateEligibility_AggregatesMajorStatesIntoPassPartial(t *testing.T) 
 		group.Majors[1].FailureRuleKeys[0] != "subject-requirement" {
 		t.Fatalf("restricted major failure keys = %v", group.Majors[1].FailureRuleKeys)
 	}
-	if len(group.EvidenceRefs) != 1 || group.EvidenceRefs[0].EvidenceID != "ev-subject" {
+	if len(group.EvidenceRefs) != 2 ||
+		group.EvidenceRefs[0].EvidenceID != "ev-subject" ||
+		group.EvidenceRefs[1].EvidenceID != "ev-rule-subject-political" {
 		t.Fatalf("group evidence = %+v", group.EvidenceRefs)
 	}
 }
@@ -202,9 +211,14 @@ func TestEvaluateEligibility_GroupFailsWhenNoMajorPasses(t *testing.T) {
 		},
 	}
 
-	result, err := NewEligibilityUsecase(fakeEligibilityRepo{
-		set: eligibilityFixtureRuleSet(),
-	}).EvaluateEligibility(context.Background(), req)
+	set := appendSubjectRule(
+		eligibilityFixtureRuleSet(),
+		"rule-subject-political",
+		"080902",
+		"首选物理，再选思想政治",
+	)
+	result, err := NewEligibilityUsecase(fakeEligibilityRepo{set: set}).
+		EvaluateEligibility(context.Background(), req)
 	if err != nil {
 		t.Fatalf("EvaluateEligibility: %v", err)
 	}
@@ -361,4 +375,30 @@ func TestEvaluateEligibility_GroupAggregationIsDeterministicallySorted(t *testin
 	}; !reflect.DeepEqual(got, []string{"080901", "080902"}) {
 		t.Fatalf("major order = %v", got)
 	}
+}
+
+func appendSubjectRule(
+	set EligibilityRuleSet,
+	ruleID string,
+	majorCode string,
+	subjectRequirement string,
+) EligibilityRuleSet {
+	rule := set.Rules[0]
+	rule.RuleID = ruleID
+	rule.Scope = RuleScope{MajorCode: majorCode}
+	rule.When = RuleExpression{
+		Operator: OperatorNot,
+		Child: &RuleExpression{
+			Operator:           OperatorSubjectMatch,
+			SubjectRequirement: subjectRequirement,
+		},
+	}
+	rule.SourceEvidence = []EvidenceRef{{
+		EvidenceID:   "ev-" + ruleID,
+		EvidenceType: "DOCUMENT",
+		ReleaseID:    "rel-test",
+		ContentSHA:   "sha256:" + ruleID,
+	}}
+	set.Rules = append(set.Rules, rule)
+	return set
 }

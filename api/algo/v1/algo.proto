@@ -284,6 +284,7 @@ message EvaluateEligibilityRequest {
   EligibilityScope scope = 5;
   repeated EligibilityProfileFact profile_facts = 6;
   repeated EligibilityCandidateGroup candidate_groups = 7;
+  string profile_snapshot_sha256 = 8;
 }
 
 message EligibilityEvidenceRef {

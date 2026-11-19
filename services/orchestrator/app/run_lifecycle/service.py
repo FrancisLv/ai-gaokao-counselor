@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -1580,6 +1581,10 @@ class RunLifecycle:
                         "EstimateProb 返回重复候选",
                     )
                 source_by_identity[identity] = item.prob.probability
+            eligibility_fact_dicts = self._profile.ToEligibilityFacts(
+                lifecycle=revision["lifecycle"],
+                fields=revision["fields"],
+            )
             eligibility = await self._algo_client.EvaluateEligibility(
                 algo_pb2.EvaluateEligibilityRequest(
                     trace=trace,
@@ -1597,11 +1602,12 @@ class RunLifecycle:
                     ),
                     profile_facts=[
                         self._eligibility_profile_fact(fact)
-                        for fact in self._profile.ToEligibilityFacts(
-                            lifecycle=revision["lifecycle"],
-                            fields=revision["fields"],
-                        )
+                        for fact in eligibility_fact_dicts
                     ],
+                    profile_snapshot_sha256=self._eligibility_profile_snapshot_sha256(
+                        str(profile_version),
+                        eligibility_fact_dicts,
+                    ),
                     candidate_groups=self._eligibility_candidate_groups(
                         source_candidates
                     ),
@@ -1726,6 +1732,43 @@ class RunLifecycle:
                 f"资格字段值类型非法: {fact['field_key']}",
             )
         return converted
+
+    @staticmethod
+    def _eligibility_profile_snapshot_sha256(
+        profile_version: str,
+        facts: list[dict[str, Any]],
+    ) -> str:
+        def encode(value: str) -> str:
+            return base64.urlsafe_b64encode(value.encode("utf-8")).decode(
+                "ascii"
+            ).rstrip("=")
+
+        lines = []
+        for fact in facts:
+            value = fact.get("value")
+            string_values: list[str] = []
+            string_value = ""
+            int_value = 0
+            if isinstance(value, list):
+                string_values = [str(item) for item in value]
+            elif isinstance(value, int) and not isinstance(value, bool):
+                int_value = value
+            elif isinstance(value, str):
+                string_value = value
+            lines.append(
+                "|".join(
+                    [
+                        encode(str(fact["field_key"])),
+                        str(fact["state"]),
+                        encode(string_value),
+                        str(int_value),
+                        ",".join(encode(item) for item in string_values),
+                    ]
+                )
+            )
+        lines.sort()
+        payload = encode(profile_version) + "\n" + "\n".join(lines) + "\n"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _eligibility_candidate_groups(candidates):

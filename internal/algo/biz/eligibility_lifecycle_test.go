@@ -11,7 +11,8 @@ func TestEvaluateEligibility_BlocksOverlappingPublishedRuleKeys(t *testing.T) {
 		RuleID: "rule-subject-copy", Version: 1, RuleKey: "subject-requirement",
 		RuleType: RuleTypeSubjectRequirement, ReviewState: ReviewStatePublished,
 		When: RuleExpression{Operator: OperatorNot, Child: &RuleExpression{
-			Operator: OperatorSubjectMatch,
+			Operator:           OperatorSubjectMatch,
+			SubjectRequirement: "首选物理，再选化学",
 		}},
 		OutcomeWhenTrue: OutcomeFail,
 	})
@@ -74,14 +75,16 @@ func TestEvaluateEligibility_DraftAndReviewedRulesDoNotChangePublishedResult(t *
 			RuleID: "rule-draft", Version: 1, RuleKey: "draft-only",
 			RuleType: RuleTypeSubjectRequirement, ReviewState: "DRAFT",
 			When: RuleExpression{Operator: OperatorNot, Child: &RuleExpression{
-				Operator: OperatorSubjectMatch,
+				Operator:           OperatorSubjectMatch,
+				SubjectRequirement: "首选物理，再选化学",
 			}},
 		},
 		RuleVersion{
 			RuleID: "rule-reviewed", Version: 1, RuleKey: "reviewed-only",
 			RuleType: RuleTypeSubjectRequirement, ReviewState: "REVIEWED",
 			When: RuleExpression{Operator: OperatorNot, Child: &RuleExpression{
-				Operator: OperatorSubjectMatch,
+				Operator:           OperatorSubjectMatch,
+				SubjectRequirement: "首选物理，再选化学",
 			}},
 		},
 	)
@@ -157,10 +160,12 @@ func eligibilityFixtureRuleSet() EligibilityRuleSet {
 		Rules: []RuleVersion{{
 			RuleID: "rule-subject", Version: 1, RuleKey: "subject-requirement",
 			RuleType: RuleTypeSubjectRequirement, ReviewState: ReviewStatePublished,
+			Scope:                 RuleScope{MajorCode: "080901"},
 			RequiredProfileFields: []string{FieldSubjects, FieldCategory},
 			ExpressionVersion:     ExpressionVersionV1,
 			When: RuleExpression{Operator: OperatorNot, Child: &RuleExpression{
-				Operator: OperatorSubjectMatch,
+				Operator:           OperatorSubjectMatch,
+				SubjectRequirement: "首选物理，再选化学",
 			}},
 			OutcomeWhenTrue: OutcomeFail,
 			ReasonCode:      "SUBJECT_NOT_MATCHED",

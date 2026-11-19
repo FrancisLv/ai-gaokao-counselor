@@ -1616,6 +1616,11 @@ LLM 规则生成。
 - `EstimateProb` 的候选专业新增 `in_current_plan`，由报考年 `enrollment_plan`
   的专业代码成员查询产生。RunLifecycle 原样转交该事实，历史专业不再被无条件标为当年
   可报。
+- `SUBJECT_MATCH` 必须显式携带规则 `subject_req`；评估不再回退到历史候选文本。
+- `EvaluateEligibilityRequest` 新增 `profile_snapshot_sha256`，由 confirmed profile
+  version 与排序后的 typed facts 生成跨语言一致摘要；算法拒绝缺失、重复字段或摘要不匹配。
+- `EligibilityRepo` 同时校验 `release_scope`，省年科批不受绑定 release
+  支持时返回 `PROFILE_UNSUPPORTED_SCOPE`。
 - `RuleVersion` 进入 REVIEWED/PUBLISHED 前执行与运行时共享的静态校验：受限 AST、
   allowlist/required fields、literal 类型、来源证据、scope 和有效区间不合法时拒绝状态
   转换。
@@ -1627,5 +1632,5 @@ LLM 规则生成。
 - 新增覆盖缺口、非本科批、缺来源、字段目录 release 隔离、调用方错误标记 COMPLETE
   覆盖、历史专业计划成员和非法规则审查的回归测试。
 - Go 纯逻辑与全部 M4b 真实 PostgreSQL 集成测试通过；fresh schema 从 00→26 通过。
-- Python 全量通过；完整 RunLifecycle 真实库套件 79 tests OK，仅真实
+- Python 全量通过；完整 RunLifecycle 真实库套件 80 tests OK，仅真实
   svc-algo TCP 用例因未设置地址按约定跳过。

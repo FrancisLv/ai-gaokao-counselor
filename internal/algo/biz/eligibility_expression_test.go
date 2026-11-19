@@ -247,7 +247,10 @@ func TestEvaluateEligibility_ProfileTypeMismatchIsUnknown(t *testing.T) {
 	t.Run("SUBJECT_MATCH", func(t *testing.T) {
 		assertExpressionStatusWithFacts(
 			t,
-			RuleExpression{Operator: OperatorSubjectMatch},
+			RuleExpression{
+				Operator:           OperatorSubjectMatch,
+				SubjectRequirement: "首选物理，再选化学",
+			},
 			MajorUnknown,
 			[]ProfileFact{{FieldKey: FieldCategory, State: ProfileProvided, IntValue: 1}},
 		)
@@ -767,7 +770,23 @@ func evaluateEligibilityWithRules(t *testing.T, rules []RuleVersion, extraFacts 
 	}
 	uc := NewEligibilityUsecase(fakeEligibilityRepo{set: ruleSet})
 	request := eligibilityFixtureRequest()
-	request.ProfileFacts = append(request.ProfileFacts, extraFacts...)
+	for _, extra := range extraFacts {
+		replaced := false
+		for index := range request.ProfileFacts {
+			if request.ProfileFacts[index].FieldKey == extra.FieldKey {
+				request.ProfileFacts[index] = extra
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			request.ProfileFacts = append(request.ProfileFacts, extra)
+		}
+	}
+	request.ProfileSnapshotSHA256 = EligibilityProfileSnapshotSHA256(
+		request.ConfirmedProfileVersion,
+		request.ProfileFacts,
+	)
 	result, err := uc.EvaluateEligibility(context.Background(), request)
 	if err != nil {
 		t.Fatalf("EvaluateEligibility: %v", err)

@@ -269,13 +269,14 @@ func validateRuleExpression(
 			expr.Child != nil || expr.Left != nil || expr.Right != nil {
 			return ReasonRuleExpression
 		}
-		if expr.SubjectRequirement != "" {
-			if _, _, err := matchCandidateSubjects(
-				[]string{"物理", "化学", "生物"},
-				[]string{expr.SubjectRequirement},
-			); err != nil {
-				return ReasonRuleExpression
-			}
+		if strings.TrimSpace(expr.SubjectRequirement) == "" {
+			return ReasonRuleExpression
+		}
+		if _, _, err := matchCandidateSubjects(
+			[]string{"物理", "化学", "生物"},
+			[]string{expr.SubjectRequirement},
+		); err != nil {
+			return ReasonRuleExpression
 		}
 		*fields = append(*fields, FieldSubjects, FieldCategory)
 		return ""
@@ -426,11 +427,13 @@ func evaluateSubjectMatch(expr RuleExpression, major CandidateMajor, facts map[s
 	if subjectsState != factResolved || categoryState != factResolved {
 		return expressionOutcome{decision: expressionIndeterminate}
 	}
-	requirements := []string{major.SubjectRequirement}
-	if strings.TrimSpace(expr.SubjectRequirement) != "" {
-		requirements = []string{expr.SubjectRequirement}
+	if strings.TrimSpace(expr.SubjectRequirement) == "" {
+		return expressionOutcome{decision: expressionIndeterminate}
 	}
-	matched, _, parseErr := matchCandidateSubjects(subjects, requirements)
+	matched, _, parseErr := matchCandidateSubjects(
+		subjects,
+		[]string{expr.SubjectRequirement},
+	)
 	if parseErr != nil {
 		return expressionOutcome{decision: expressionIndeterminate}
 	}

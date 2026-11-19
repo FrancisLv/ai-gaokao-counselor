@@ -3,6 +3,17 @@ SELECT status
 FROM release
 WHERE release_id = @release_id::text;
 
+-- name: EligibilityReleaseSupportsScope :one
+SELECT EXISTS (
+    SELECT 1
+    FROM release_scope
+    WHERE release_id = @release_id::text
+      AND province = @province::text
+      AND application_year = @application_year::int
+      AND category = @category::text
+      AND batch = @batch::text
+);
+
 -- name: ListPublishedEligibilityRules :many
 SELECT
     rule_id,

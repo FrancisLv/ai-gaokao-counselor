@@ -11,6 +11,39 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const eligibilityReleaseSupportsScope = `-- name: EligibilityReleaseSupportsScope :one
+SELECT EXISTS (
+    SELECT 1
+    FROM release_scope
+    WHERE release_id = $1::text
+      AND province = $2::text
+      AND application_year = $3::int
+      AND category = $4::text
+      AND batch = $5::text
+)
+`
+
+type EligibilityReleaseSupportsScopeParams struct {
+	ReleaseID       string
+	Province        string
+	ApplicationYear int32
+	Category        string
+	Batch           string
+}
+
+func (q *Queries) EligibilityReleaseSupportsScope(ctx context.Context, arg EligibilityReleaseSupportsScopeParams) (bool, error) {
+	row := q.db.QueryRow(ctx, eligibilityReleaseSupportsScope,
+		arg.ReleaseID,
+		arg.Province,
+		arg.ApplicationYear,
+		arg.Category,
+		arg.Batch,
+	)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const getEligibilityRelease = `-- name: GetEligibilityRelease :one
 SELECT status
 FROM release
