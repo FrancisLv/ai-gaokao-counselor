@@ -127,6 +127,10 @@ class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
             result_event.policy_evidence.retrieval_status,
             "NO_EVIDENCE",
         )
+        self.assertEqual(
+            result_event.policy_evidence,
+            view.policy_evidence,
+        )
 
     async def test_legacy_start_graph_delegates_to_submit_run(self):
         import json

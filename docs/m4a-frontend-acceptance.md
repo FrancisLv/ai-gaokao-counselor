@@ -27,7 +27,7 @@ make m4a-acceptance-seed \
 seed 会创建：
 
 - `PUBLISHED` release：`rel_m4a_frontend_acceptance`
-- 湖南 2025 物理类本科批院校章程
+- 湖南当前验收年物理类本科批院校章程
 - 全国长期学生资助政策
 - 跨省干扰章程
 - 已过期章程
@@ -92,7 +92,7 @@ http://127.0.0.1:5173
 
 1. 选择“政策证据检索”。
 2. 问题输入“转专业政策是什么？”。
-3. 省份湖南、年份 2025、科类物理类、批次本科批。
+3. 省份湖南、年份使用 seed 输出的 `application_year`、科类物理类、批次本科批。
 4. 学校 ID 输入 `1001`，文档类型输入 `charter`。
 5. 点击“检索政策证据”。
 
@@ -101,7 +101,7 @@ http://127.0.0.1:5173
 - Run 最终为 `SUCCEEDED`。
 - 状态为 `FOUND`。
 - 出现一张证据卡。
-- 标题为“湖南测试大学2025年招生章程”。
+- 标题包含当前验收年。
 - 章节为“第二章 > 政策说明”。
 - 原文为纯文本，不执行 HTML。
 - 页面显示 release `rel_m4a_frontend_acceptance`。
@@ -150,7 +150,8 @@ http://127.0.0.1:5173
 - Run 以 `VECTOR_UNAVAILABLE` 失败。
 - 页面显示检索服务不可用，不伪装为 `NO_EVIDENCE`。
 
-将年份改为 seed 未发布的年份时，应在 Submit 阶段得到 `RELEASE_UNAVAILABLE`。
+将年份改为 `application_year + 1` 时，应在 Submit 阶段得到
+`RELEASE_UNAVAILABLE`。
 
 ### F. SSE 刷新与恢复
 

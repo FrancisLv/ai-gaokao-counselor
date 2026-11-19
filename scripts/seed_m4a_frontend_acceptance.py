@@ -6,12 +6,15 @@ import hashlib
 import json
 from pathlib import Path
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import psycopg
+from psycopg import conninfo
 
 RELEASE_ID = "rel_m4a_frontend_acceptance"
 EMBEDDING_MODEL = "acceptance-keyword"
 INDEX_VERSION = "acceptance-index-v1"
+ACCEPTANCE_YEAR = datetime.now(ZoneInfo("Asia/Shanghai")).year
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_MIGRATIONS = (
     "migrations/00_schema.sql",
@@ -66,6 +69,7 @@ def _insert_document(
     valid_from: str,
     valid_to: str | None,
     text: str,
+    effective_year: int | None = None,
 ) -> None:
     content_sha256 = _sha256(f"{doc_id}:{text}")
     text_sha256 = _sha256(text)
@@ -79,7 +83,7 @@ def _insert_document(
             content_sha256, raw_storage_uri
         )
         VALUES (
-            %s, %s, %s, 2025, %s, %s, NULL,
+            %s, %s, %s, %s, %s, %s, NULL,
             %s, %s, %s, %s, NOW(), %s, %s
         )
         """,
@@ -87,6 +91,7 @@ def _insert_document(
             doc_id,
             title,
             title,
+            effective_year or ACCEPTANCE_YEAR,
             regions[0],
             f"https://example.invalid/{doc_id}",
             document_type,
@@ -231,9 +236,9 @@ def seed(dsn: str, *, reset: bool = False) -> None:
                 INSERT INTO release_scope (
                     release_id, province, application_year, category, batch
                 )
-                VALUES (%s, '湖南', 2025, '物理类', '本科批')
+                VALUES (%s, '湖南', %s, '物理类', '本科批')
                 """,
-                (RELEASE_ID,),
+                (RELEASE_ID, ACCEPTANCE_YEAR),
             )
             conn.execute(
                 """
@@ -247,15 +252,15 @@ def seed(dsn: str, *, reset: bool = False) -> None:
             _insert_document(
                 conn,
                 doc_id="doc_m4a_charter",
-                title="湖南测试大学2025年招生章程",
+                title=f"湖南测试大学{ACCEPTANCE_YEAR}年招生章程",
                 document_type="charter",
                 issuer_type="university",
                 school_id="1001",
                 regions=["湖南"],
                 categories=["物理类"],
                 batches=["本科批"],
-                valid_from="2025-01-01",
-                valid_to=None,
+                valid_from=f"{ACCEPTANCE_YEAR}-01-01",
+                valid_to=f"{ACCEPTANCE_YEAR}-12-31",
                 text=(
                     "第二章 转专业政策是什么？学生可以在第一学年结束前"
                     "申请转专业。"
@@ -281,32 +286,34 @@ def seed(dsn: str, *, reset: bool = False) -> None:
             _insert_document(
                 conn,
                 doc_id="doc_m4a_wrong_province",
-                title="湖北省测试大学招生章程",
+                title=f"湖北省测试大学{ACCEPTANCE_YEAR}年招生章程",
                 document_type="charter",
                 issuer_type="university",
                 school_id="2002",
                 regions=["湖北"],
                 categories=["物理类"],
                 batches=["本科批"],
-                valid_from="2025-01-01",
-                valid_to="2025-12-31",
+                valid_from=f"{ACCEPTANCE_YEAR}-01-01",
+                valid_to=f"{ACCEPTANCE_YEAR}-12-31",
                 text="学生可以申请转专业，但仅适用于湖北考生。",
             )
             _insert_document(
                 conn,
                 doc_id="doc_m4a_expired",
-                title="湖南测试大学2024年招生章程",
+                title=f"湖南测试大学{ACCEPTANCE_YEAR - 1}年招生章程",
                 document_type="charter",
                 issuer_type="university",
                 school_id="1001",
                 regions=["湖南"],
                 categories=["物理类"],
                 batches=["本科批"],
-                valid_from="2024-01-01",
-                valid_to="2024-12-31",
-                text="2024年转专业政策已经失效。",
+                valid_from=f"{ACCEPTANCE_YEAR - 1}-01-01",
+                valid_to=f"{ACCEPTANCE_YEAR - 1}-12-31",
+                text=f"{ACCEPTANCE_YEAR - 1}年转专业政策已经失效。",
+                effective_year=ACCEPTANCE_YEAR - 1,
             )
     print(f"release_id={RELEASE_ID}")
+    print(f"application_year={ACCEPTANCE_YEAR}")
     print("query_found=转专业政策是什么？")
     print("query_national=全国学生资助政策")
     print("query_no_evidence=火星基地招生政策")
@@ -317,9 +324,12 @@ def main() -> None:
     parser.add_argument("--dsn", required=True)
     parser.add_argument("--reset-schema", action="store_true")
     args = parser.parse_args()
-    if "test" not in args.dsn.lower() and "acceptance" not in args.dsn.lower():
+    database_name = str(
+        conninfo.conninfo_to_dict(args.dsn).get("dbname") or ""
+    ).lower()
+    if "test" not in database_name and "acceptance" not in database_name:
         raise SystemExit(
-            "拒绝写入未声明 test/acceptance 的数据库 DSN"
+            "拒绝写入数据库名未包含 test/acceptance 的 DSN"
         )
     seed(args.dsn, reset=args.reset_schema)
 

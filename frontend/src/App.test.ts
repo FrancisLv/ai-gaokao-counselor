@@ -38,6 +38,9 @@ describe("Run verification console", () => {
     await wrapper.get('[data-testid="policy-query"]').setValue(
       "转专业政策是什么？",
     );
+    await wrapper
+      .get('[data-testid="policy-application-year"]')
+      .setValue("2025");
     await wrapper.get('[data-testid="policy-form"]').trigger("submit");
     await flushPromises();
 
@@ -54,6 +57,47 @@ describe("Run verification console", () => {
       mode: "hybrid",
     });
     expect(request).not.toHaveProperty("user_text");
+    wrapper.unmount();
+  });
+
+  it("uses a fresh idempotency key for a second policy query", async () => {
+    vi.stubEnv("VITE_PRINCIPAL_ID", "principal-policy");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/v1/policy-queries" && init?.method === "POST") {
+        return jsonResponse({
+          runId: `run-policy-${fetchMock.mock.calls.length}`,
+          sessionId: "session-policy",
+          status: "accepted",
+        });
+      }
+      if (url.includes("/events")) {
+        return new Response("", {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      throw new Error(`unexpected request: ${init?.method ?? "GET"} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(App);
+
+    await wrapper.get('[data-testid="mode-policy"]').trigger("click");
+    await wrapper.get('[data-testid="policy-form"]').trigger("submit");
+    await flushPromises();
+    await wrapper
+      .get('[data-testid="policy-query"]')
+      .setValue("全国学生资助政策");
+    await wrapper.get('[data-testid="policy-form"]').trigger("submit");
+    await flushPromises();
+
+    const policyBodies = fetchMock.mock.calls
+      .filter(([url]) => String(url) === "/v1/policy-queries")
+      .map(([, init]) => JSON.parse(init!.body as string));
+    expect(policyBodies).toHaveLength(2);
+    expect(policyBodies[0].idempotency_key).not.toBe(
+      policyBodies[1].idempotency_key,
+    );
     wrapper.unmount();
   });
 
@@ -110,6 +154,19 @@ describe("Run verification console", () => {
     expect(wrapper.text()).toContain("不代表没有相关政策限制");
     expect(wrapper.text()).not.toContain("没有限制");
     expect(wrapper.find('[data-testid="evidence-card"]').exists()).toBe(false);
+  });
+
+  it("does not link to a non-http evidence source", async () => {
+    vi.stubEnv("VITE_PRINCIPAL_ID", "principal-policy");
+    history.replaceState({}, "", "/?run=run-policy");
+    const run = policyEvidenceRunView();
+    run.policyEvidence.evidence[0].sourceUri = "javascript:alert(1)";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(run)));
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="evidence-source"]').exists()).toBe(false);
+    expect(wrapper.text()).toContain("来源地址不可安全打开");
   });
 
   it("explains an unsupported retrieval scope without inventing evidence", async () => {

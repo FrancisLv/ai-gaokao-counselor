@@ -21,6 +21,40 @@ class FakePolicyRetriever:
 
 
 class PolicyQaLifecycleTests(RunLifecyclePostgresTest):
+    async def test_policy_qa_rejects_an_unpublished_year_before_creating_a_run(self):
+        from app.run_lifecycle import (
+            PolicyQaInput,
+            RunLifecycle,
+            RunLifecycleError,
+            SubmitRunCommand,
+        )
+
+        await self.seed_release()
+        lifecycle = RunLifecycle(self.dsn)
+        self.addAsyncCleanup(lifecycle.close)
+
+        with self.assertRaises(RunLifecycleError) as raised:
+            await lifecycle.SubmitRun(
+                SubmitRunCommand(
+                    principal_id="principal-policy",
+                    session_id=None,
+                    task_kind="POLICY_QA",
+                    input=PolicyQaInput(
+                        query_text="转专业政策是什么？",
+                        province="湖南",
+                        application_year=2026,
+                        category="物理类",
+                        batch="本科批",
+                    ),
+                    idempotency_key="policy-qa-unpublished-year",
+                )
+            )
+
+        self.assertEqual(
+            raised.exception.reason,
+            "RELEASE_UNAVAILABLE",
+        )
+
     async def test_policy_qa_publishes_a_retrievable_evidence_result(self):
         from app.run_lifecycle import (
             PolicyQaInput,
@@ -120,6 +154,18 @@ class PolicyQaLifecycleTests(RunLifecyclePostgresTest):
             view.result_payload["evidence"][0]["evidence_id"],
             "evidence-policy-1",
         )
+        self.assertEqual(
+            view.result_payload["evidence"][0]["evidence_type"],
+            "DOCUMENT",
+        )
+        self.assertEqual(
+            view.result_payload["evidence"][0]["content_sha256"],
+            "a" * 64,
+        )
+        self.assertEqual(
+            view.result_payload["evidence"][0]["producer_version"],
+            "policy-retrieval-v1",
+        )
         self.assertEqual(retriever.queries[0].release_id, release_id)
         self.assertEqual(retriever.queries[0].school_ids, ("1001",))
 
@@ -150,9 +196,9 @@ class PolicyQaLifecycleTests(RunLifecyclePostgresTest):
                 task_kind="POLICY_QA",
                 input=PolicyQaInput(
                     query_text="转专业政策是什么？",
-                    province="湖北",
+                    province="湖南",
                     application_year=2025,
-                    category="物理类",
+                    category="不限",
                     batch="本科批",
                 ),
                 idempotency_key="policy-qa-unsupported",

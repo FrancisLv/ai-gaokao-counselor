@@ -266,6 +266,10 @@ message PolicyEvidenceItem {
   string valid_from = 17;
   string valid_to = 18;
   string release_id = 19;
+  string evidence_type = 20;
+  string content_sha256 = 21;
+  google.protobuf.Timestamp created_at = 22;
+  string producer_version = 23;
 }
 
 message PolicyEvidenceResult {

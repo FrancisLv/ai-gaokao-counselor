@@ -71,7 +71,8 @@
         </dl>
 
         <a
-          :href="item.sourceUri"
+          v-if="safeSourceUri(item.sourceUri)"
+          :href="safeSourceUri(item.sourceUri)"
           class="source-link"
           data-testid="evidence-source"
           rel="noopener noreferrer"
@@ -79,6 +80,7 @@
         >
           查看原始来源
         </a>
+        <p v-else class="muted">来源地址不可安全打开</p>
       </article>
     </div>
   </section>
@@ -140,5 +142,17 @@ function locator(item: PolicyEvidenceItem): string {
     return "未提供字符定位，使用章节路径定位";
   }
   return `${item.charStart}–${item.charEnd}`;
+}
+
+function safeSourceUri(value: string): string | undefined {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return parsed.toString();
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
 }
 </script>

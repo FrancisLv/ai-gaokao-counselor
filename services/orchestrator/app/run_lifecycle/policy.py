@@ -7,6 +7,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from rag.policy_retrieval import (
+    PolicyRetrievalError,
     PolicyRetrievalQuery,
     PolicyRetrievalResult,
     RetrievePolicy,
@@ -43,11 +44,19 @@ class PostgresPolicyRetriever:
                 and self._embedder is None
                 and self._embedding_model
             ):
-                from rag.embedder import Embedder
+                try:
+                    from rag.embedder import Embedder
 
-                self._embedder = Embedder(
-                    model_name=self._embedding_model,
-                )
+                    self._embedder = Embedder(
+                        model_name=self._embedding_model,
+                    )
+                except Exception as exc:
+                    if query.mode == "vector":
+                        raise PolicyRetrievalError(
+                            "VECTOR_UNAVAILABLE",
+                            "query embedding model could not be loaded",
+                        ) from exc
+                    return RetrievePolicy(conn).retrieve(query)
             return RetrievePolicy(
                 conn,
                 embedder=self._embedder,

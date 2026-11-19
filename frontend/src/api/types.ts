@@ -86,6 +86,10 @@ export interface AlgorithmPreview {
 
 export interface PolicyEvidenceItem {
   evidenceId: string;
+  evidenceType: string;
+  contentSha256: string;
+  createdAt: string;
+  producerVersion: string;
   docId: string;
   chunkId: string;
   title: string;

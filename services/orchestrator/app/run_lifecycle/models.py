@@ -103,6 +103,10 @@ class AlgorithmPreviewPayload(TypedDict, total=False):
 
 class PolicyEvidenceItemPayload(TypedDict, total=False):
     evidence_id: str
+    evidence_type: str
+    content_sha256: str
+    created_at: str
+    producer_version: str
     doc_id: str
     chunk_id: str
     title: str

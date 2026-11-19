@@ -110,6 +110,16 @@ class RunLifecycle:
         )
 
     async def SubmitRun(self, command: SubmitRunCommand) -> RunReceipt:
+        if isinstance(command.input, PolicyQaInput):
+            if not command.input.query_text.strip():
+                raise RunLifecycleError("RETRIEVAL_QUERY_REQUIRED")
+            if (
+                command.input.application_year is None
+                or not command.input.province
+                or not command.input.category
+                or not command.input.batch
+            ):
+                raise RunLifecycleError("RETRIEVAL_SCOPE_REQUIRED")
         request_payload = self._submit_request_payload(command)
         request_hash = self._request_hash(request_payload)
         scope_key = f"session:{command.session_id}" if command.session_id else "session:new"
@@ -138,7 +148,14 @@ class RunLifecycle:
                         await self._process_profile_run(receipt.run_id)
                     return receipt
 
-                release = await self._select_active_release(conn)
+                release = await self._select_active_release(
+                    conn,
+                    policy_input=(
+                        command.input
+                        if isinstance(command.input, PolicyQaInput)
+                        else None
+                    ),
+                )
                 session_id = await self._resolve_session(conn, command)
                 run_id = uuid4()
                 await conn.execute(
@@ -1275,6 +1292,10 @@ class RunLifecycle:
             "evidence": [
                 {
                     "evidence_id": item.evidence_id,
+                    "evidence_type": item.evidence_type,
+                    "content_sha256": item.content_sha256,
+                    "created_at": item.created_at.isoformat(),
+                    "producer_version": item.producer_version,
                     "doc_id": item.document.doc_id,
                     "chunk_id": item.document.chunk_id,
                     "title": item.document.title,
@@ -2898,19 +2919,64 @@ class RunLifecycle:
         finally:
             await conn.close()
 
-    async def _select_active_release(self, conn: psycopg.AsyncConnection) -> str:
-        row = await (
-            await conn.execute(
-                """
-                SELECT release_id
-                FROM release
-                WHERE status = 'PUBLISHED' AND revoked_at IS NULL
-                ORDER BY published_at DESC NULLS LAST, created_at DESC, release_id DESC
-                LIMIT 1
-                FOR SHARE
-                """
-            )
-        ).fetchone()
+    async def _select_active_release(
+        self,
+        conn: psycopg.AsyncConnection,
+        *,
+        policy_input: PolicyQaInput | None = None,
+    ) -> str:
+        if policy_input is None:
+            row = await (
+                await conn.execute(
+                    """
+                    SELECT release_id
+                    FROM release
+                    WHERE status = 'PUBLISHED' AND revoked_at IS NULL
+                    ORDER BY published_at DESC NULLS LAST,
+                             created_at DESC, release_id DESC
+                    LIMIT 1
+                    FOR SHARE
+                    """
+                )
+            ).fetchone()
+        else:
+            row = await (
+                await conn.execute(
+                    """
+                    SELECT r.release_id
+                    FROM release r
+                    WHERE r.status = 'PUBLISHED'
+                      AND r.revoked_at IS NULL
+                      AND EXISTS (
+                          SELECT 1
+                          FROM release_scope s
+                          WHERE s.release_id = r.release_id
+                            AND s.province = %s
+                            AND s.application_year = %s
+                            AND (
+                                %s = '不限'
+                                OR s.category = %s
+                            )
+                            AND (
+                                %s = '不限'
+                                OR s.batch = %s
+                            )
+                      )
+                    ORDER BY r.published_at DESC NULLS LAST,
+                             r.created_at DESC, r.release_id DESC
+                    LIMIT 1
+                    FOR SHARE
+                    """,
+                    (
+                        policy_input.province,
+                        policy_input.application_year,
+                        policy_input.category,
+                        policy_input.category,
+                        policy_input.batch,
+                        policy_input.batch,
+                    ),
+                )
+            ).fetchone()
         if row is None:
             raise RunLifecycleError("RELEASE_UNAVAILABLE")
         return row["release_id"]

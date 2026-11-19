@@ -9,3 +9,16 @@ ALTER TABLE run_result
 ALTER TABLE run_result
     ADD CONSTRAINT run_result_result_kind_check
     CHECK (result_kind IN ('ALGORITHM_PREVIEW', 'POLICY_EVIDENCE'));
+
+ALTER TABLE run_result
+    ADD CONSTRAINT run_result_kind_profile_check
+    CHECK (
+        (
+            result_kind = 'ALGORITHM_PREVIEW'
+            AND confirmed_profile_version IS NOT NULL
+        )
+        OR (
+            result_kind = 'POLICY_EVIDENCE'
+            AND confirmed_profile_version IS NULL
+        )
+    );
