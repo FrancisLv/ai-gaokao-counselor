@@ -1026,3 +1026,27 @@ sqlc 的 `:many` 先收集类型化结果 slice，再映射领域对象，相较
 - `strict_order` 且无 20000 条上限意味着：当适用域命中极少或为零时，为证明“确实没有范围内候选”，pgvector 可能遍历大部分甚至全部 HNSW 图，延迟随不匹配比例上升。该成本用于换取硬过滤下不漏候选；后续应结合真实数据基准调整 API 超时、索引隔离或按适用域分区。
 - 该查询依赖 pgvector `0.8+` 的迭代扫描 GUC；低版本会明确失败为 `VECTOR_UNAVAILABLE`，不得静默退回可能漏候选的旧计划。
 - HNSW 仍是近似索引；本次保证的是同一硬过滤候选域内的索引化距离访问与稳定小池输出，不等同于对全库向量做精确穷举。
+
+## 33. M4a-03：pgvector + pg_trgm 双路 RRF 与降级
+
+**日期与范围**：2026-11-19。实现 issue #10 的在线 `mode=hybrid`；rerank 与 golden set 不在本票范围。
+
+### 实现
+
+- 把 release、文档类型、学校、地区、科类、批次、有效区间与证据完整性条件收口为两路共用的参数化 SQL 基底；向量路只追加 embedding/index 身份与距离排序，关键词路只追加 `pg_trgm` 匹配与相似度排序。
+- `hybrid` 在同一 scope 内执行 vector 和 keyword 召回，使用 1-based `RRF(k=60)`：缺一路时不获得该路分数，双路命中按 `Σ 1/(60+rank)` 累加，最终按融合分降序、`chunk_id` 升序稳定输出。
+- 单路 `VECTOR_UNAVAILABLE` / `KEYWORD_UNAVAILABLE` 时保留另一路结果并返回稳定 `degraded_reason`；两路均为技术故障返回 `RETRIEVAL_UNAVAILABLE`。一路故障且另一路成功零命中时仍返回 `NO_EVIDENCE`。
+- 证据投影失败改为 `EVIDENCE_PROJECTION_FAILED`，不再跳过候选或伪装为 `NO_EVIDENCE`；release 查询时数据库不可达同样返回明确技术失败。
+- 诊断仅暴露两路候选数、`rerank_enabled=false` 和稳定降级原因，不暴露 SQL 行、距离或私有结构。
+
+### 测试
+
+- `PolicyRetrievalTests` 新增 hybrid 的 RRF 可复算顺序、单路/双路命中、同分 `chunk_id` tie-break、单路零命中、双向降级、双路故障、一路故障加另一路零命中、数据库故障和投影失败行为测试。
+- `PolicyRetrievalPostgresTests` 新增真实库 hybrid 测试：两路共同排除跨省、跨科类、跨批次、错误学校、错误文档类型、过期和无适用域文档；重复查询得到相同证据 ID 顺序；向量模型缺失时同范围降级为关键词结果。
+- `test_policy_retrieval.py` 全量 38 项通过（20 项离线、18 项本机隔离 PostgreSQL），既有 release/chunk set 隔离、关键词转义、向量索引身份、HNSW 计划和 filtered ANN 回归保持通过。
+
+### 风险与边界
+
+- 单路故障降级可能降低召回，但不会删除或放宽任一适用域过滤；调用方必须读取 `degraded_reason`，不能把降级结果视作双路完整召回。
+- `strict_order` 高不匹配比场景的 HNSW 延迟风险继续存在；真实容量和超时仍需 golden set/压测量化。
+- 本文未接入 rerank、图节点/API 与 golden set；这些仍由后续 ticket 完成。

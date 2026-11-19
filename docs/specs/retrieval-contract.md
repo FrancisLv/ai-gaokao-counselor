@@ -190,9 +190,9 @@ diagnostics:
 ### 5.3 RRF
 
 - 常量 `k=60`，写入配置版本；
-- 每一路各自先做稳定排序；
-- 缺失通道不获得分数；
-- 融合后必须保留两路原始 rank，供证据和调试。
+- 每一路各自先做稳定排序，名次从 1 开始；
+- 融合分为 `Σ 1/(60 + rank)`，同一候选两路命中时累加，缺一路时不获得该路分数；
+- 融合后必须保留两路原始 rank，供证据和调试；最终按融合分降序、`chunk_id` 升序稳定排序。
 
 ### 5.4 Rerank
 
@@ -232,7 +232,8 @@ diagnostics:
 | vector-only 的模型不可用、查询执行失败 | `VECTOR_UNAVAILABLE`，不伪装为 `NO_EVIDENCE` |
 | hybrid 的向量模型不可用 | 同范围关键词检索，`degraded_reason=VECTOR_UNAVAILABLE` |
 | 关键词索引不可用 | 同范围向量检索，`degraded_reason=KEYWORD_UNAVAILABLE` |
-| 两路均不可用 | 返回明确失败，不生成政策答案 |
+| 两路均不可用或数据库不可达 | `RETRIEVAL_UNAVAILABLE`，不伪装为 `NO_EVIDENCE` |
+| 命中候选无法形成完整证据 | `EVIDENCE_PROJECTION_FAILED`，不跳过候选后伪装为 `NO_EVIDENCE` |
 | rerank 不可用 | 使用 RRF 顺序并记录降级 |
 | 文档缺少适用域 | 正式结果不可使用该文档 |
 

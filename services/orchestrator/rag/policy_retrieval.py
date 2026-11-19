@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.rows import dict_row
 
-from rag.retrieve import extract_terms
+from rag.retrieve import RRF_K, extract_terms
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DOCUMENT_TYPES = frozenset(
@@ -19,6 +19,95 @@ _DOCUMENT_TYPES = frozenset(
 )
 _ISSUER_TYPES = frozenset({"national", "provincial", "university"})
 _PRODUCER_VERSION = "policy-retrieval-v1"
+
+_SCOPE_SELECT_COLUMNS = """
+    c.id AS chunk_id,
+    c.doc_id,
+    c.section_path,
+    c.text,
+    c.text_sha256,
+    c.char_start,
+    c.char_end,
+    c.chunk_set_version,
+    d.title,
+    d.document_type,
+    d.issuer,
+    d.issuer_type,
+    d.issuer_id,
+    d.school_id,
+    d.source_uri,
+    d.raw_storage_uri,
+    d.fetched_at,
+    d.content_sha256,
+    a.regions,
+    a.categories,
+    a.batches,
+    a.valid_from,
+    a.valid_to
+"""
+
+_SCOPE_FROM_AND_FILTERS = """
+    FROM release_policy_doc m
+    JOIN policy_chunk_set cs
+      ON cs.chunk_set_version = m.chunk_set_version
+     AND cs.doc_id = m.doc_id
+    JOIN policy_doc d
+      ON d.id = m.doc_id
+    JOIN policy_chunk c
+      ON c.doc_id = m.doc_id
+     AND c.chunk_set_version = m.chunk_set_version
+    JOIN LATERAL (
+        SELECT
+            pa.regions,
+            pa.categories,
+            pa.batches,
+            pa.valid_from,
+            pa.valid_to
+        FROM policy_applicability pa
+        WHERE pa.doc_id = d.id
+          AND (
+              '全国' = ANY(pa.regions)
+              OR %(province)s = ANY(pa.regions)
+          )
+          AND (
+              %(category)s = '不限'
+              OR '不限' = ANY(pa.categories)
+              OR %(category)s = ANY(pa.categories)
+          )
+          AND (
+              %(batch)s = '不限'
+              OR '不限' = ANY(pa.batches)
+              OR %(batch)s = ANY(pa.batches)
+          )
+          AND pa.valid_from <= %(today)s
+          AND (pa.valid_to IS NULL OR %(today)s <= pa.valid_to)
+        ORDER BY pa.valid_from DESC, pa.valid_to DESC NULLS LAST, pa.id
+        LIMIT 1
+    ) a ON TRUE
+    WHERE m.release_id = %(release_id)s
+      AND d.title IS NOT NULL
+      AND d.document_type IS NOT NULL
+      AND d.issuer IS NOT NULL
+      AND d.issuer_type IS NOT NULL
+      AND d.issuer_id IS NOT NULL
+      AND d.source_uri IS NOT NULL
+      AND d.raw_storage_uri IS NOT NULL
+      AND d.fetched_at IS NOT NULL
+      AND d.content_sha256 IS NOT NULL
+      AND c.text IS NOT NULL
+      AND c.text_sha256 IS NOT NULL
+      AND c.section_path IS NOT NULL
+      AND c.chunk_set_version IS NOT NULL
+      AND cs.index_version IS NOT NULL
+      AND (
+          cardinality(%(school_ids)s::text[]) = 0
+          OR d.school_id = ANY(%(school_ids)s::text[])
+      )
+      AND (
+          cardinality(%(document_types)s::text[]) = 0
+          OR d.document_type = ANY(%(document_types)s::text[])
+      )
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,12 +214,18 @@ class RetrievePolicy:
         )
 
     def retrieve(self, query: PolicyRetrievalQuery) -> PolicyRetrievalResult:
-        with self._conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "SELECT status, revoked_at FROM release WHERE release_id = %s",
-                (query.release_id,),
-            )
-            release = cur.fetchone()
+        try:
+            with self._conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT status, revoked_at FROM release WHERE release_id = %s",
+                    (query.release_id,),
+                )
+                release = cur.fetchone()
+        except psycopg.Error as exc:
+            raise PolicyRetrievalError(
+                "RETRIEVAL_UNAVAILABLE",
+                "policy retrieval database is unavailable",
+            ) from exc
 
         if (
             release is None
@@ -155,8 +250,18 @@ class RetrievePolicy:
                 release_id=query.release_id,
             )
 
+        vector_count = 0
+        keyword_count = 0
+        degraded_reason = None
         if query.mode == "keyword":
-            rows, candidate_count = self._keyword_candidates(query)
+            try:
+                rows, candidate_count = self._keyword_candidates(query)
+            except psycopg.Error as exc:
+                raise PolicyRetrievalError(
+                    "KEYWORD_UNAVAILABLE",
+                    "keyword retrieval is temporarily unavailable",
+                ) from exc
+            keyword_count = candidate_count
         elif query.mode == "vector":
             try:
                 rows, candidate_count = self._vector_candidates(query)
@@ -165,10 +270,40 @@ class RetrievePolicy:
                     "VECTOR_UNAVAILABLE",
                     "vector retrieval is temporarily unavailable",
                 ) from exc
+            vector_count = candidate_count
+        elif query.mode == "hybrid":
+            vector_available = True
+            try:
+                vector_rows, vector_count = self._vector_candidates(query)
+            except PolicyRetrievalError as exc:
+                if exc.reason != "VECTOR_UNAVAILABLE":
+                    raise
+                vector_rows = []
+                vector_available = False
+                degraded_reason = "VECTOR_UNAVAILABLE"
+            except psycopg.Error:
+                vector_rows = []
+                vector_available = False
+                degraded_reason = "VECTOR_UNAVAILABLE"
+
+            keyword_available = True
+            try:
+                keyword_rows, keyword_count = self._keyword_candidates(query)
+            except psycopg.Error:
+                keyword_rows = []
+                keyword_available = False
+                degraded_reason = "KEYWORD_UNAVAILABLE"
+            if not vector_available and not keyword_available:
+                raise PolicyRetrievalError(
+                    "RETRIEVAL_UNAVAILABLE",
+                    "all policy retrieval channels are unavailable",
+                )
+
+            rows = self._rrf_fuse(vector_rows, keyword_rows)
         else:
             raise PolicyRetrievalError(
                 "MODE_UNSUPPORTED",
-                f"retrieval mode is not implemented in this slice: {query.mode}",
+                f"unsupported retrieval mode: {query.mode}",
             )
 
         if not rows:
@@ -176,48 +311,64 @@ class RetrievePolicy:
                 status="NO_EVIDENCE",
                 release_id=query.release_id,
                 diagnostics=PolicyRetrievalDiagnostics(
-                    vector_candidates=candidate_count
-                    if query.mode == "vector"
-                    else 0,
-                    keyword_candidates=candidate_count
-                    if query.mode == "keyword"
-                    else 0,
+                    vector_candidates=vector_count,
+                    keyword_candidates=keyword_count,
+                    degraded_reason=degraded_reason,
                 ),
             )
 
         evidence = []
         for row in rows:
-            projected = self._project_evidence(row, query.release_id)
+            try:
+                projected = self._project_evidence(row, query.release_id)
+            except Exception as exc:
+                raise PolicyRetrievalError(
+                    "EVIDENCE_PROJECTION_FAILED",
+                    "retrieved candidate could not be projected as evidence",
+                ) from exc
             if projected is not None:
                 evidence.append(projected)
+            else:
+                raise PolicyRetrievalError(
+                    "EVIDENCE_PROJECTION_FAILED",
+                    "retrieved candidate could not be projected as evidence",
+                )
             if len(evidence) >= query.top_k:
                 break
-        if not evidence:
-            return PolicyRetrievalResult(
-                status="NO_EVIDENCE",
-                release_id=query.release_id,
-                diagnostics=PolicyRetrievalDiagnostics(
-                    vector_candidates=candidate_count
-                    if query.mode == "vector"
-                    else 0,
-                    keyword_candidates=candidate_count
-                    if query.mode == "keyword"
-                    else 0,
-                ),
-            )
         return PolicyRetrievalResult(
             status="FOUND",
             release_id=query.release_id,
             evidence=tuple(evidence),
             diagnostics=PolicyRetrievalDiagnostics(
-                vector_candidates=candidate_count
-                if query.mode == "vector"
-                else 0,
-                keyword_candidates=candidate_count
-                if query.mode == "keyword"
-                else 0,
+                vector_candidates=vector_count,
+                keyword_candidates=keyword_count,
+                degraded_reason=degraded_reason,
             ),
         )
+
+    @staticmethod
+    def _rrf_fuse(vector_rows: list[dict], keyword_rows: list[dict]) -> list[dict]:
+        fused: dict[str, dict] = {}
+        scores: dict[str, float] = {}
+
+        for rank, row in enumerate(vector_rows, start=1):
+            chunk_id = row["chunk_id"]
+            fused.setdefault(chunk_id, row)
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (
+                RRF_K + rank
+            )
+        for rank, row in enumerate(keyword_rows, start=1):
+            chunk_id = row["chunk_id"]
+            fused.setdefault(chunk_id, row)
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (
+                RRF_K + rank
+            )
+
+        ordered_ids = sorted(fused, key=lambda chunk_id: (
+            -scores[chunk_id],
+            chunk_id,
+        ))
+        return [fused[chunk_id] for chunk_id in ordered_ids]
 
     def _vector_candidates(
         self,
@@ -318,95 +469,15 @@ class RetrievePolicy:
             "school_ids": list(query.school_ids),
             "document_types": list(query.document_types),
         }
-        sql = """
+        sql = f"""
             WITH ann_candidates AS MATERIALIZED (
                 SELECT
-                    c.id AS chunk_id,
-                    c.doc_id,
-                    c.section_path,
-                    c.text,
-                    c.text_sha256,
-                    c.char_start,
-                    c.char_end,
-                    c.chunk_set_version,
-                    d.title,
-                    d.document_type,
-                    d.issuer,
-                    d.issuer_type,
-                    d.issuer_id,
-                    d.school_id,
-                    d.source_uri,
-                    d.raw_storage_uri,
-                    d.fetched_at,
-                    d.content_sha256,
-                    a.regions,
-                    a.categories,
-                    a.batches,
-                    a.valid_from,
-                    a.valid_to,
+                    {_SCOPE_SELECT_COLUMNS},
                     c.embedding <=> %(query_embedding)s::vector AS vector_distance
-                FROM release_policy_doc m
-                JOIN policy_chunk_set cs
-                  ON cs.chunk_set_version = m.chunk_set_version
-                 AND cs.doc_id = m.doc_id
-                JOIN policy_doc d
-                  ON d.id = m.doc_id
-                JOIN policy_chunk c
-                  ON c.doc_id = m.doc_id
-                 AND c.chunk_set_version = m.chunk_set_version
-                JOIN LATERAL (
-                    SELECT
-                        pa.regions,
-                        pa.categories,
-                        pa.batches,
-                        pa.valid_from,
-                        pa.valid_to
-                    FROM policy_applicability pa
-                    WHERE pa.doc_id = d.id
-                      AND (
-                          '全国' = ANY(pa.regions)
-                          OR %(province)s = ANY(pa.regions)
-                      )
-                      AND (
-                          %(category)s = '不限'
-                          OR '不限' = ANY(pa.categories)
-                          OR %(category)s = ANY(pa.categories)
-                      )
-                      AND (
-                          %(batch)s = '不限'
-                          OR '不限' = ANY(pa.batches)
-                          OR %(batch)s = ANY(pa.batches)
-                      )
-                      AND pa.valid_from <= %(today)s
-                      AND (pa.valid_to IS NULL OR %(today)s <= pa.valid_to)
-                    ORDER BY pa.valid_from DESC, pa.valid_to DESC NULLS LAST, pa.id
-                    LIMIT 1
-                ) a ON TRUE
-                WHERE m.release_id = %(release_id)s
+                {_SCOPE_FROM_AND_FILTERS}
                   AND cs.embedding_model = %(embedding_model)s
                   AND cs.embedding_dim = %(embedding_dim)s
                   AND cs.index_version = %(index_version)s
-                  AND d.title IS NOT NULL
-                  AND d.document_type IS NOT NULL
-                  AND d.issuer IS NOT NULL
-                  AND d.issuer_type IS NOT NULL
-                  AND d.issuer_id IS NOT NULL
-                  AND d.source_uri IS NOT NULL
-                  AND d.raw_storage_uri IS NOT NULL
-                  AND d.fetched_at IS NOT NULL
-                  AND d.content_sha256 IS NOT NULL
-                  AND c.text IS NOT NULL
-                  AND c.text_sha256 IS NOT NULL
-                  AND c.section_path IS NOT NULL
-                  AND c.chunk_set_version IS NOT NULL
-                  AND (
-                      cardinality(%(school_ids)s::text[]) = 0
-                      OR d.school_id = ANY(%(school_ids)s::text[])
-                  )
-                  AND (
-                      cardinality(%(document_types)s::text[]) = 0
-                      OR d.document_type = ANY(%(document_types)s::text[])
-                  )
                   AND c.embedding IS NOT NULL
                 ORDER BY c.embedding <=> %(query_embedding)s::vector
                 LIMIT %(pool_k)s
@@ -473,89 +544,8 @@ class RetrievePolicy:
         sql = f"""
             WITH scope_candidates AS MATERIALIZED (
                 SELECT
-                    c.id AS chunk_id,
-                    c.doc_id,
-                    c.section_path,
-                    c.text,
-                    c.text_sha256,
-                    c.char_start,
-                    c.char_end,
-                    c.chunk_set_version,
-                    d.title,
-                    d.document_type,
-                    d.issuer,
-                    d.issuer_type,
-                    d.issuer_id,
-                    d.school_id,
-                    d.source_uri,
-                    d.raw_storage_uri,
-                    d.fetched_at,
-                    d.content_sha256,
-                    a.regions,
-                    a.categories,
-                    a.batches,
-                    a.valid_from,
-                    a.valid_to
-                FROM release_policy_doc m
-                JOIN policy_chunk_set cs
-                  ON cs.chunk_set_version = m.chunk_set_version
-                 AND cs.doc_id = m.doc_id
-                JOIN policy_doc d
-                  ON d.id = m.doc_id
-                JOIN policy_chunk c
-                  ON c.doc_id = m.doc_id
-                 AND c.chunk_set_version = m.chunk_set_version
-                JOIN LATERAL (
-                    SELECT
-                        pa.regions,
-                        pa.categories,
-                        pa.batches,
-                        pa.valid_from,
-                        pa.valid_to
-                    FROM policy_applicability pa
-                    WHERE pa.doc_id = d.id
-                      AND (
-                          '全国' = ANY(pa.regions)
-                          OR %(province)s = ANY(pa.regions)
-                      )
-                      AND (
-                          %(category)s = '不限'
-                          OR '不限' = ANY(pa.categories)
-                          OR %(category)s = ANY(pa.categories)
-                      )
-                      AND (
-                          %(batch)s = '不限'
-                          OR '不限' = ANY(pa.batches)
-                          OR %(batch)s = ANY(pa.batches)
-                      )
-                      AND pa.valid_from <= %(today)s
-                      AND (pa.valid_to IS NULL OR %(today)s <= pa.valid_to)
-                    ORDER BY pa.valid_from DESC, pa.valid_to DESC NULLS LAST, pa.id
-                    LIMIT 1
-                ) a ON TRUE
-                WHERE m.release_id = %(release_id)s
-                  AND d.title IS NOT NULL
-                  AND d.document_type IS NOT NULL
-                  AND d.issuer IS NOT NULL
-                  AND d.issuer_type IS NOT NULL
-                  AND d.issuer_id IS NOT NULL
-                  AND d.source_uri IS NOT NULL
-                  AND d.raw_storage_uri IS NOT NULL
-                  AND d.fetched_at IS NOT NULL
-                  AND d.content_sha256 IS NOT NULL
-                  AND c.text IS NOT NULL
-                  AND c.text_sha256 IS NOT NULL
-                  AND c.section_path IS NOT NULL
-                  AND c.chunk_set_version IS NOT NULL
-                  AND cs.index_version IS NOT NULL
-                  AND (
-                      cardinality(%(school_ids)s::text[]) = 0
-                      OR d.school_id = ANY(%(school_ids)s::text[])
-                  )
-                  AND (
-                      cardinality(%(document_types)s::text[]) = 0
-                      OR d.document_type = ANY(%(document_types)s::text[])
-                  )
+                    {_SCOPE_SELECT_COLUMNS}
+                {_SCOPE_FROM_AND_FILTERS}
             )
             SELECT
                 scope_candidates.*,
