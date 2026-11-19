@@ -1446,7 +1446,44 @@ RunLifecycle 接线。
   release。
 - 本票不从文本或 LLM 生成规则，也不提供审核 UI。
 
-## 45. M4b-05：条件事实字段与已确认画像快照
+## 45. M4b-03：RuleCoverage 与覆盖不足 UNKNOWN
+
+**日期与范围**：2026-11-19，对应 issue #19。实现覆盖声明的最具体 scope 匹配、
+FULL/PARTIAL/NONE/缺失覆盖语义和 release 发布后冻结；不接入条件字段、组内五态
+汇总或 RunLifecycle。
+
+### 实现
+
+- `EvaluateEligibility` 对每个专业按 `rule_type + scope` 选择最具体覆盖声明；
+  专业级声明覆盖组级、院校级和省级声明。同具体度出现多个适用声明时返回
+  `BLOCKED / RULE_CONFLICT`，不依赖查询返回顺序。
+- 仅 FULL 覆盖允许专业 PASS；PARTIAL、NONE 和无匹配声明均产生
+  `UNKNOWN / RULE_COVERAGE_MISSING`，整体结果为 PARTIAL。
+- 迁移 25 增加规范 scope key、未知/空 scope 校验、可追溯来源元素校验、命名化的
+  FULL 来源和 PARTIAL/NONE 缺口说明约束。
+- release 处于 STAGING 时允许准备覆盖；PUBLISHED/REVOKED 后禁止插入、更新或删除
+  `RuleCoverage`，保证绑定 run 读取的覆盖快照不会被后续配置替换。
+- 现有测试夹具调整为先以 STAGING 写入规则/覆盖，再发布 release；新增真实
+  PostgreSQL 冻结与规范化约束测试，以及经生成客户端进入 `EvaluateEligibility`
+  的覆盖行为测试。
+
+### 验证
+
+- biz 测试覆盖 PARTIAL/NONE、缺失覆盖、最具体 FULL/PARTIAL 覆盖、同具体度冲突和
+  非适用声明隔离。
+- service + PostgreSQL 测试覆盖 broad FULL + specific PARTIAL、broad NONE +
+  candidate FULL、同具体度冲突、NONE、缺失覆盖，以及发布后修改覆盖不影响重复评估。
+- data storage 测试覆盖规范 scope 唯一性、非法 scope、FULL 空来源、缺口说明和
+  PUBLISHED 后插入/更新/删除均失败。
+- `00→25` fresh-schema、Go build/check/test、Python check/test 与既有 M4b 集成
+  测试通过。
+
+### 边界
+
+- 本票不生成 coverage，也不从条款推断覆盖；发布者必须显式声明。
+- 条件字段接入、专业五态组汇总和正式 run 接线仍由 M4b-05~07 完成。
+
+## 46. M4b-05：条件事实字段与已确认画像快照
 
 **日期与范围**：2026-11-19，对应 issue #20。把单科成绩、色觉、性别、户籍和
 学籍接入结构化资格规则，并把 Profile 已确认 revision 投影为确定性事实快照；
@@ -1467,7 +1504,7 @@ RunLifecycle 接线。
 - Profile 内部新增已确认 revision 到资格事实的确定性投影。DRAFT revision
   返回 `PROFILE_NOT_CONFIRMED`，事实按 field key 排序，不读取自由文本或历史数据。
 - 新迁移已加入 sqlc schema、RunLifecycle 测试迁移链和 policy acceptance schema
-  helper；fresh schema 名称更新为 `00→24`。
+  helper；fresh schema 名称更新为 `00→25`。
 
 ### 验证
 
@@ -1477,7 +1514,7 @@ RunLifecycle 接线。
   是运行时 allowlist 权威来源。
 - 字段目录 storage contract 验证关键字段、枚举值和非法 value type。
 - Python 测试验证 CONFIRMED facts 的稳定排序与 DRAFT 拒绝。
-- 专用测试库 fresh schema `00→24` 与相关 integration tests 通过。
+- 合并后专用测试库 fresh schema `00→25` 与相关 integration tests 通过。
 
 ### 边界
 

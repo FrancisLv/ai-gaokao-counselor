@@ -90,6 +90,12 @@ func TestIntegration_RuleLifecycleAuditAndPublishGuards(t *testing.T) {
 	}); !errors.Is(err, errs.ErrRulePublishConflict) {
 		t.Fatalf("publication conflict err = %v, want ErrRulePublishConflict", err)
 	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE release SET status = 'PUBLISHED', published_at = clock_timestamp()
+		WHERE release_id = $1`, releaseID,
+	); err != nil {
+		t.Fatalf("publish lifecycle release: %v", err)
+	}
 
 	if err := repo.Transition(context.Background(), RuleTransition{
 		RuleID: draft.RuleID, Version: draft.Version,
@@ -282,7 +288,7 @@ func insertLifecycleRelease(t *testing.T, pool *pgxpool.Pool, releaseID string) 
 	t.Helper()
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
-		 VALUES ($1, 'PUBLISHED', '{}'::jsonb, 'sha256:m4b-lifecycle', NOW())`,
+		 VALUES ($1, 'STAGING', '{}'::jsonb, 'sha256:m4b-lifecycle', NULL)`,
 		releaseID,
 	); err != nil {
 		t.Fatalf("insert release: %v", err)

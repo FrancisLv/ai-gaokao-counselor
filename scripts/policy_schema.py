@@ -24,15 +24,13 @@ MIGRATIONS = (
     "migrations/22_rule_lifecycle.sql",
     "migrations/23_rule_expression_contract.sql",
     "migrations/24_eligibility_profile_fields.sql",
+    "migrations/25_rule_coverage_contract.sql",
 )
 
 
 def apply_sql_file(conn, relative_path: str) -> None:
     sql = (ROOT / relative_path).read_text(encoding="utf-8")
-    for statement in sql.split(";"):
-        statement = statement.strip()
-        if statement:
-            conn.execute(statement)
+    conn.execute(sql)
 
 
 def reset_schema(conn) -> None:
