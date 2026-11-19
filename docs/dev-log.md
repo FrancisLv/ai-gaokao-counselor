@@ -1520,3 +1520,40 @@ FULL/PARTIAL/NONE/缺失覆盖语义和 release 发布后冻结；不接入条�
 
 - 仍不在本票实现 FULL/PARTIAL/NONE 的最具体 scope 覆盖、组内 `PASS_PARTIAL`
   和 RunLifecycle 正式资格门禁。
+
+## 47. M4b-06：组内多专业五态与 PASS_PARTIAL
+
+**日期与范围**：2026-11-19，对应 issue #21。完成院校专业组内多专业资格汇总、
+候选身份完整性校验与稳定排序；不接 RunLifecycle。
+
+### 实现
+
+- 专业结果保持 `PASS / FAIL / UNKNOWN / NOT_APPLICABLE /
+  MISSING_REQUIRED_FACT` 五态。明确限报优先为 FAIL，当前计划外专业为
+  NOT_APPLICABLE，规则所需事实缺失为 MISSING_REQUIRED_FACT。
+- 组级汇总为 `PASS / PASS_PARTIAL / FAIL / UNKNOWN`：全部专业 PASS 才为 PASS；
+  至少一个 PASS 且其余仅为 FAIL/NOT_APPLICABLE 时为 PASS_PARTIAL；无 PASS 时为
+  FAIL；任一 UNKNOWN/MISSING_REQUIRED_FACT 使整组 UNKNOWN。
+- PASS_PARTIAL 保留每个专业状态、受限专业及其 failure rule keys；组证据按稳定
+  major/rule 顺序去重，不得把部分专业可报解释为整组可报。
+- 候选身份加入 fail-closed 校验：空组、重复组、空/重复专业代码、缺失学校或组
+  身份均返回 BLOCKED；请求 scope 缺省省、年、科类或批次返回
+  `ELIGIBILITY_SCOPE_INVALID`。
+- 结果按 group key、major code 和规则证据稳定排序；同输入重复评估逐项一致。
+- 本票无新增 schema：候选身份与专业状态属于 RPC 请求/响应，现有 21→25 表结构
+  已足够，无需为纯请求校验增加空白迁移。
+
+### 验证
+
+- biz 测试覆盖 PASS_PARTIAL、全 PASS、全 FAIL、UNKNOWN 支配 PASS、
+  MISSING_REQUIRED_FACT、NOT_APPLICABLE、空组、重复组/专业、缺失身份、
+  不完整 scope 和确定性排序。
+- service + 真实 PostgreSQL + bufconn 测试验证多专业 PASS_PARTIAL、受限专业
+  明细、重复请求逐项一致，以及空组/重复专业/不完整 scope 的稳定阻断。
+- 既有生命周期、AST、条件事实、覆盖、fresh schema 与 CheckConstraints 回归通过。
+
+### 边界
+
+- 本票不判断招生计划是否存在；`NOT_APPLICABLE` 依赖上游提供的
+  `in_current_plan=false`，仍不得从历史专业身份推断当年可报。
+- RunLifecycle 尚未消费该五态结果，V1_FORMAL 门禁仍由 M4b-07 完成。
