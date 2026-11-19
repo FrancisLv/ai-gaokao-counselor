@@ -6,6 +6,7 @@ sql:
       - migrations/00_schema.sql
       - migrations/08_release_and_run_foundation.sql
       - migrations/13_release_data_dimensions.sql
+      - migrations/21_eligibility_rules.sql
     queries: internal/algo/data/queries
     gen:
       go:

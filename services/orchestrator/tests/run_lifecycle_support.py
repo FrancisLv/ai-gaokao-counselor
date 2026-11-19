@@ -57,6 +57,8 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await conn.execute(
                 """
                 DROP TABLE IF EXISTS
+                    rule_coverage,
+                    rule_version,
                     run_result,
                     run_interrupt,
                     profile_confirmation,
@@ -136,6 +138,11 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                 statement = statement.strip()
                 if statement:
                     await conn.execute(statement)
+            migration = ROOT / "migrations" / "21_eligibility_rules.sql"
+            for statement in migration.read_text(encoding="utf-8").split(";"):
+                statement = statement.strip()
+                if statement:
+                    await conn.execute(statement)
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS release_component (
@@ -183,6 +190,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await self._apply_sql_file(conn, "migrations/18_policy_retrieval_config_identity.sql")
             await self._apply_sql_file(conn, "migrations/19_policy_evidence_results.sql")
             await self._apply_sql_file(conn, "migrations/20_policy_relevance_policy.sql")
+            await self._apply_sql_file(conn, "migrations/21_eligibility_rules.sql")
         finally:
             await conn.close()
 

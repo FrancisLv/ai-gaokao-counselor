@@ -80,7 +80,7 @@ func newApp(bc *conf.Bootstrap, svc *service.Service, logger log.Logger) *kratos
 		grpc.Timeout(timeout),
 		grpc.Logger(logger),
 	)
-	algov1.RegisterAlgoServer(gs, svc) // svc 实现 algov1.AlgoServer（4 个 RPC）
+	algov1.RegisterAlgoServer(gs, svc) // svc 实现既有四 RPC + EvaluateEligibility
 
 	return kratos.New(
 		kratos.Name("svc-algo"),
