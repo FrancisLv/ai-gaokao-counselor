@@ -1254,6 +1254,8 @@ rerank 模型质量。
 - `gap-analysis.md` 同步当前 RunLifecycle、政策检索 seam、在线检索节点与剩余待办，
   删除“所有业务节点均为 TODO”等陈旧表述。
 - 测试中的科类字段统一使用 `category`，移除废弃 `track`。
+- 重新生成 code identity 为 `b291889` 的 fixture baseline；旧 baseline 明确标为
+  历史留存，不再冒充当前冻结结果。
 
 ### 测试
 

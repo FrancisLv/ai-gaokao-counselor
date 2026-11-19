@@ -56,12 +56,15 @@ scripts/run_retrieval_eval.py \
 当前冻结 fixture baseline：
 
 ```text
-baselines/retrieval-hunan-2025-v0.2.0-draft.rerank-off.fixture.json
+baselines/retrieval-hunan-2025-v0.2.0-draft.rerank-off.fixture-b291889.json
 ```
 
 baseline 记录 dataset SHA、code identity、model route、price table、verifier、
 algorithm config、hardware/environment、baseline identity，以及 retrieval 的
 embedding/rerank/RRF/index 配置。
+
+文件名不带提交短 SHA 的旧 fixture baseline 只作历史留存，不能作为当前代码身份
+的复现证据。
 
 用途（见架构文档第 11 章）：
 - 检索质量：recall@k、MRR、citation accuracy
