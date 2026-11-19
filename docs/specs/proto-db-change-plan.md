@@ -108,9 +108,15 @@ release_policy_doc
   doc_id
   chunk_set_version
   PRIMARY KEY(release_id, doc_id)
+
+release_policy_index
+  release_id PK
+  embedding_model
+  embedding_dim
+  index_version
 ```
 
-chunk 通过 `doc_id` 归属 release。同一文档内容未变化时可复用；重新切分或更换 embedding 必须生成新 `chunk_set_version`/chunk 身份。
+chunk 通过 `doc_id + chunk_set_version` 归属 release；`release_policy_index` 声明整个 release 唯一的模型、维度和索引版本，映射内所有 `policy_chunk_set` 与 chunk 身份必须一致。同一文档内容未变化时可复用；重新切分或更换 embedding 必须生成新 `chunk_set_version`/chunk 身份。
 
 ## 4. Profile 与 Run 持久化
 

@@ -44,6 +44,7 @@ class Embedder:
         from sentence_transformers import SentenceTransformer
 
         logger.info("加载 embedding 模型: %s", model_name)
+        self._model_name = model_name
         self._model = SentenceTransformer(model_name, device=device)
         self._dim = self._model.get_sentence_embedding_dimension()
         if self._dim != EMBEDDING_DIM:
@@ -53,6 +54,10 @@ class Embedder:
     @property
     def dim(self) -> int:
         return self._dim
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
 
     def encode(self, texts: Sequence[str], batch_size: int = 64) -> np.ndarray:
         """批量编码文本为向量。
