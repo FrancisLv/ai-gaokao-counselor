@@ -167,7 +167,11 @@ diagnostics:
 
 ### 5.1 向量路
 
-- 使用 `pgvector` 余弦距离；
+- 使用 `pgvector` 余弦距离；线上查询要求 pgvector `0.8+`；
+- V1 在同一个 SQL 查询中完成 release、文档类型、学校、地区、科类、批次、有效区间与证据完整性硬过滤，并以 `policy_chunk.embedding <=> query_embedding` 直接进入 HNSW 索引访问路径；不得先取跨适用域的固定 ANN 候选再由应用层补过滤；
+- HNSW 只提供距离有序访问，无法直接完成 `(distance, chunk_id)` 复合排序。查询先用有界 `ann_candidates` CTE 取得不超过 `pool_k` 的距离候选，再在这个小池内按 `distance, chunk_id` 排序，避免全量物化候选破坏索引访问；
+- 查询事务内使用 `hnsw.iterative_scan=strict_order`。pgvector 的图遍历过滤发生在索引访问之后，因此严格迭代扫描必须继续访问，直到取得足够候选或验证候选已耗尽；`hnsw.max_scan_tuples` 不得沿用会静默截断正确结果的默认上限；
+- `hnsw.ef_search` 至少为 `max(40, pool_k)`，允许通过 release 级配置提高召回；任何参数调整都不能放宽适用域；
 - `release_policy_index` 记录 release 的 embedding 模型、向量维度和 index version；查询 embedding 必须由该模型生成；
 - release 映射的 `policy_chunk_set` 及其 chunk 身份必须与该 release 声明完全一致；
 - 模型或维度不匹配时返回 `INDEX_MODEL_MISMATCH`，不得降级混读；

@@ -997,3 +997,32 @@ sqlc 的 `:many` 先收集类型化结果 slice，再映射领域对象，相较
 - `PolicyRetrievalTests` 使用确定性 embedder 和数据库边界替身覆盖 vector 证据映射、模型/维度与 chunk set 身份不匹配、模型不可用、查询失败及错误分类。
 - `PolicyRetrievalPostgresTests` 在随机隔离 schema 中从 `00` 应用至 `16`，覆盖高相似度跨省/跨科类/错误学校/过期干扰排除、chunk 身份混读、稳定顺序、重复证据 ID、成功零候选和不可证据化候选池过滤。
 - 上述数据库用例显式设置 `ORCHESTRATOR_TEST_DSN`；常规 `make py-test` 不下载真实模型、不访问生产数据。
+
+## 32. M4a-02 修复：hard-filtered ANN 与 HNSW 计划验收
+
+**日期与范围**：2026-11-19。修复 issue #9 中 pgvector 查询虽语义硬过滤但无法使用 `idx_chunk_embedding` 的验收缺口。
+
+### 问题
+
+- 原 vector SQL 先用 `MATERIALIZED scope_candidates` 物化全部适用域候选，再在外层计算 `embedding <=> query`。真实 `EXPLAIN` 因此只看到连接与 `Sort`，HNSW 索引没有参与 `ORDER BY`。
+- 直接改成 `ORDER BY c.embedding <=> query, c.id` 会使 HNSW 失效，因为 HNSW 只能提供单键距离顺序；复合稳定排序迫使规划器全量精确排序。
+- HNSW 的过滤总发生在图遍历之后。若仅去掉 `MATERIALIZED` 并保持默认 `hnsw.iterative_scan=off`，大量高相似度域外 chunk 可耗尽 `ef_search`，造成范围内结果被错误漏掉。
+
+### 实现
+
+- 向量查询改为有界 `ann_candidates` CTE：release、chunk set、文档、学校、文档类型、适用域和证据完整性过滤仍全部位于 CTE 内；CTE 以 `policy_chunk.embedding <=> query_embedding` 直接排序并最多截取 `pool_k`。
+- 外层只对被索引返回的小候选池按 `(vector_distance, chunk_id)` 稳定排序，兼顾 HNSW 单键访问与确定性输出。
+- 向量查询在事务内设置 `hnsw.iterative_scan=strict_order`、`hnsw.ef_search=max(40,pool_k)` 和 `hnsw.max_scan_tuples=2147483647`。严格迭代扫描在过滤后继续访问索引，最大扫描上限避免默认 20000 条约束静默截断结果。
+- 显式访问 vector 运算符以加载扩展，再设置 pgvector 自定义 GUC；向量查询仍全参数化，并对执行失败继续返回 `VECTOR_UNAVAILABLE`。
+
+### 测试与计划证据
+
+- 新增真实 PostgreSQL `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` 回归：通过 `RetrievePolicy` 捕获实际 vector SQL 与参数，在关闭小表精确路径成本干扰后断言 `policy_chunk` 使用 `idx_chunk_embedding`，索引节点 `Order By` 为 `embedding <=> query`。
+- 新增 60 个域外距离 0 干扰与 1 个范围内候选竞争 `pool_k=1` 的回归，证明严格迭代过滤不会把结果错误判为缺失。
+- 既有适用域、release/chunk 身份、不可证据化候选、零候选和稳定 tie-break 回归继续通过。
+
+### 风险与边界
+
+- `strict_order` 且无 20000 条上限意味着：当适用域命中极少或为零时，为证明“确实没有范围内候选”，pgvector 可能遍历大部分甚至全部 HNSW 图，延迟随不匹配比例上升。该成本用于换取硬过滤下不漏候选；后续应结合真实数据基准调整 API 超时、索引隔离或按适用域分区。
+- 该查询依赖 pgvector `0.8+` 的迭代扫描 GUC；低版本会明确失败为 `VECTOR_UNAVAILABLE`，不得静默退回可能漏候选的旧计划。
+- HNSW 仍是近似索引；本次保证的是同一硬过滤候选域内的索引化距离访问与稳定小池输出，不等同于对全库向量做精确穷举。
