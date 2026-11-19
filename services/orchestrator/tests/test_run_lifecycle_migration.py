@@ -7,7 +7,7 @@ from run_lifecycle_support import RunLifecyclePostgresTest
 
 
 class FreshSchemaTests(RunLifecyclePostgresTest):
-    async def test_run_lifecycle_works_on_fresh_schema_from_00_to_22(self):
+    async def test_run_lifecycle_works_on_fresh_schema_from_00_to_23(self):
         from app.run_lifecycle import RunLifecycle, StructuredProfileInput, SubmitRunCommand
 
         await self.reset_to_fresh_schema()

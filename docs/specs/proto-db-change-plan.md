@@ -247,6 +247,7 @@ rule_version
   scope JSONB
   required_profile_fields JSONB
   expression JSONB
+  expression_version INT
   outcome_when_true
   reason_code
   review_status

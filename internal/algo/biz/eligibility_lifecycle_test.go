@@ -157,6 +157,8 @@ func eligibilityFixtureRuleSet() EligibilityRuleSet {
 		Rules: []RuleVersion{{
 			RuleID: "rule-subject", Version: 1, RuleKey: "subject-requirement",
 			RuleType: RuleTypeSubjectRequirement, ReviewState: ReviewStatePublished,
+			RequiredProfileFields: []string{FieldSubjects, FieldCategory},
+			ExpressionVersion:     ExpressionVersionV1,
 			When: RuleExpression{Operator: OperatorNot, Child: &RuleExpression{
 				Operator: OperatorSubjectMatch,
 			}},

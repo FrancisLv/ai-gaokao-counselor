@@ -172,6 +172,7 @@ BEGIN
        OR NEW.scope IS DISTINCT FROM OLD.scope
        OR NEW.required_profile_fields IS DISTINCT FROM OLD.required_profile_fields
        OR NEW.expression IS DISTINCT FROM OLD.expression
+       OR NEW.expression_version IS DISTINCT FROM OLD.expression_version
        OR NEW.outcome_when_true IS DISTINCT FROM OLD.outcome_when_true
        OR NEW.reason_code IS DISTINCT FROM OLD.reason_code
        OR NEW.valid_from IS DISTINCT FROM OLD.valid_from
