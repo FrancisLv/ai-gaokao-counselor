@@ -6,29 +6,20 @@ ALTER TABLE rule_version
     ADD COLUMN IF NOT EXISTS published_by TEXT,
     ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ;
 
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conrelid = 'rule_version'::regclass
-          AND conname = 'rule_version_published_metadata'
-    ) THEN
-        ALTER TABLE rule_version
-            ADD CONSTRAINT rule_version_published_metadata
-            CHECK (
-                review_status <> 'PUBLISHED'
-                OR (
-                    reviewed_by IS NOT NULL
-                    AND reviewed_at IS NOT NULL
-                    AND published_by IS NOT NULL
-                    AND published_at IS NOT NULL
-                    AND release_id IS NOT NULL
-                )
-            ) NOT VALID;
-    END IF;
-END
-$$;
+ALTER TABLE rule_version
+    DROP CONSTRAINT IF EXISTS rule_version_published_metadata;
+ALTER TABLE rule_version
+    ADD CONSTRAINT rule_version_published_metadata
+    CHECK (
+        review_status <> 'PUBLISHED'
+        OR (
+            reviewed_by IS NOT NULL
+            AND reviewed_at IS NOT NULL
+            AND published_by IS NOT NULL
+            AND published_at IS NOT NULL
+            AND release_id IS NOT NULL
+        )
+    ) NOT VALID;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_rule_version_published_exact_scope
     ON rule_version(release_id, rule_key, scope)
