@@ -416,7 +416,9 @@ func TestIntegration_EvaluateEligibility_TypedAST(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
-	releaseID := fmt.Sprintf("rel_m4b_ast_test_%d", time.Now().UnixNano())
+	suffix := time.Now().UnixNano()
+	releaseID := fmt.Sprintf("rel_m4b_ast_test_%d", suffix)
+	ruleID := fmt.Sprintf("rule-ast-test-%d", suffix)
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
 		 VALUES ($1, 'PUBLISHED', '{}'::jsonb, 'sha256:m4b-ast', NOW())`, releaseID); err != nil {
@@ -432,7 +434,7 @@ func TestIntegration_EvaluateEligibility_TypedAST(t *testing.T) {
 			expression, expression_version, outcome_when_true, reason_code,
 			review_status, valid_from, release_id, source_evidence
 		) VALUES (
-			'rule-ast-test', 1, 'score-and-category', 'OTHER_HARD',
+			$2, 1, 'score-and-category', 'OTHER_HARD',
 			'{}'::jsonb, '["category","score"]'::jsonb,
 			'{"op":"AND","left":{"op":"GTE","field":"score","value":600},"right":{"op":"EQ","field":"category","value":"物理类"}}'::jsonb,
 			1, 'FAIL', 'SCORE_TOO_LOW', 'PUBLISHED', NOW(), $1,
@@ -442,7 +444,7 @@ func TestIntegration_EvaluateEligibility_TypedAST(t *testing.T) {
 				'release_id', $1::text,
 				'content_sha256', 'sha256:ast'
 			))
-		)`, releaseID); err != nil {
+		)`, releaseID, ruleID); err != nil {
 		t.Fatalf("insert typed expression rule: %v", err)
 	}
 	if _, err := pool.Exec(context.Background(),
@@ -507,18 +509,22 @@ func TestIntegration_EvaluateEligibility_TypedAST(t *testing.T) {
 	}
 
 	invalidReleaseID := releaseID + "_invalid"
+	invalidRuleID := fmt.Sprintf("rule-ast-invalid-%d", suffix)
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
 		 VALUES ($1, 'PUBLISHED', '{}'::jsonb, 'sha256:m4b-ast-invalid', NOW())`, invalidReleaseID); err != nil {
 		t.Fatalf("insert invalid release: %v", err)
 	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, invalidReleaseID)
+	})
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO rule_version (
 			rule_id, version, rule_key, rule_type, scope, required_profile_fields,
 			expression, expression_version, outcome_when_true, reason_code,
 			review_status, valid_from, release_id, source_evidence
 		) VALUES (
-			'rule-ast-invalid', 1, 'dangerous-expression', 'OTHER_HARD',
+			$2, 1, 'dangerous-expression', 'OTHER_HARD',
 			'{}'::jsonb, '["category"]'::jsonb,
 			'{"op":"EQ","field":"category","value":"物理类","sql":"SELECT secret"}'::jsonb,
 			1, 'FAIL', 'INVALID', 'PUBLISHED', NOW(), $1,
@@ -528,7 +534,7 @@ func TestIntegration_EvaluateEligibility_TypedAST(t *testing.T) {
 				'release_id', $1::text,
 				'content_sha256', 'sha256:ast-invalid'
 			))
-		)`, invalidReleaseID); err != nil {
+		)`, invalidReleaseID, invalidRuleID); err != nil {
 		t.Fatalf("insert invalid expression rule: %v", err)
 	}
 	if _, err := pool.Exec(context.Background(),
