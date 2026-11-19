@@ -2088,6 +2088,38 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                 self.assertEqual(report.status, "BLOCKED")
                 self.assertIn(reason, report.blocking_reasons)
 
+    def test_formal_gate_rejects_blank_coverage_rule_type(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        package = document_package(document, ref)
+        context = package.gate_context
+        self.assertIsNotNone(context)
+
+        report = VerifyPackage(
+            replace(
+                package,
+                gate_context=replace(
+                    context,
+                    qualification=replace(
+                        context.qualification,
+                        coverage=(
+                            QualificationCoverage(
+                                rule_type=" \t",
+                                status="FULL",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(
+            report.blocking_reasons,
+            ("ELIGIBILITY_COVERAGE_INCOMPLETE",),
+        )
+
     def test_formal_gate_rejects_unknown_failed_or_missing_major_groups(self):
         document = document_evidence()
         ref = document_ref(document)
@@ -2276,6 +2308,53 @@ class VerifyPackageAggregationTests(unittest.TestCase):
             ("ELIGIBILITY_RESTRICTED_MAJORS_MISSING",),
         )
 
+    def test_pass_partial_rejects_blank_restricted_major_codes(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        package = document_package(document, ref)
+        context = package.gate_context
+        self.assertIsNotNone(context)
+
+        for blank_major_code in ("", " \t"):
+            with self.subTest(major_code=blank_major_code):
+                partial_group = QualificationGroup(
+                    group_key="1001:01",
+                    status="PASS_PARTIAL",
+                    majors=(
+                        QualificationMajor(
+                            major_code="080901",
+                            status="PASS",
+                        ),
+                        QualificationMajor(
+                            major_code=blank_major_code,
+                            status="FAIL",
+                        ),
+                    ),
+                    restrictions=(
+                        f"{blank_major_code} 不满足物理类选科要求",
+                    ),
+                )
+
+                report = VerifyPackage(
+                    replace(
+                        package,
+                        gate_context=replace(
+                            context,
+                            qualification=replace(
+                                context.qualification,
+                                groups=(partial_group,),
+                            ),
+                        ),
+                    ),
+                    today=date(2025, 6, 1),
+                )
+
+                self.assertEqual(report.status, "BLOCKED")
+                self.assertEqual(
+                    report.blocking_reasons,
+                    ("ELIGIBILITY_RESTRICTED_MAJORS_MISSING",),
+                )
+
     def test_pass_partial_cannot_be_described_as_a_fully_eligible_group(self):
         document = document_evidence(
             excerpt="学生可以在第二学期申请转专业。该专业组全组可报。",
@@ -2426,6 +2505,132 @@ class VerifyPackageAggregationTests(unittest.TestCase):
             report.blocking_reasons,
             ("REQUIRED_NOTICE_MISSING",),
         )
+
+    def test_required_notice_rejects_unrelated_structured_evidence(self):
+        document = document_evidence()
+        document_ref_value = document_ref(document)
+        unrelated = structured_evidence()
+        unrelated_ref = structured_ref(
+            unrelated,
+            evidence_id="ev-unrelated-plan-count",
+        )
+        package = document_package(
+            document,
+            document_ref_value,
+            registry=(document_ref_value, unrelated_ref),
+        )
+        context = package.gate_context
+        self.assertIsNotNone(context)
+
+        report = VerifyPackage(
+            replace(
+                package,
+                gate_context=replace(
+                    context,
+                    required_notices=(
+                        replace(
+                            context.required_notices[0],
+                            evidence_refs=(unrelated_ref,),
+                        ),
+                        *context.required_notices[1:],
+                    ),
+                ),
+            ),
+            today=date(2025, 6, 1),
+            structured_authority=FixedStructuredAuthority(unrelated),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(
+            report.blocking_reasons,
+            ("REQUIRED_NOTICE_MISMATCH",),
+        )
+
+    def test_required_notice_requires_supported_structured_field(self):
+        document = document_evidence()
+        document_ref_value = document_ref(document)
+        base_package = document_package(document, document_ref_value)
+        context = base_package.gate_context
+        self.assertIsNotNone(context)
+        notice = context.required_notices[0]
+        unrelated = structured_evidence()
+
+        wrong_field = replace(
+            unrelated,
+            field_path="plan_count",
+            value=notice.normalized_text,
+            unit=None,
+        )
+        wrong_field_ref = structured_ref(
+            wrong_field,
+            evidence_id="ev-wrong-notice-field",
+        )
+        wrong_field_report = VerifyPackage(
+            replace(
+                base_package,
+                evidence_registry=(
+                    document_ref_value,
+                    wrong_field_ref,
+                ),
+                gate_context=replace(
+                    context,
+                    required_notices=(
+                        replace(
+                            notice,
+                            evidence_refs=(wrong_field_ref,),
+                        ),
+                        *context.required_notices[1:],
+                    ),
+                ),
+            ),
+            today=date(2025, 6, 1),
+        )
+
+        supported = replace(
+            unrelated,
+            dataset="formal_notice",
+            table="required_notice",
+            business_key=replace(
+                unrelated.business_key,
+                university_code=None,
+                major_group=None,
+                major_code=None,
+            ),
+            field_path="notice.disclaimer",
+            value=notice.normalized_text,
+            unit=None,
+        )
+        supported_ref = structured_ref(
+            supported,
+            evidence_id="ev-supported-disclaimer",
+        )
+        supported_report = VerifyPackage(
+            replace(
+                base_package,
+                evidence_registry=(
+                    document_ref_value,
+                    supported_ref,
+                ),
+                gate_context=replace(
+                    context,
+                    required_notices=(
+                        replace(
+                            notice,
+                            evidence_refs=(supported_ref,),
+                        ),
+                        *context.required_notices[1:],
+                    ),
+                ),
+            ),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(wrong_field_report.status, "BLOCKED")
+        self.assertEqual(
+            wrong_field_report.blocking_reasons,
+            ("REQUIRED_NOTICE_MISMATCH",),
+        )
+        self.assertEqual(supported_report.status, "PASS")
 
     def test_all_claim_types_reject_admission_guarantees(self):
         for phrase in ("保证录取", "包录取", "100%录取"):

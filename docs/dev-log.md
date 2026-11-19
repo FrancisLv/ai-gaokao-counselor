@@ -1806,3 +1806,26 @@ LLM 规则生成。
 
 - 本票不创建 `V1_FORMAL` 结果，不持久化证据包/验证报告，不修改 RunLifecycle
   发布事务；这些仍由后续 M4c tickets 完成。
+
+## 55. M4c-05 合并前 Review 修复：三项 fail-open 收口
+
+**日期与范围**：2026-11-19，对应 issue #29 合并前 review。仍只通过同一个
+`VerifyPackage` 公共行为修复，不改变正式门禁 API。
+
+### 问题与实现
+
+- 资格覆盖原先只检查 `status=FULL`，空白 `rule_type` 也会被视为有效覆盖；现要求
+  `rule_type` 非空白，否则 `BLOCKED / ELIGIBILITY_COVERAGE_INCOMPLETE`。
+- `PASS_PARTIAL` 的受限专业使用空串时，`"" in restriction` 恒真，导致空/空白专业
+  代码被误认为已说明；现直接拒绝空/空白受限专业代码，返回
+  `ELIGIBILITY_RESTRICTED_MAJORS_MISSING`。
+- 必需说明原先只检查 `DOCUMENT` payload，任意 `STRUCTURED` payload 会直接跳过；
+  现要求结构化字段路径明确指向规范文本或对应 notice 类型，值精确等于
+  `normalized_text` 且内容 hash 绑定同一行/快照。无关招生计划行返回
+  `REQUIRED_NOTICE_MISMATCH`。
+
+### 验证
+
+- 按严格 TDD 先为三个缺口各加 `VerifyPackage` 失败测试，确认旧实现分别误报
+  `PASS`，修复后转绿。
+- `test_evidence_verification.py` 70 tests OK。
