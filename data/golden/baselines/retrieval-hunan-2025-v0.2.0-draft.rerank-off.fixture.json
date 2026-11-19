@@ -1,6 +1,6 @@
 {
   "schema_version": "retrieval-eval-baseline-v2",
-  "generated_at": "2026-11-19T05:35:37.585749+00:00",
+  "generated_at": "2026-11-19T05:36:31.435247+00:00",
   "dataset": {
     "version": "retrieval-hunan-2025-v0.2.0-draft",
     "sha256": "dc6475a722a5e40bca9e22c5df3e1a36dcd28f79bb67b157ab2d67b2ed8ad453",
@@ -10,8 +10,8 @@
   },
   "release_id": "DRAFT_UNBOUND_POLICY_RELEASE",
   "code_identity": {
-    "git_sha": "abc47ebf321474b00996d325737def9bb8d3fe63",
-    "worktree_dirty": true,
+    "git_sha": "e9d068e97dc9d90a2fdff2a2ded26be7375039ec",
+    "worktree_dirty": false,
     "source_tree_sha256": "2efd03709203dc2ab74ae8160984e77505e0b2fc973697e04803157ea18b56e7",
     "python_version": "3.11.17",
     "platform": "macOS-26.4.1-arm64-arm-64bit"
@@ -1225,6 +1225,6 @@
       "first_diff": null
     }
   ],
-  "result_sha256": "edcea96deaf86fdbd4ff4d565bbff958fa9ad2ec414be3701af90ca428e2b6a7",
-  "eval_run_id": "eval_edcea96deaf86fdbd4ff4d565bbff958fa9ad2ec414be3701af90ca428e2b6a7"
+  "result_sha256": "a3dd2beff706412bbe4b18b4e9322a7efe25e13f3d725a2049ca16d0958cd894",
+  "eval_run_id": "eval_a3dd2beff706412bbe4b18b4e9322a7efe25e13f3d725a2049ca16d0958cd894"
 }
