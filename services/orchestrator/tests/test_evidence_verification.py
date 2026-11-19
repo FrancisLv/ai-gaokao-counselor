@@ -1833,6 +1833,52 @@ class VerifyPackageDerivedTests(unittest.TestCase):
 
 
 class VerifyPackageAggregationTests(unittest.TestCase):
+    def test_registry_resolved_type_mismatch_cannot_strip_normal_claim(self):
+        document = document_evidence()
+        document_ref_value = document_ref(document)
+        verified_claim = replace(
+            document_claim(document_ref_value),
+            claim_id="claim-a-document",
+        )
+
+        structured = structured_evidence()
+        declared_ref = structured_ref(
+            structured,
+            evidence_id="ev-plan-count",
+        )
+        registry_document_ref = document_ref(
+            document,
+            evidence_id=declared_ref.evidence_id,
+        )
+        mismatched_claim = replace(
+            structured_claim(declared_ref),
+            claim_id="claim-b-registry-type-mismatch",
+            criticality="NORMAL",
+        )
+        package = document_package(
+            document,
+            document_ref_value,
+            registry=(document_ref_value, registry_document_ref),
+            claims=(verified_claim, mismatched_claim),
+        )
+
+        report = VerifyPackage(
+            package,
+            today=date(2025, 6, 1),
+            structured_authority=FixedStructuredAuthority(structured),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.stripped_claim_ids, ())
+        self.assertEqual(report.blocking_reasons, ("CLAIM_UNSUPPORTED",))
+        mismatch = next(
+            item
+            for item in report.claims
+            if item.claim_id == "claim-b-registry-type-mismatch"
+        )
+        self.assertEqual(mismatch.status, "UNVERIFIABLE")
+        self.assertEqual(mismatch.reason, "CLAIM_UNSUPPORTED")
+
     def test_blocked_report_reasons_and_claims_have_stable_order(self):
         document = document_evidence()
         ref = document_ref(document)
