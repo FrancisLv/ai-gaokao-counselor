@@ -216,7 +216,7 @@ def VerifyPackage(
                 True,
             )
             blocking_reasons.add(reason)
-        elif _claim_evidence_type_mismatch(claim):
+        elif _claim_evidence_type_mismatch(claim, registry):
             decision, reason, deterministic = (
                 "UNVERIFIABLE",
                 "CLAIM_UNSUPPORTED",
@@ -623,7 +623,10 @@ def _claim_preflight_reason(claim: Claim) -> str | None:
     return None
 
 
-def _claim_evidence_type_mismatch(claim: Claim) -> bool:
+def _claim_evidence_type_mismatch(
+    claim: Claim,
+    registry: dict[str, EvidenceRef],
+) -> bool:
     expected_type = {
         "DOCUMENT_FACT": "DOCUMENT",
         "STRUCTURED_FACT": "STRUCTURED",
@@ -633,6 +636,10 @@ def _claim_evidence_type_mismatch(claim: Claim) -> bool:
         return False
     return any(
         ref.evidence_type != expected_type
+        or (
+            (registered := registry.get(ref.evidence_id)) is not None
+            and registered.evidence_type != expected_type
+        )
         for ref in claim.evidence_refs
     )
 

@@ -1762,7 +1762,7 @@ LLM 规则生成。
 - `VerifyPackage` 行为测试新增普通未知剥离、关键未知、矛盾优先级、错误类型、
   重复身份、非法关键性、零保留事实、三类证据混合 `PARTIAL`、citation coverage
   和阻断/剥离顺序确定性。
-- `make py-check py-test` 通过：253 tests OK，112 个依赖真实库/外部服务的用例按
+- `make py-check py-test` 通过：254 tests OK，111 个依赖真实库/外部服务的用例按
   既有约定跳过。
 
 ### 边界
