@@ -1069,24 +1069,6 @@ class RunLifecycle:
         )
 
     @staticmethod
-    def _formal_result_payload(view: FormalResultView) -> dict[str, Any]:
-        return {
-            "result_version": str(view.result_version),
-            "result_kind": view.result_kind,
-            "release_id": view.release_id,
-            "confirmed_profile_version": str(
-                view.confirmed_profile_version
-            ),
-            "evidence_package_sha256": view.evidence_package_sha256,
-            "verification_report_sha256": (
-                view.verification_report_sha256
-            ),
-            "verification_summary": view.verification_summary,
-            "result_state": view.result_state,
-            "stale_reason": view.stale_reason,
-        }
-
-    @staticmethod
     def _trusted_string_tuple(value, field: str) -> tuple[str, ...]:
         if value is None:
             return ()

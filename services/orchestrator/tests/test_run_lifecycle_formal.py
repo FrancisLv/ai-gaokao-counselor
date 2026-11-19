@@ -12,6 +12,7 @@ import grpc
 
 from evidence import (
     Claim,
+    DerivedEvidence,
     DocumentApplicability,
     DocumentEvidence,
     EvidencePackage,
@@ -238,6 +239,75 @@ def _formal_package(
             ),
             required_notices=notices,
         ),
+    )
+
+
+def _with_derived_sample_years(
+    package: EvidencePackage,
+    sample_years: tuple[int, ...],
+) -> EvidencePackage:
+    derived = DerivedEvidence(
+        operation_id="rank_convert",
+        algorithm="rank_conversion",
+        algorithm_version="rank-v1",
+        config_sha256="c" * 64,
+        input_snapshot_sha256="d" * 64,
+        profile_version=package.profile_version,
+        release_id=package.release_id,
+        sample_years=sample_years,
+        output_field="rank",
+        output_value=15860,
+        unit="名",
+        precision=0,
+        artifact_sha256="e" * 64,
+        assumptions=("使用湖南省同科类一分一段表",),
+        warnings=("位次仅用于同科类比较",),
+    )
+    ref = EvidenceRef(
+        evidence_id="ev-derived-rank",
+        evidence_type="DERIVED",
+        release_id=package.release_id,
+        content_sha256=derived.artifact_sha256,
+        created_at=datetime(2025, 1, 2, tzinfo=timezone.utc),
+        producer_version="algo-estimate-v1",
+        derived=derived,
+    )
+    claim = Claim(
+        claim_id="claim-rank",
+        claim_type="DERIVED_FACT",
+        criticality="CRITICAL",
+        normalized=NormalizedFact(
+            subject="湖南物理类考生",
+            predicate="rank",
+            object=15860,
+            unit="名",
+            sample_years=sample_years,
+            precision=0,
+        ),
+        rendered_text="考生位次为 15860 名，样本年份为 2022、2023、2024 年。",
+        evidence_refs=(ref,),
+        rendered_bindings=(
+            RenderedBinding(
+                fact_path="normalized.object",
+                rendered_text="15860",
+                evidence_id=ref.evidence_id,
+            ),
+            RenderedBinding(
+                fact_path="normalized.unit",
+                rendered_text="名",
+                evidence_id=ref.evidence_id,
+            ),
+            RenderedBinding(
+                fact_path="normalized.sample_years",
+                rendered_text="2022、2023、2024",
+                evidence_id=ref.evidence_id,
+            ),
+        ),
+    )
+    return replace(
+        package,
+        claims=(package.claims[0], claim),
+        evidence_registry=(*package.evidence_registry, ref),
     )
 
 
@@ -716,6 +786,52 @@ class FormalResultLifecycleTests(RunLifecyclePostgresTest):
         self.assertEqual(counts["report_count"], 1)
         self.assertEqual(counts["result_event_count"], 1)
 
+    async def test_retry_treats_reordered_nested_sample_years_as_equivalent(self):
+        from app.run_lifecycle import PublishFormalResultCommand
+
+        release_id = f"rel-formal-sample-years-{uuid4().hex}"
+        profile_version = uuid4()
+        result_version = uuid4()
+        base_package = _formal_package(
+            release_id=release_id,
+            profile_version=profile_version,
+            result_version=result_version,
+        )
+        package = _with_derived_sample_years(
+            base_package,
+            (2024, 2022, 2023),
+        )
+        reordered_package = _with_derived_sample_years(
+            base_package,
+            (2022, 2023, 2024),
+        )
+        lifecycle, run_id, claim = await self._prepare_running_run(package)
+        self.addAsyncCleanup(lifecycle.close)
+        command = PublishFormalResultCommand(
+            principal_id="principal-formal",
+            run_id=run_id,
+            expected_state_version=claim["state_version"],
+            expected_lease_epoch=claim["lease_epoch"],
+            package=package,
+        )
+
+        first = await lifecycle.PublishFormalResult(command)
+        replay = await lifecycle.PublishFormalResult(
+            replace(command, package=reordered_package)
+        )
+
+        self.assertFalse(first.replayed)
+        self.assertTrue(replay.replayed)
+        self.assertEqual(replay.result_version, first.result_version)
+        self.assertEqual(
+            replay.evidence_package_sha256,
+            first.evidence_package_sha256,
+        )
+        self.assertEqual(
+            replay.verification_report_sha256,
+            first.verification_report_sha256,
+        )
+
     async def test_published_payload_is_immutable_and_release_revoke_only_marks_stale(self):
         from app.run_lifecycle import PublishFormalResultCommand
 
@@ -825,6 +941,61 @@ class FormalResultLifecycleTests(RunLifecyclePostgresTest):
             row["report_sha256"],
             publication.verification_report_sha256,
         )
+
+    async def test_published_formal_result_cannot_be_rewritten_as_policy_evidence(
+        self,
+    ):
+        from app.run_lifecycle import PublishFormalResultCommand
+
+        release_id = f"rel-formal-immutable-{uuid4().hex}"
+        profile_version = uuid4()
+        result_version = uuid4()
+        package = _formal_package(
+            release_id=release_id,
+            profile_version=profile_version,
+            result_version=result_version,
+        )
+        lifecycle, run_id, claim = await self._prepare_running_run(package)
+        self.addAsyncCleanup(lifecycle.close)
+        await lifecycle.PublishFormalResult(
+            PublishFormalResultCommand(
+                principal_id="principal-formal",
+                run_id=run_id,
+                expected_state_version=claim["state_version"],
+                expected_lease_epoch=claim["lease_epoch"],
+                package=package,
+            )
+        )
+
+        conn = await self._connect()
+        try:
+            with self.assertRaises(psycopg.Error):
+                await conn.execute(
+                    """
+                    UPDATE run_result
+                    SET result_kind = 'POLICY_EVIDENCE',
+                        confirmed_profile_version = NULL,
+                        payload = '{"result_kind":"POLICY_EVIDENCE"}'::jsonb
+                    WHERE result_version = %s
+                    """,
+                    (result_version,),
+                )
+            row = await (
+                await conn.execute(
+                    """
+                    SELECT result_kind, confirmed_profile_version, payload
+                    FROM run_result
+                    WHERE result_version = %s
+                    """,
+                    (result_version,),
+                )
+            ).fetchone()
+        finally:
+            await conn.close()
+
+        self.assertEqual(row["result_kind"], "V1_FORMAL")
+        self.assertEqual(row["confirmed_profile_version"], profile_version)
+        self.assertEqual(row["payload"]["result_kind"], "V1_FORMAL")
 
     async def test_release_revoked_before_publish_commit_fails_closed(self):
         from app.run_lifecycle import PublishFormalResultCommand, RunLifecycle
