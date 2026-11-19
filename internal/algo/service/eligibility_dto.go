@@ -13,6 +13,7 @@ func fromPbEligibilityRequest(req *algov1.EvaluateEligibilityRequest) biz.Eligib
 		ReleaseID:               req.GetReleaseId(),
 		ConfirmedProfileVersion: req.GetConfirmedProfileVersion(),
 		ProfileLifecycle:        fromPbProfileLifecycle(req.GetProfileLifecycle()),
+		ProfileSnapshotSHA256:   req.GetProfileSnapshotSha256(),
 		Scope:                   fromPbEligibilityScope(req.GetScope()),
 	}
 	for _, fact := range req.GetProfileFacts() {

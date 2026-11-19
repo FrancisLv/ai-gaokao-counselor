@@ -292,6 +292,7 @@ DRAFT -> REVIEWED -> PUBLISHED -> REVOKED
 | `RULE_SOURCE_MISSING` | 规则没有可追溯证据 |
 | `CANDIDATE_NOT_IN_PLAN` | 候选不在当年计划中 |
 | `BATCH_UNSUPPORTED` | 批次不在 V1 支持范围 |
+| `PROFILE_UNSUPPORTED_SCOPE` | 请求省年科批不在绑定 release 支持范围 |
 
 ## 9. 验收测试
 

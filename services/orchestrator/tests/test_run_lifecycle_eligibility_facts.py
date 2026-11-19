@@ -109,6 +109,30 @@ class EligibilityProfileFactsTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.reason, "PROFILE_NOT_CONFIRMED")
 
+    def test_profile_snapshot_digest_is_cross_language_canonical(self):
+        from app.run_lifecycle.service import RunLifecycle
+
+        facts = [
+            {
+                "field_key": "subjects",
+                "state": "PROVIDED",
+                "value": ["物理", "化学", "生物"],
+            },
+            {
+                "field_key": "category",
+                "state": "PROVIDED",
+                "value": "物理类",
+            },
+        ]
+        digest = RunLifecycle._eligibility_profile_snapshot_sha256(
+            "profile-v1",
+            facts,
+        )
+        self.assertEqual(
+            digest,
+            "f60bc119283ebe04b7ce6df5d3a5cc4edefa4535e2481ac3a9a1444981a465c4",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

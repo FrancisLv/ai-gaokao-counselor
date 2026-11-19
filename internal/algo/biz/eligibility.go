@@ -12,16 +12,17 @@ import (
 
 // EligibilityRepo 读取 release 内已发布的规则与覆盖快照。规则解释和裁决不进入 data 层。
 type EligibilityRepo interface {
-	LoadEligibilityRuleSet(ctx context.Context, releaseID string) (EligibilityRuleSet, error)
+	LoadEligibilityRuleSet(ctx context.Context, releaseID string, scope EligibilityScope) (EligibilityRuleSet, error)
 }
 
 // EligibilityRuleSet 是单个 release 的只读资格规则快照。
 type EligibilityRuleSet struct {
-	ReleaseStatus string
-	Rules         []RuleVersion
-	Coverage      []RuleCoverage
-	ProfileFields []ProfileFieldDefinition
-	RevokedRules  []RevokedRuleVersion
+	ReleaseStatus         string
+	Rules                 []RuleVersion
+	Coverage              []RuleCoverage
+	ProfileFields         []ProfileFieldDefinition
+	RevokedRules          []RevokedRuleVersion
+	ReleaseScopeSupported bool
 }
 
 type RevokedRuleVersion struct {
@@ -156,6 +157,7 @@ type EligibilityRequest struct {
 	ReleaseID               string
 	ConfirmedProfileVersion string
 	ProfileLifecycle        string
+	ProfileSnapshotSHA256   string
 	Scope                   EligibilityScope
 	ProfileFacts            []ProfileFact
 	CandidateGroups         []CandidateGroup
@@ -274,6 +276,7 @@ const (
 	ReasonCandidateMajorInvalid   = "CANDIDATE_MAJOR_INVALID"
 	ReasonCandidateNotInPlan      = "CANDIDATE_NOT_IN_PLAN"
 	ReasonEligibilityScopeInvalid = "ELIGIBILITY_SCOPE_INVALID"
+	ReasonProfileUnsupportedScope = "PROFILE_UNSUPPORTED_SCOPE"
 	ReasonRuleSourceMissing       = "RULE_SOURCE_MISSING"
 	ReasonBatchUnsupported        = "BATCH_UNSUPPORTED"
 )
@@ -298,6 +301,14 @@ func (u *EligibilityUsecase) EvaluateEligibility(ctx context.Context, req Eligib
 	if req.ProfileLifecycle != ProfileLifecycleConfirmed || strings.TrimSpace(req.ConfirmedProfileVersion) == "" {
 		return EligibilityResult{}, errs.ErrProfileNotConfirmed
 	}
+	if duplicateProfileFactField(req.ProfileFacts) ||
+		!profileSnapshotMatches(
+			req.ConfirmedProfileVersion,
+			req.ProfileSnapshotSHA256,
+			req.ProfileFacts,
+		) {
+		return EligibilityResult{}, errs.ErrInvalidQuery
+	}
 	if !validEligibilityScope(req.Scope) {
 		result := EligibilityResult{
 			Status:           EligibilityBlocked,
@@ -320,7 +331,7 @@ func (u *EligibilityUsecase) EvaluateEligibility(ctx context.Context, req Eligib
 		}
 		return result, nil
 	}
-	set, err := u.repo.LoadEligibilityRuleSet(ctx, req.ReleaseID)
+	set, err := u.repo.LoadEligibilityRuleSet(ctx, req.ReleaseID, req.Scope)
 	if err != nil {
 		return EligibilityResult{}, err
 	}
@@ -339,6 +350,12 @@ func (u *EligibilityUsecase) EvaluateEligibility(ctx context.Context, req Eligib
 		result.Status = EligibilityBlocked
 		result.Diagnostics.UnknownCount = 1
 		result.Groups = blockedGroups(req.CandidateGroups, ReasonReleaseRevoked)
+		return result, nil
+	}
+	if !set.ReleaseScopeSupported {
+		result.Status = EligibilityBlocked
+		result.Diagnostics.UnknownCount = maxInt(1, candidateMajorCount(req.CandidateGroups))
+		result.Groups = blockedGroups(req.CandidateGroups, ReasonProfileUnsupportedScope)
 		return result, nil
 	}
 	for _, group := range req.CandidateGroups {

@@ -44,10 +44,11 @@ func TestIntegration_EvaluateEligibility_GroupAggregation(t *testing.T) {
 
 	releaseID := seedCoverageRelease(t, pool)
 	ruleID := "rule-group-aggregation-" + releaseID
-	publishEligibilityRuleFixture(
+	publishEligibilityRuleFixtureScoped(
 		t, pool, releaseID, ruleID, "subject-requirement",
 		"SUBJECT_REQUIREMENT", `["subjects","category"]`,
-		`{"op":"NOT","child":{"op":"SUBJECT_MATCH"}}`, 1,
+		`{"op":"NOT","child":{"op":"SUBJECT_MATCH","subject_req":"首选物理，再选思想政治"}}`, 1,
+		`{"major_code":"080902"}`,
 		"SUBJECT_REQUIREMENT",
 	)
 
@@ -170,6 +171,22 @@ func TestIntegration_EvaluateEligibility_GroupAggregation(t *testing.T) {
 					t.Fatalf("unknown reasons = %v, want [%s]", reasons, tc.wantMajorReason)
 				}
 			})
+		}
+	})
+
+	t.Run("unsupported release scope is blocked", func(t *testing.T) {
+		request := eligibilityCoverageRequest(releaseID)
+		request.Scope.ApplicationYear = 2026
+		reply, err := client.EvaluateEligibility(context.Background(), request)
+		if err != nil {
+			t.Fatalf("EvaluateEligibility: %v", err)
+		}
+		if got := reply.GetStatus(); got != algov1.EligibilityResultStatus_ELIGIBILITY_RESULT_STATUS_BLOCKED {
+			t.Fatalf("status = %v, want BLOCKED", got)
+		}
+		reasons := reply.GetGroups()[0].GetMajors()[0].GetUnknownReasons()
+		if len(reasons) != 1 || reasons[0] != biz.ReasonProfileUnsupportedScope {
+			t.Fatalf("unknown reasons = %v, want [%s]", reasons, biz.ReasonProfileUnsupportedScope)
 		}
 	})
 

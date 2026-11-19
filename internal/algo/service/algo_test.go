@@ -35,10 +35,11 @@ type serviceEligibilityRepo struct {
 	set biz.EligibilityRuleSet
 }
 
-func (r serviceEligibilityRepo) LoadEligibilityRuleSet(context.Context, string) (biz.EligibilityRuleSet, error) {
+func (r serviceEligibilityRepo) LoadEligibilityRuleSet(context.Context, string, biz.EligibilityScope) (biz.EligibilityRuleSet, error) {
 	if len(r.set.ProfileFields) == 0 {
 		r.set.ProfileFields = biz.BuiltinEligibilityProfileFields()
 	}
+	r.set.ReleaseScopeSupported = true
 	return r.set, nil
 }
 
@@ -51,7 +52,8 @@ func TestService_EvaluateEligibility(t *testing.T) {
 			RequiredProfileFields: []string{biz.FieldSubjects, biz.FieldCategory},
 			ExpressionVersion:     biz.ExpressionVersionV1,
 			When: biz.RuleExpression{Operator: biz.OperatorNot, Child: &biz.RuleExpression{
-				Operator: biz.OperatorSubjectMatch,
+				Operator:           biz.OperatorSubjectMatch,
+				SubjectRequirement: "首选物理，再选化学",
 			}},
 			OutcomeWhenTrue: biz.OutcomeFail,
 			ReasonCode:      "SUBJECT_NOT_MATCHED",
@@ -60,7 +62,7 @@ func TestService_EvaluateEligibility(t *testing.T) {
 		Coverage: []biz.RuleCoverage{{RuleType: biz.RuleTypeSubjectRequirement, Status: biz.CoverageFull}},
 	}})
 	svc := NewAlgo(nil, nil, nil, uc)
-	reply, err := svc.EvaluateEligibility(context.Background(), &algov1.EvaluateEligibilityRequest{
+	request := &algov1.EvaluateEligibilityRequest{
 		ReleaseId: "rel-test", ConfirmedProfileVersion: "profile-v1",
 		ProfileLifecycle: algov1.EligibilityProfileLifecycle_ELIGIBILITY_PROFILE_LIFECYCLE_CONFIRMED,
 		Scope:            &algov1.EligibilityScope{Province: "湖南", ApplicationYear: 2025, Category: "物理类", Batch: "本科批"},
@@ -81,7 +83,9 @@ func TestService_EvaluateEligibility(t *testing.T) {
 				SubjectRequirement: "首选物理，再选化学", InCurrentPlan: true,
 			}},
 		}},
-	})
+	}
+	setEligibilityProfileDigest(request)
+	reply, err := svc.EvaluateEligibility(context.Background(), request)
 	if err != nil {
 		t.Fatalf("EvaluateEligibility: %v", err)
 	}
@@ -117,7 +121,7 @@ func TestService_EvaluateEligibility_BlocksInvalidASTContract(t *testing.T) {
 		Coverage: []biz.RuleCoverage{{RuleType: biz.RuleTypeSubjectRequirement, Status: biz.CoverageFull}},
 	}})
 	svc := NewAlgo(nil, nil, nil, uc)
-	reply, err := svc.EvaluateEligibility(context.Background(), &algov1.EvaluateEligibilityRequest{
+	request := &algov1.EvaluateEligibilityRequest{
 		ReleaseId: "rel-test", ConfirmedProfileVersion: "profile-v1",
 		ProfileLifecycle: algov1.EligibilityProfileLifecycle_ELIGIBILITY_PROFILE_LIFECYCLE_CONFIRMED,
 		Scope:            &algov1.EligibilityScope{Province: "湖南", ApplicationYear: 2025, Category: "物理类", Batch: "本科批"},
@@ -131,7 +135,9 @@ func TestService_EvaluateEligibility_BlocksInvalidASTContract(t *testing.T) {
 				MajorCode: "080901", MajorName: "计算机科学与技术", InCurrentPlan: true,
 			}},
 		}},
-	})
+	}
+	setEligibilityProfileDigest(request)
+	reply, err := svc.EvaluateEligibility(context.Background(), request)
 	if err != nil {
 		t.Fatalf("EvaluateEligibility: %v", err)
 	}
@@ -142,6 +148,14 @@ func TestService_EvaluateEligibility_BlocksInvalidASTContract(t *testing.T) {
 	if len(reasons) != 1 || reasons[0] != biz.ReasonRuleExpression {
 		t.Fatalf("reasons = %v, want [%s]", reasons, biz.ReasonRuleExpression)
 	}
+}
+
+func setEligibilityProfileDigest(request *algov1.EvaluateEligibilityRequest) {
+	mapped := fromPbEligibilityRequest(request)
+	request.ProfileSnapshotSha256 = biz.EligibilityProfileSnapshotSHA256(
+		mapped.ConfirmedProfileVersion,
+		mapped.ProfileFacts,
+	)
 }
 
 func TestService_CheckConstraints(t *testing.T) {

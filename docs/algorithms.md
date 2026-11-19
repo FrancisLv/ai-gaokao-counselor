@@ -272,8 +272,11 @@ MISSING_REQUIRED_FACT、FAIL、BLOCKED 和未被资格结果覆盖的候选均�
 
 `in_current_plan` 由 `EstimateProb` 的候选专业明细提供，取值来自报考年
 `enrollment_plan` 的专业代码成员检查；历史录取专业不因曾存在于上一年计划而自动成为
-当年可报专业。资格字段目录以 release 为边界冻结；规则审查/发布前执行与运行时相同的
-受限 AST、字段 allowlist、literal 类型和来源证据静态校验。任何声明的
+当年可报专业。`SUBJECT_MATCH` 必须显式携带规则自身的 `subject_req`，不得回退到
+候选上一年文本。资格字段目录以 release 为边界冻结；规则审查/发布前执行与运行时相同的
+受限 AST、字段 allowlist、literal 类型和来源证据静态校验。请求还必须携带由
+`confirmed_profile_version + profile_facts` 生成的稳定 SHA-256 摘要，并由算法复核；
+省年科批不在绑定 release 的 `release_scope` 内时返回稳定阻断。任何声明的
 `RuleCoverage=NONE/PARTIAL` 都会阻止 `V1_FORMAL`；非本科批返回
 `BATCH_UNSUPPORTED`，缺来源规则返回 `RULE_SOURCE_MISSING`。
 

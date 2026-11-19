@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/choucisan/ai-gaokao-counselor/internal/algo/biz"
+	"github.com/choucisan/ai-gaokao-counselor/internal/algo/data/dbgen"
 )
 
 type eligibilityRepo struct {
@@ -18,7 +19,11 @@ func NewEligibilityRepo(d *Data) biz.EligibilityRepo {
 	return &eligibilityRepo{d: d}
 }
 
-func (r *eligibilityRepo) LoadEligibilityRuleSet(ctx context.Context, releaseID string) (biz.EligibilityRuleSet, error) {
+func (r *eligibilityRepo) LoadEligibilityRuleSet(
+	ctx context.Context,
+	releaseID string,
+	scope biz.EligibilityScope,
+) (biz.EligibilityRuleSet, error) {
 	status, err := r.d.queries.GetEligibilityRelease(ctx, releaseID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return biz.EligibilityRuleSet{}, nil
@@ -28,6 +33,19 @@ func (r *eligibilityRepo) LoadEligibilityRuleSet(ctx context.Context, releaseID 
 	}
 	if status != "PUBLISHED" {
 		return biz.EligibilityRuleSet{ReleaseStatus: status}, nil
+	}
+	scopeSupported, err := r.d.queries.EligibilityReleaseSupportsScope(
+		ctx,
+		dbgen.EligibilityReleaseSupportsScopeParams{
+			ReleaseID:       releaseID,
+			Province:        scope.Province,
+			ApplicationYear: int32(scope.ApplicationYear),
+			Category:        scope.Category,
+			Batch:           scope.Batch,
+		},
+	)
+	if err != nil {
+		return biz.EligibilityRuleSet{}, err
 	}
 
 	ruleRows, err := r.d.queries.ListPublishedEligibilityRules(ctx, releaseID)
@@ -124,11 +142,12 @@ func (r *eligibilityRepo) LoadEligibilityRuleSet(ctx context.Context, releaseID 
 		})
 	}
 	return biz.EligibilityRuleSet{
-		ReleaseStatus: status,
-		Rules:         rules,
-		Coverage:      coverage,
-		ProfileFields: profileFields,
-		RevokedRules:  revokedRules,
+		ReleaseStatus:         status,
+		Rules:                 rules,
+		Coverage:              coverage,
+		ProfileFields:         profileFields,
+		RevokedRules:          revokedRules,
+		ReleaseScopeSupported: scopeSupported,
 	}, nil
 }
 
