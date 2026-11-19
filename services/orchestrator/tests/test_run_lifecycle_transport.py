@@ -452,6 +452,17 @@ class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
             view.result_preview.stable_candidates[0].candidate.university_code,
             "U001",
         )
+        self.assertEqual(
+            view.result_preview.eligibility.evidence_bundle_id,
+            "eligibility:test",
+        )
+        self.assertTrue(
+            view.result_preview.eligibility_gate.formal_eligibility_ready
+        )
+        self.assertEqual(
+            list(view.result_preview.eligibility_gate.eligible_group_keys),
+            ["U001|01"],
+        )
         self.assertEqual(result_event.result, view.result_preview)
 
     async def test_grpc_error_event_has_a_typed_stable_reason(self):

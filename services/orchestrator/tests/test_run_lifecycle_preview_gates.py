@@ -108,25 +108,33 @@ class PreviewGateLifecycleTests(RunLifecyclePostgresTest):
             ["RankConvert", "EstimateProb"],
         )
 
-    async def test_constraints_cannot_inject_a_candidate_outside_estimate_prob(self):
+    async def test_eligibility_cannot_inject_a_candidate_outside_estimate_prob(self):
         class CandidateInjectionAlgo(FakeAlgoClient):
-            async def CheckConstraints(self, request):
-                self.calls.append(("CheckConstraints", request))
-                injected = algo_pb2.CandidateWithProb(
-                    candidate=algo_pb2.Candidate(
-                        university_code="U999",
-                        university_name="注入大学",
-                        major_group="99",
+            async def EvaluateEligibility(self, request):
+                self.calls.append(("EvaluateEligibility", request))
+                return algo_pb2.EvaluateEligibilityReply(
+                    status=(
+                        algo_pb2.EligibilityResultStatus
+                        .ELIGIBILITY_RESULT_STATUS_COMPLETE
                     ),
-                    prob=algo_pb2.ProbEstimate(
-                        probability=0.5,
-                        method="weighted_hit",
-                        data_years=3,
-                        category="稳",
-                    ),
-                )
-                return algo_pb2.CheckConstraintsReply(
-                    kept=[self.candidate, injected]
+                    groups=[
+                        algo_pb2.GroupEligibility(
+                            group_key="U999|99",
+                            status=(
+                                algo_pb2.GroupEligibilityStatus
+                                .GROUP_ELIGIBILITY_STATUS_PASS
+                            ),
+                            majors=[
+                                algo_pb2.MajorEligibility(
+                                    major_code="M99",
+                                    status=(
+                                        algo_pb2.MajorEligibilityStatus
+                                        .MAJOR_ELIGIBILITY_STATUS_PASS
+                                    ),
+                                )
+                            ],
+                        )
+                    ],
                 )
 
         algo = CandidateInjectionAlgo()
@@ -159,31 +167,56 @@ class PreviewGateLifecycleTests(RunLifecyclePostgresTest):
             + str(completed.result_payload["unverified_conditions"]),
         )
 
-    async def test_rejected_candidates_cannot_inject_unestimated_identities(self):
+    async def test_eligibility_unknown_groups_cannot_inject_unestimated_identities(self):
         class RejectedInjectionAlgo(FakeAlgoClient):
-            async def CheckConstraints(self, request):
-                self.calls.append(("CheckConstraints", request))
-                injected = algo_pb2.CandidateWithProb(
-                    candidate=algo_pb2.Candidate(
-                        university_code="U998",
-                        major_group="98",
+            async def EvaluateEligibility(self, request):
+                self.calls.append(("EvaluateEligibility", request))
+                candidate = request.candidate_groups[0]
+                return algo_pb2.EvaluateEligibilityReply(
+                    status=(
+                        algo_pb2.EligibilityResultStatus
+                        .ELIGIBILITY_RESULT_STATUS_PARTIAL
                     ),
-                    prob=algo_pb2.ProbEstimate(
-                        probability=0.4,
-                        method="weighted_hit",
-                        data_years=3,
-                        category="冲",
-                    ),
-                )
-                return algo_pb2.CheckConstraintsReply(
-                    kept=[self.candidate],
-                    rejected=[
-                        algo_pb2.RejectedCandidate(
-                            candidate=injected,
-                            rule="subject_req",
-                            reason="注入候选",
-                        )
+                    groups=[
+                        algo_pb2.GroupEligibility(
+                            group_key=(
+                                f"{candidate.university_code}|"
+                                f"{candidate.major_group}"
+                            ),
+                            status=(
+                                algo_pb2.GroupEligibilityStatus
+                                .GROUP_ELIGIBILITY_STATUS_PASS
+                            ),
+                            majors=[
+                                algo_pb2.MajorEligibility(
+                                    major_code=major.major_code,
+                                    status=(
+                                        algo_pb2.MajorEligibilityStatus
+                                        .MAJOR_ELIGIBILITY_STATUS_PASS
+                                    ),
+                                )
+                                for major in candidate.majors
+                            ],
+                        ),
+                        algo_pb2.GroupEligibility(
+                            group_key="U998|98",
+                            status=(
+                                algo_pb2.GroupEligibilityStatus
+                                .GROUP_ELIGIBILITY_STATUS_UNKNOWN
+                            ),
+                            majors=[
+                                algo_pb2.MajorEligibility(
+                                    major_code="M98",
+                                    status=(
+                                        algo_pb2.MajorEligibilityStatus
+                                        .MAJOR_ELIGIBILITY_STATUS_UNKNOWN
+                                    ),
+                                    unknown_reasons=["RULE_COVERAGE_MISSING"],
+                                )
+                            ],
+                        ),
                     ],
+                    diagnostics=algo_pb2.EligibilityDiagnostics(unknown_count=1),
                 )
 
         algo = RejectedInjectionAlgo()
@@ -661,6 +694,8 @@ class PreviewGateLifecycleTests(RunLifecyclePostgresTest):
             "stable_total",
             "safe_total",
             "audit_basis",
+            "eligibility",
+            "eligibility_gate",
             "kept_candidates",
             "rejected_candidates",
             "wishlist",
@@ -742,16 +777,37 @@ class PreviewGateLifecycleTests(RunLifecyclePostgresTest):
         )
 
         class AllFilteredAlgo(FakeAlgoClient):
-            async def CheckConstraints(self, request):
-                self.calls.append(("CheckConstraints", request))
-                return algo_pb2.CheckConstraintsReply(
-                    rejected=[
-                        algo_pb2.RejectedCandidate(
-                            candidate=self.candidate,
-                            rule="subject_req",
-                            reason="选科不符",
+            async def EvaluateEligibility(self, request):
+                self.calls.append(("EvaluateEligibility", request))
+                candidate = request.candidate_groups[0]
+                return algo_pb2.EvaluateEligibilityReply(
+                    status=(
+                        algo_pb2.EligibilityResultStatus
+                        .ELIGIBILITY_RESULT_STATUS_COMPLETE
+                    ),
+                    groups=[
+                        algo_pb2.GroupEligibility(
+                            group_key=(
+                                f"{candidate.university_code}|"
+                                f"{candidate.major_group}"
+                            ),
+                            status=(
+                                algo_pb2.GroupEligibilityStatus
+                                .GROUP_ELIGIBILITY_STATUS_FAIL
+                            ),
+                            majors=[
+                                algo_pb2.MajorEligibility(
+                                    major_code=major.major_code,
+                                    status=(
+                                        algo_pb2.MajorEligibilityStatus
+                                        .MAJOR_ELIGIBILITY_STATUS_FAIL
+                                    ),
+                                    failure_rule_keys=["subject_req"],
+                                )
+                                for major in candidate.majors
+                            ],
                         )
-                    ]
+                    ],
                 )
 
             async def OptimizeWishlist(self, request):
@@ -816,7 +872,7 @@ class PreviewGateLifecycleTests(RunLifecyclePostgresTest):
         self.assertIsNone(failed.result_payload)
         self.assertEqual(
             [name for name, _ in algo.calls],
-            ["RankConvert", "EstimateProb", "CheckConstraints"],
+            ["RankConvert", "EstimateProb", "EvaluateEligibility"],
         )
 
     async def _wait_for_state(self, lifecycle, run_id, target: str):

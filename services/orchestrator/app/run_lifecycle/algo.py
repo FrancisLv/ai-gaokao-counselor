@@ -19,6 +19,9 @@ class AlgoClient(Protocol):
     async def CheckConstraints(self, request):
         ...
 
+    async def EvaluateEligibility(self, request):
+        ...
+
     async def OptimizeWishlist(self, request):
         ...
 
@@ -50,6 +53,9 @@ class GrpcAlgoClient:
 
     async def CheckConstraints(self, request):
         return await self._stub.CheckConstraints(request, timeout=self._timeout)
+
+    async def EvaluateEligibility(self, request):
+        return await self._stub.EvaluateEligibility(request, timeout=self._timeout)
 
     async def OptimizeWishlist(self, request):
         return await self._stub.OptimizeWishlist(request, timeout=self._timeout)

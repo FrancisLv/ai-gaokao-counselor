@@ -970,6 +970,7 @@ class RunLifecycle:
         target_state: str,
         stage: str,
         terminal_reason: str | None = None,
+        error_message: str | None = None,
     ) -> dict[str, Any] | None:
         """释放当前 lease；仅当前 owner/epoch 可以提交。"""
         now = self._clock()
@@ -1032,6 +1033,7 @@ class RunLifecycle:
                 "from_state": "RUNNING",
                 "to_state": target_state,
                 "terminal_reason": terminal_reason,
+                **({"message": error_message} if error_message else {}),
             },
         )
         return dict(parked)
@@ -1578,57 +1580,54 @@ class RunLifecycle:
                         "EstimateProb 返回重复候选",
                     )
                 source_by_identity[identity] = item.prob.probability
-            checked = await self._algo_client.CheckConstraints(
-                algo_pb2.CheckConstraintsRequest(
+            eligibility = await self._algo_client.EvaluateEligibility(
+                algo_pb2.EvaluateEligibilityRequest(
                     trace=trace,
-                    profile=user_profile,
-                    candidates=source_candidates,
-                    subjects=algo_input["subjects"],
-                    category=algo_input["category"],
                     release_id=release_id,
+                    confirmed_profile_version=str(profile_version),
+                    profile_lifecycle=(
+                        algo_pb2.EligibilityProfileLifecycle
+                        .ELIGIBILITY_PROFILE_LIFECYCLE_CONFIRMED
+                    ),
+                    scope=algo_pb2.EligibilityScope(
+                        province=algo_input["province"],
+                        application_year=int(algo_input["year"]),
+                        category=algo_input["category"],
+                        batch=algo_input["batch"],
+                    ),
+                    profile_facts=[
+                        self._eligibility_profile_fact(fact)
+                        for fact in self._profile.ToEligibilityFacts(
+                            lifecycle=revision["lifecycle"],
+                            fields=revision["fields"],
+                        )
+                    ],
+                    candidate_groups=self._eligibility_candidate_groups(
+                        source_candidates
+                    ),
                 )
             )
-            if not checked.kept:
+            eligibility_gate = self._validate_eligibility_result(
+                eligibility,
+                source_candidates=source_candidates,
+            )
+            eligible_identities = set(
+                eligibility_gate["eligible_group_keys"]
+            )
+            eligible_candidates = [
+                item
+                for item in source_candidates
+                if self._eligibility_group_key(item) in eligible_identities
+            ]
+            if not eligible_candidates:
                 raise RunLifecycleError(
                     "NO_RELIABLE_DATA",
-                    "全部候选均被确定性约束过滤",
+                    "全部候选均未通过结构化资格规则",
                 )
-            kept_by_identity: dict[tuple[str, str], float] = {}
-            for item in checked.kept:
-                identity = self._candidate_identity(item)
-                if identity in kept_by_identity:
-                    raise RunLifecycleError(
-                        "VALIDATION_FAILED",
-                        "CheckConstraints 返回重复候选",
-                    )
-                if (
-                    identity not in source_by_identity
-                    or source_by_identity[identity] != item.prob.probability
-                ):
-                    raise RunLifecycleError(
-                        "VALIDATION_FAILED",
-                        "约束过滤引入新候选或改写概率",
-                    )
-                kept_by_identity[identity] = item.prob.probability
-            rejected_identities: set[tuple[str, str]] = set()
-            for item in checked.rejected:
-                identity = self._candidate_identity(item.candidate)
-                if (
-                    identity in rejected_identities
-                    or identity in kept_by_identity
-                    or identity not in source_by_identity
-                    or source_by_identity[identity]
-                    != item.candidate.prob.probability
-                ):
-                    raise RunLifecycleError(
-                        "VALIDATION_FAILED",
-                        "约束拒绝结果引入新候选、重复候选或改写概率",
-                    )
-                rejected_identities.add(identity)
             optimized = await self._algo_client.OptimizeWishlist(
                 algo_pb2.OptimizeWishlistRequest(
                     trace=trace,
-                    candidates=list(checked.kept),
+                    candidates=eligible_candidates,
                     profile=user_profile,
                     release_id=release_id,
                 )
@@ -1647,8 +1646,10 @@ class RunLifecycle:
             identity = self._candidate_identity(item.cwp)
             if (
                 identity in optimized_identities
-                or identity not in kept_by_identity
-                or kept_by_identity[identity] != item.cwp.prob.probability
+                or identity not in source_by_identity
+                or self._eligibility_group_key(item.cwp)
+                not in eligible_identities
+                or source_by_identity[identity] != item.cwp.prob.probability
             ):
                 raise RunLifecycleError(
                     "VALIDATION_FAILED",
@@ -1662,7 +1663,9 @@ class RunLifecycle:
             row=row,
             rank=rank,
             estimate=estimate,
-            checked=checked,
+            eligibility=eligibility,
+            eligibility_gate=eligibility_gate,
+            eligible_candidates=eligible_candidates,
             optimized=optimized,
         )
         return preview
@@ -1685,13 +1688,294 @@ class RunLifecycle:
         return identity
 
     @staticmethod
+    def _eligibility_group_key(candidate) -> str:
+        if not candidate.HasField("candidate"):
+            raise RunLifecycleError("VALIDATION_FAILED", "候选缺少身份")
+        identity = (
+            candidate.candidate.university_code,
+            candidate.candidate.major_group,
+        )
+        if not all(identity):
+            raise RunLifecycleError("VALIDATION_FAILED", "候选身份不完整")
+        return "|".join(identity)
+
+    @staticmethod
+    def _eligibility_profile_fact(fact: dict[str, Any]):
+        state_name = "ELIGIBILITY_PROFILE_FIELD_STATE_" + str(fact["state"])
+        try:
+            state = algo_pb2.EligibilityProfileFieldState.Value(state_name)
+        except ValueError as exc:
+            raise RunLifecycleError(
+                "PROFILE_INVALID_VALUE",
+                f"资格字段状态非法: {fact['state']}",
+            ) from exc
+        converted = algo_pb2.EligibilityProfileFact(
+            field_key=str(fact["field_key"]),
+            state=state,
+        )
+        value = fact.get("value")
+        if isinstance(value, list):
+            converted.string_values.extend(value)
+        elif isinstance(value, int) and not isinstance(value, bool):
+            converted.int_value = value
+        elif isinstance(value, str):
+            converted.string_value = value
+        elif value is not None:
+            raise RunLifecycleError(
+                "PROFILE_INVALID_VALUE",
+                f"资格字段值类型非法: {fact['field_key']}",
+            )
+        return converted
+
+    @staticmethod
+    def _eligibility_candidate_groups(candidates):
+        groups = []
+        for item in candidates:
+            candidate = item.candidate
+            if not candidate.majors:
+                raise RunLifecycleError(
+                    "VALIDATION_FAILED",
+                    "资格评估候选缺少专业明细",
+                )
+            seen_major_codes: set[str] = set()
+            majors = []
+            for major in candidate.majors:
+                if not major.major_code or major.major_code in seen_major_codes:
+                    raise RunLifecycleError(
+                        "VALIDATION_FAILED",
+                        "资格评估专业身份为空或重复",
+                    )
+                seen_major_codes.add(major.major_code)
+                majors.append(
+                    algo_pb2.EligibilityCandidateMajor(
+                        major_code=major.major_code,
+                        major_name=major.major_name,
+                        subject_requirement=major.subject_req,
+                        in_current_plan=True,
+                    )
+                )
+            groups.append(
+                algo_pb2.EligibilityCandidateGroup(
+                    university_id=candidate.university_id,
+                    university_code=candidate.university_code,
+                    university_name=candidate.university_name,
+                    major_group=candidate.major_group,
+                    majors=sorted(majors, key=lambda major: major.major_code),
+                )
+            )
+        return groups
+
+    @classmethod
+    def _validate_eligibility_result(
+        cls,
+        eligibility,
+        *,
+        source_candidates,
+    ) -> dict[str, Any]:
+        status = eligibility.status
+        blocked = (
+            algo_pb2.EligibilityResultStatus
+            .ELIGIBILITY_RESULT_STATUS_BLOCKED
+        )
+        complete = (
+            algo_pb2.EligibilityResultStatus
+            .ELIGIBILITY_RESULT_STATUS_COMPLETE
+        )
+        partial = (
+            algo_pb2.EligibilityResultStatus
+            .ELIGIBILITY_RESULT_STATUS_PARTIAL
+        )
+        if status == blocked:
+            reasons = {
+                reason
+                for group in eligibility.groups
+                for major in group.majors
+                for reason in major.unknown_reasons
+            }
+            if "RELEASE_REVOKED" in reasons:
+                raise RunLifecycleError("RELEASE_REVOKED")
+            detail = ",".join(sorted(reasons)) or "资格规则返回阻断"
+            raise RunLifecycleError("VALIDATION_FAILED", detail)
+        if status not in {complete, partial}:
+            raise RunLifecycleError(
+                "VALIDATION_FAILED",
+                "资格评估返回未定义状态",
+            )
+        if not eligibility.groups:
+            raise RunLifecycleError(
+                "NO_RELIABLE_DATA",
+                "资格评估未返回候选组",
+            )
+
+        source_major_codes: dict[str, set[str]] = {}
+        for item in source_candidates:
+            key = cls._eligibility_group_key(item)
+            source_major_codes[key] = {
+                major.major_code for major in item.candidate.majors
+            }
+        source_keys = set(source_major_codes)
+
+        result_by_key = {}
+        for group in eligibility.groups:
+            if not group.group_key or group.group_key in result_by_key:
+                raise RunLifecycleError(
+                    "VALIDATION_FAILED",
+                    "资格结果包含空或重复候选组",
+                )
+            if group.group_key not in source_keys:
+                raise RunLifecycleError(
+                    "VALIDATION_FAILED",
+                    "资格结果引入未估计候选组",
+                )
+            major_codes = [major.major_code for major in group.majors]
+            if (
+                not major_codes
+                or any(not code for code in major_codes)
+                or len(major_codes) != len(set(major_codes))
+                or set(major_codes) != source_major_codes[group.group_key]
+            ):
+                raise RunLifecycleError(
+                    "VALIDATION_FAILED",
+                    "资格结果专业身份与估计候选不一致",
+                )
+            if any(
+                major.status
+                not in {
+                    algo_pb2.MajorEligibilityStatus
+                    .MAJOR_ELIGIBILITY_STATUS_PASS,
+                    algo_pb2.MajorEligibilityStatus
+                    .MAJOR_ELIGIBILITY_STATUS_FAIL,
+                    algo_pb2.MajorEligibilityStatus
+                    .MAJOR_ELIGIBILITY_STATUS_UNKNOWN,
+                    algo_pb2.MajorEligibilityStatus
+                    .MAJOR_ELIGIBILITY_STATUS_NOT_APPLICABLE,
+                    algo_pb2.MajorEligibilityStatus
+                    .MAJOR_ELIGIBILITY_STATUS_MISSING_REQUIRED_FACT,
+                }
+                for major in group.majors
+            ):
+                raise RunLifecycleError(
+                    "VALIDATION_FAILED",
+                    "资格结果包含未定义专业状态",
+                )
+            result_by_key[group.group_key] = group
+        if set(result_by_key) != source_keys:
+            raise RunLifecycleError(
+                "VALIDATION_FAILED",
+                "资格结果遗漏估计候选组",
+            )
+
+        pass_status = algo_pb2.MajorEligibilityStatus.MAJOR_ELIGIBILITY_STATUS_PASS
+        unknown_major_statuses = {
+            algo_pb2.MajorEligibilityStatus.MAJOR_ELIGIBILITY_STATUS_UNKNOWN,
+            algo_pb2.MajorEligibilityStatus
+            .MAJOR_ELIGIBILITY_STATUS_MISSING_REQUIRED_FACT,
+        }
+        group_pass = algo_pb2.GroupEligibilityStatus.GROUP_ELIGIBILITY_STATUS_PASS
+        group_partial = (
+            algo_pb2.GroupEligibilityStatus
+            .GROUP_ELIGIBILITY_STATUS_PASS_PARTIAL
+        )
+        group_fail = algo_pb2.GroupEligibilityStatus.GROUP_ELIGIBILITY_STATUS_FAIL
+        group_unknown = (
+            algo_pb2.GroupEligibilityStatus
+            .GROUP_ELIGIBILITY_STATUS_UNKNOWN
+        )
+        eligible_keys = []
+        restricted_keys = []
+        unknown_keys = []
+        failed_keys = []
+        has_unknown_or_missing = False
+        for key, group in result_by_key.items():
+            major_statuses = [major.status for major in group.majors]
+            group_has_unknown = any(
+                status in unknown_major_statuses for status in major_statuses
+            )
+            has_unknown_or_missing = has_unknown_or_missing or group_has_unknown
+            if group.status == group_pass:
+                if any(status != pass_status for status in major_statuses):
+                    raise RunLifecycleError(
+                        "VALIDATION_FAILED",
+                        "PASS 组包含非 PASS 专业",
+                    )
+                eligible_keys.append(key)
+            elif group.status == group_partial:
+                if (
+                    pass_status not in major_statuses
+                    or group_has_unknown
+                    or any(
+                        status
+                        not in {
+                            pass_status,
+                            algo_pb2.MajorEligibilityStatus
+                            .MAJOR_ELIGIBILITY_STATUS_FAIL,
+                            algo_pb2.MajorEligibilityStatus
+                            .MAJOR_ELIGIBILITY_STATUS_NOT_APPLICABLE,
+                        }
+                        for status in major_statuses
+                    )
+                ):
+                    raise RunLifecycleError(
+                        "VALIDATION_FAILED",
+                        "PASS_PARTIAL 组状态不合法",
+                    )
+                eligible_keys.append(key)
+                restricted_keys.append(key)
+            elif group.status == group_fail:
+                if pass_status in major_statuses or group_has_unknown:
+                    raise RunLifecycleError(
+                        "VALIDATION_FAILED",
+                        "FAIL 组状态不合法",
+                    )
+                failed_keys.append(key)
+            elif group.status == group_unknown:
+                unknown_keys.append(key)
+            else:
+                raise RunLifecycleError(
+                    "VALIDATION_FAILED",
+                    "资格结果包含未定义组状态",
+                )
+
+        if status == complete and (
+            unknown_keys or has_unknown_or_missing
+        ):
+            raise RunLifecycleError(
+                "VALIDATION_FAILED",
+                "COMPLETE 资格结果仍包含 UNKNOWN",
+            )
+        if status == complete and eligibility.diagnostics.unknown_count != 0:
+            raise RunLifecycleError(
+                "VALIDATION_FAILED",
+                "COMPLETE 资格诊断仍包含 UNKNOWN",
+            )
+        if status == partial and eligibility.diagnostics.unknown_count == 0:
+            raise RunLifecycleError(
+                "VALIDATION_FAILED",
+                "PARTIAL 资格结果缺少 UNKNOWN 诊断",
+            )
+        if not eligible_keys:
+            raise RunLifecycleError(
+                "NO_RELIABLE_DATA",
+                "没有通过资格的候选组",
+            )
+        return {
+            "formal_eligibility_ready": status == complete,
+            "eligible_group_keys": sorted(eligible_keys),
+            "restricted_group_keys": sorted(restricted_keys),
+            "unknown_group_keys": sorted(unknown_keys),
+            "failed_group_keys": sorted(failed_keys),
+        }
+
+    @staticmethod
     def _algorithm_preview_payload(
         *,
         result_version: UUID,
         row: dict[str, Any],
         rank,
         estimate,
-        checked,
+        eligibility,
+        eligibility_gate,
+        eligible_candidates,
         optimized,
     ) -> dict[str, Any]:
         message_options = {
@@ -1720,23 +2004,18 @@ class RunLifecycle:
                 "detail": "候选与概率由 svc-algo 原样返回",
             },
             {
-                "key": "subject_constraints",
+                "key": "eligibility",
                 "status": "CHECKED",
-                "detail": "OptimizeWishlist 仅接收 CheckConstraints kept 候选",
+                "detail": (
+                    "OptimizeWishlist 仅接收 EvaluateEligibility "
+                    "PASS / PASS_PARTIAL 候选组"
+                ),
             },
         ]
         unverified_conditions = [
             {
                 "code": "CURRENT_YEAR_PLAN_IDENTITY",
                 "message": "尚未完整核验当年招生计划身份与组成员变化",
-            },
-            {
-                "code": "FULL_ELIGIBILITY_RULES",
-                "message": "尚未实现完整当年资格规则链",
-            },
-            {
-                "code": "CONDITIONAL_FACTS",
-                "message": "体检、单科、语种、性别与专项计划条件未完整核验",
             },
             {
                 "code": "ONLINE_RAG_EVIDENCE",
@@ -1780,12 +2059,13 @@ class RunLifecycle:
             "stable_total": estimate.stable_total,
             "safe_total": estimate.safe_total,
             "audit_basis": MessageToDict(estimate.basis, **message_options),
+            "eligibility": MessageToDict(eligibility, **message_options),
+            "eligibility_gate": eligibility_gate,
             "kept_candidates": [
-                MessageToDict(item, **message_options) for item in checked.kept
+                MessageToDict(item, **message_options)
+                for item in eligible_candidates
             ],
-            "rejected_candidates": [
-                MessageToDict(item, **message_options) for item in checked.rejected
-            ],
+            "rejected_candidates": [],
             "wishlist": MessageToDict(optimized.wishlist, **message_options),
             "algorithm_method": estimate.basis.method,
             "algorithm_config_version": row["release_id"],
@@ -1987,6 +2267,7 @@ class RunLifecycle:
                         target_state="FAILED",
                         stage=row["stage"],
                         terminal_reason=exc.reason,
+                        error_message=str(exc),
                     )
                 return
 

@@ -262,6 +262,14 @@ PASS_PARTIAL 必须保留受限专业明细，不得宣称整组可报。
 报考年、科类或批次时返回 `ELIGIBILITY_SCOPE_INVALID` 并阻断，不得形成 PASS。
 组、专业和规则最终均按稳定键排序，保证同输入重复评估逐项一致。
 
+RunLifecycle 在确认画像后，以 run 绑定的 `release_id`、CONFIRMED revision 的不可变
+事实快照和 `EstimateProb` 返回的当前候选组调用 `EvaluateEligibility`。只有
+`PASS` 或 `PASS_PARTIAL` 候选组可以进入 `OptimizeWishlist`；UNKNOWN、
+MISSING_REQUIRED_FACT、FAIL、BLOCKED 和未被资格结果覆盖的候选均不得进入正式资格
+集合。COMPLETE 才表示资格事实没有 UNKNOWN，可作为正式资格输入；PARTIAL 保留为
+诊断结果并明确 `formal_eligibility_ready=false`。PASS_PARTIAL 可以进入优化，但必须
+在结果中保留受限专业。资格结果不修改候选身份、概率或优化顺序。
+
 ---
 
 ## 11. 与代码的对应关系
