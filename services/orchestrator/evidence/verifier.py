@@ -4,8 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from collections import Counter
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import hashlib
+import math
+import re
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -39,6 +41,25 @@ class StructuredEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class DerivedEvidence:
+    operation_id: str
+    algorithm: str
+    algorithm_version: str
+    config_sha256: str
+    input_snapshot_sha256: str
+    profile_version: str
+    release_id: str
+    sample_years: tuple[int, ...]
+    output_field: str
+    output_value: str | int | float | Decimal | bool | None
+    unit: str | None
+    precision: int | None
+    artifact_sha256: str
+    assumptions: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class EvidenceRef:
     evidence_id: str
     evidence_type: str
@@ -48,15 +69,18 @@ class EvidenceRef:
     producer_version: str
     document: DocumentEvidence | None = None
     structured: StructuredEvidence | None = None
+    derived: DerivedEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class NormalizedFact:
     subject: str
     predicate: str
-    object: str | int | float | bool | None
+    object: str | int | float | Decimal | bool | None
     unit: str | None
     source_year: int | None = None
+    sample_years: tuple[int, ...] = ()
+    precision: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,12 +155,20 @@ class StructuredEvidenceAuthority(Protocol):
     ) -> StructuredEvidence | None: ...
 
 
+class DerivedEvidenceRecomputer(Protocol):
+    def recompute(
+        self,
+        evidence: DerivedEvidence,
+    ) -> DerivedEvidence | None: ...
+
+
 def VerifyPackage(
     package: EvidencePackage,
     *,
     today: date | None = None,
     entailment_verifier: EntailmentVerifier | None = None,
     structured_authority: StructuredEvidenceAuthority | None = None,
+    derived_recomputer: DerivedEvidenceRecomputer | None = None,
 ) -> VerificationReport:
     checked_today = today or datetime.now(ZoneInfo("Asia/Shanghai")).date()
     package_reason = _package_preflight(package)
@@ -196,6 +228,7 @@ def VerifyPackage(
                 checked_today,
                 entailment_verifier,
                 structured_authority,
+                derived_recomputer,
             )
         report_claims.append(
             ClaimVerification(
@@ -227,6 +260,7 @@ def _verify_claim(
     today: date,
     entailment_verifier: EntailmentVerifier | None,
     structured_authority: StructuredEvidenceAuthority | None,
+    derived_recomputer: DerivedEvidenceRecomputer | None,
 ) -> tuple[str, str, bool]:
     if claim.claim_type == "DOCUMENT_FACT":
         return _verify_document_claim(
@@ -244,6 +278,14 @@ def _verify_claim(
             refs,
             registry,
             structured_authority,
+        )
+    if claim.claim_type == "DERIVED_FACT":
+        return _verify_derived_claim(
+            package,
+            claim,
+            refs,
+            registry,
+            derived_recomputer,
         )
     return "UNVERIFIABLE", "CLAIM_UNSUPPORTED", True
 
@@ -394,6 +436,77 @@ def _verify_structured_claim(
     return "VERIFIED", "CLAIM_VERIFIED", True
 
 
+def _verify_derived_claim(
+    package: EvidencePackage,
+    claim: Claim,
+    refs: tuple[EvidenceRef, ...],
+    registry: dict[str, EvidenceRef],
+    derived_recomputer: DerivedEvidenceRecomputer | None,
+) -> tuple[str, str, bool]:
+    if not package.verifier_version:
+        return "UNVERIFIABLE", "VERIFIER_VERSION_MISSING", True
+    if not refs:
+        return "UNVERIFIABLE", "CLAIM_UNSUPPORTED", True
+    if not _valid_derived_claim_identity(claim):
+        return "UNVERIFIABLE", "DERIVED_IDENTITY_MISSING", True
+    if _derived_claim_exceeds_boundary(claim):
+        return "CONTRADICTED", "DERIVED_PROMISE_OUT_OF_BOUNDS", True
+
+    for ref in refs:
+        if not _valid_evidence_ref(ref):
+            return "UNVERIFIABLE", "EVIDENCE_NOT_FOUND", True
+        registered = registry.get(ref.evidence_id)
+        if registered is None or not _valid_evidence_ref(registered):
+            return "UNVERIFIABLE", "EVIDENCE_NOT_FOUND", True
+        if (
+            ref.release_id != package.release_id
+            or registered.release_id != package.release_id
+        ):
+            return "CONTRADICTED", "EVIDENCE_RELEASE_MISMATCH", True
+        if (
+            ref.evidence_type != "DERIVED"
+            or registered.evidence_type != "DERIVED"
+        ):
+            return "UNVERIFIABLE", "CLAIM_UNSUPPORTED", True
+        evidence = registered.derived
+        if evidence is None or not _valid_derived_identity(evidence):
+            return "UNVERIFIABLE", "EVIDENCE_NOT_FOUND", True
+        if (
+            registered.content_sha256 != ref.content_sha256
+            or ref.content_sha256 != evidence.artifact_sha256
+        ):
+            return "CONTRADICTED", "EVIDENCE_HASH_MISMATCH", True
+        if evidence.release_id != package.release_id:
+            return "CONTRADICTED", "EVIDENCE_RELEASE_MISMATCH", True
+        if evidence.profile_version != package.profile_version:
+            return "CONTRADICTED", "DERIVED_INPUT_MISMATCH", True
+        if derived_recomputer is not None:
+            recomputed = derived_recomputer.recompute(evidence)
+            if recomputed is not None:
+                if not _valid_derived_identity(recomputed):
+                    return "UNVERIFIABLE", "EVIDENCE_NOT_FOUND", True
+                if not _same_derived_identity(evidence, recomputed):
+                    return "CONTRADICTED", "DERIVED_INPUT_MISMATCH", True
+                evidence = recomputed
+        if evidence.output_field != claim.normalized.predicate:
+            return "CONTRADICTED", "DERIVED_VALUE_MISMATCH", True
+        if (
+            _canonical_derived_value(evidence.output_value)
+            != _canonical_derived_value(claim.normalized.object)
+            or evidence.unit != claim.normalized.unit
+            or evidence.precision != claim.normalized.precision
+        ):
+            return "CONTRADICTED", "DERIVED_VALUE_MISMATCH", True
+        if (
+            _normalize_sample_years(evidence.sample_years)
+            != _normalize_sample_years(claim.normalized.sample_years)
+        ):
+            return "CONTRADICTED", "DERIVED_VALUE_MISMATCH", True
+        if not _derived_render_bindings_match(claim, evidence):
+            return "CONTRADICTED", "CLAIM_RENDER_MISMATCH", True
+    return "VERIFIED", "CLAIM_VERIFIED", True
+
+
 def _package_preflight(package: EvidencePackage) -> str | None:
     if not package.verifier_version:
         return "VERIFIER_VERSION_MISSING"
@@ -420,6 +533,11 @@ def _package_preflight(package: EvidencePackage) -> str | None:
         if (
             ref.document is not None
             and ref.document.release_id != package.release_id
+        ):
+            return "EVIDENCE_RELEASE_MISMATCH"
+        if (
+            ref.derived is not None
+            and ref.derived.release_id != package.release_id
         ):
             return "EVIDENCE_RELEASE_MISMATCH"
         if (
@@ -480,6 +598,98 @@ def _valid_evidence_ref(ref: EvidenceRef) -> bool:
         and _is_sha256(ref.content_sha256)
         and bool(ref.producer_version)
         and ref.created_at.tzinfo is not None
+    )
+
+
+def _valid_derived_identity(evidence: DerivedEvidence) -> bool:
+    required = (
+        evidence.operation_id,
+        evidence.algorithm,
+        evidence.algorithm_version,
+        evidence.config_sha256,
+        evidence.input_snapshot_sha256,
+        evidence.profile_version,
+        evidence.release_id,
+        evidence.output_field,
+        evidence.artifact_sha256,
+    )
+    if not all(value.strip() for value in required):
+        return False
+    if not _is_sha256(evidence.config_sha256):
+        return False
+    if not _is_sha256(evidence.input_snapshot_sha256):
+        return False
+    if not _is_sha256(evidence.artifact_sha256):
+        return False
+    if not evidence.sample_years:
+        return False
+    if any(
+        not isinstance(year, int) or isinstance(year, bool)
+        for year in evidence.sample_years
+    ):
+        return False
+    if evidence.precision is None or evidence.precision < 0:
+        return False
+    if evidence.output_value is None or evidence.unit is None:
+        return False
+    if _canonical_derived_value(evidence.output_value)[0] == "unsupported":
+        return False
+    return True
+
+
+def _valid_derived_claim_identity(claim: Claim) -> bool:
+    if not claim.normalized.sample_years:
+        return False
+    if any(
+        not isinstance(year, int) or isinstance(year, bool)
+        for year in claim.normalized.sample_years
+    ):
+        return False
+    if claim.normalized.precision is None or claim.normalized.precision < 0:
+        return False
+    if claim.normalized.object is None or claim.normalized.unit is None:
+        return False
+    if _canonical_derived_value(claim.normalized.object)[0] == "unsupported":
+        return False
+    return True
+
+
+def _derived_claim_exceeds_boundary(claim: Claim) -> bool:
+    text = " ".join(
+        (
+            claim.normalized.subject,
+            claim.normalized.predicate,
+            str(claim.normalized.object or ""),
+            claim.rendered_text,
+        )
+    )
+    compact = re.sub(r"[\s，。！？、,.!?：:；;（）()]+", "", text)
+    allowed_negations = (
+        "不保证录取",
+        "不能保证录取",
+        "无法保证录取",
+        "不确保录取",
+        "不构成录取保证",
+        "不构成任何录取保证",
+        "不构成录取承诺",
+        "不构成任何录取承诺",
+        "并非录取承诺",
+        "不是录取承诺",
+        "非录取承诺",
+        "不代表保证录取",
+        "不承诺录取",
+    )
+    for phrase in allowed_negations:
+        compact = compact.replace(phrase, "")
+    forbidden_patterns = (
+        r"(?:保证|确保|承诺|必定|一定).{0,6}录取",
+        r"(?:100%|百分之百).{0,2}录取",
+        r"录取.{0,2}(?:保证|无忧)",
+        r"包录取",
+    )
+    return any(
+        re.search(pattern, compact)
+        for pattern in forbidden_patterns
     )
 
 
@@ -665,11 +875,66 @@ def _claim_supported_by_documents(
     return True
 
 
-def _sha256(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+def _same_derived_identity(
+    expected: DerivedEvidence,
+    actual: DerivedEvidence,
+) -> bool:
+    return (
+        actual.operation_id == expected.operation_id
+        and actual.algorithm == expected.algorithm
+        and actual.algorithm_version == expected.algorithm_version
+        and actual.config_sha256 == expected.config_sha256
+        and actual.input_snapshot_sha256 == expected.input_snapshot_sha256
+        and actual.profile_version == expected.profile_version
+        and actual.release_id == expected.release_id
+        and _normalize_sample_years(actual.sample_years)
+        == _normalize_sample_years(expected.sample_years)
+        and actual.output_field == expected.output_field
+        and actual.unit == expected.unit
+        and actual.precision == expected.precision
+        and actual.assumptions == expected.assumptions
+        and actual.warnings == expected.warnings
+    )
 
 
-def _canonical_scalar(value) -> tuple[str, str] | tuple[str, None]:
+def _derived_render_bindings_match(
+    claim: Claim,
+    evidence: DerivedEvidence,
+) -> bool:
+    expected = {
+        "normalized.object": _render_derived_value(
+            claim.normalized.object,
+            claim.normalized.precision,
+        ),
+        "normalized.unit": claim.normalized.unit or "",
+        "normalized.sample_years": "、".join(
+            str(year)
+            for year in _normalize_sample_years(
+                claim.normalized.sample_years
+            )
+        ),
+    }
+    by_path: dict[str, RenderedBinding] = {}
+    for binding in claim.rendered_bindings:
+        if binding.fact_path in by_path:
+            return False
+        by_path[binding.fact_path] = binding
+    for fact_path, rendered_text in expected.items():
+        binding = by_path.get(fact_path)
+        if binding is None:
+            return False
+        if binding.evidence_id not in {
+            ref.evidence_id for ref in claim.evidence_refs
+        }:
+            return False
+        if binding.rendered_text != rendered_text:
+            return False
+        if rendered_text and rendered_text not in claim.rendered_text:
+            return False
+    return evidence.output_field == claim.normalized.predicate
+
+
+def _canonical_scalar(value) -> tuple[str, str | None]:
     if value is None:
         return ("null", None)
     if isinstance(value, bool):
@@ -677,12 +942,48 @@ def _canonical_scalar(value) -> tuple[str, str] | tuple[str, None]:
     if isinstance(value, int):
         return ("int", str(value))
     if isinstance(value, Decimal):
+        if not value.is_finite():
+            return ("unsupported", None)
         return ("decimal", _plain_decimal(value))
     if isinstance(value, float):
+        if not math.isfinite(value):
+            return ("unsupported", None)
         return ("float", _plain_decimal(Decimal(repr(value))))
     if isinstance(value, str):
         return ("str", value)
-    return ("unsupported", repr(value))
+    return ("unsupported", None)
+
+
+def _render_derived_value(value, precision: int | None) -> str:
+    canonical_type, canonical_value = _canonical_derived_value(value)
+    if canonical_type == "number":
+        decimal = Decimal(canonical_value or "0")
+        if precision is not None:
+            return f"{decimal:.{precision}f}"
+        return _plain_decimal(decimal)
+    if canonical_type == "bool":
+        return "true" if canonical_value == "true" else "false"
+    if canonical_type == "null":
+        return "null"
+    return canonical_value or ""
+
+
+def _canonical_derived_value(value) -> tuple[str, str | None]:
+    canonical_type, canonical_value = _canonical_scalar(value)
+    if canonical_type in {"int", "decimal", "float"}:
+        return (
+            "number",
+            _plain_decimal(Decimal(canonical_value or "0")),
+        )
+    if canonical_type == "str" and canonical_value is not None:
+        try:
+            decimal = Decimal(canonical_value)
+        except InvalidOperation:
+            return canonical_type, canonical_value
+        if not decimal.is_finite():
+            return "unsupported", None
+        return "number", _plain_decimal(decimal)
+    return canonical_type, canonical_value
 
 
 def _render_scalar(value) -> str:
@@ -699,6 +1000,14 @@ def _plain_decimal(value: Decimal) -> str:
     if "." in rendered:
         rendered = rendered.rstrip("0").rstrip(".")
     return rendered or "0"
+
+
+def _normalize_sample_years(years: tuple[int, ...]) -> tuple[int, ...]:
+    return tuple(sorted(set(years)))
+
+
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _is_sha256(value: str) -> bool:

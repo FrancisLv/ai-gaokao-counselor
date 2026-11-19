@@ -280,6 +280,23 @@ MISSING_REQUIRED_FACT、FAIL、BLOCKED 和未被资格结果覆盖的候选均�
 `RuleCoverage=NONE/PARTIAL` 都会阻止 `V1_FORMAL`；非本科批返回
 `BATCH_UNSUPPORTED`，缺来源规则返回 `RULE_SOURCE_MISSING`。
 
+### 10.1 派生事实校验口径
+
+概率、位次、效用、滑档率和期望满意度等派生 Claim 不读取章程原文作真值，而是通过
+`VerifyPackage` 解析 `DERIVED` 类型的 `DerivedEvidence`。证据必须绑定 operation、
+算法及版本、配置 hash、输入快照 hash、Profile version、`release_id`、样本年份、
+输出字段/值、单位、精度、不可变产物 hash、假设和告警。
+
+具备确定性重算条件时，`DerivedEvidenceRecomputer` 的重算结果优先于保存产物；重算
+不可用时才比对同一 release 下保存的不可变算法产物。任一算法身份、配置/输入 hash、
+Profile、release、输出字段、值、单位、精度或样本年份不一致均返回
+`CONTRADICTED`；缺少身份、输出值或单位时返回 `UNVERIFIABLE`。样本年份先去重并按
+升序规范化；数值先规范为十进制再精确比较，不使用近似容差。
+
+数字、单位和样本年份在 `rendered_bindings` 中必须指向本 Claim 的证据，且展示文本
+与规范身份一致。派生事实即使数值完全一致，也不得表达“保证录取”等算法能力之外的
+承诺；合法的“不保证录取”免责声明不触发该门禁。
+
 ---
 
 ## 11. 与代码的对应关系

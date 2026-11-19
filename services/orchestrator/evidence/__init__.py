@@ -3,6 +3,8 @@
 from evidence.verifier import (
     Claim,
     ClaimVerification,
+    DerivedEvidence,
+    DerivedEvidenceRecomputer,
     EntailmentVerifier,
     EvidencePackage,
     EvidenceRef,
@@ -20,6 +22,8 @@ from rag.policy_retrieval import DocumentApplicability, DocumentEvidence
 __all__ = [
     "Claim",
     "ClaimVerification",
+    "DerivedEvidence",
+    "DerivedEvidenceRecomputer",
     "DocumentApplicability",
     "DocumentEvidence",
     "EvidencePackage",

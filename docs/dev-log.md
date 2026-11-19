@@ -1700,3 +1700,39 @@ LLM 规则生成。
   SQL；生产查询 adapter 由后续集成与持久化票据接线。
 - `DerivedEvidence`、普通 `UNVERIFIABLE` 剥离、统一正式门禁和不可变结果仍由后续
   M4c tickets 完成。
+
+## 52. M4c-03：VerifyPackage 派生事实闭环
+
+**日期与范围**：2026-11-19，对应 issue #27。通过同一个 `VerifyPackage`
+主 seam 增加 `DerivedEvidence` 校验；不新增算法、不实现完整撤销状态机或正式结果
+持久化。
+
+### 实现
+
+- `EvidenceRef` additive 支持类型化 `DerivedEvidence`，保存 operation、算法与版本、
+  配置 hash、输入快照 hash、Profile、release、样本年份、输出字段/值、单位、精度、
+  不可变产物 hash、假设和告警。
+- `VerifyPackage` 可注入版本化 `DerivedEvidenceRecomputer`。具备重算条件时以重算
+  产物为权威；否则比较已保存不可变算法产物。缺少重算或比对所需身份时 fail-closed。
+- 派生 Claim 精确比较规范输出值、单位、精度、样本年份、输出字段、Profile、
+  release 和算法身份；样本年份按去重后的升序规范集合比较。
+- 数值统一按规范十进制比较，兼容 `Decimal`、数字字符串与 JSON 数值表示；近似浮点
+  值不得借用容差通过，输出值或单位缺失时 fail-closed。
+- 数字、单位和样本年份必须带指向本 Claim EvidenceRef 的渲染绑定；绑定缺失、改写或
+  错指证据时返回 `CLAIM_RENDER_MISMATCH`。
+- 近似概率、效用等派生 Claim 不得表达“保证录取”“保证你被录取”等超出算法能力的
+  承诺；合法的“不保证录取”免责声明保持可校验。
+
+### 验证
+
+- `VerifyPackage` 行为测试覆盖不可变产物正向、确定性重算成功与不可用回退、算法/
+  配置/输入/Profile 身份冲突、产物 hash、规范十进制、近似值拒绝、数字/单位/精度/
+  样本年份漂移、缺值与身份字段缺失、样本年份规范化、确定性重放和录取承诺越界。
+- `make py-check py-test` 通过：242 tests OK，112 个依赖真实库/外部服务的用例按
+  既有约定跳过。
+
+### 边界
+
+- 本票只定义派生事实校验与注入边界，不在 orchestrator 内重写算法。
+- 普通 `UNVERIFIABLE` 剥离、统一正式门禁、不可变证据包持久化和原子发布仍由后续
+  M4c tickets 完成。
