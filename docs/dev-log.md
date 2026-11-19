@@ -1050,3 +1050,54 @@ sqlc 的 `:many` 先收集类型化结果 slice，再映射领域对象，相较
 - 单路故障降级可能降低召回，但不会删除或放宽任一适用域过滤；调用方必须读取 `degraded_reason`，不能把降级结果视作双路完整召回。
 - `strict_order` 高不匹配比场景的 HNSW 延迟风险继续存在；真实容量和超时仍需 golden set/压测量化。
 - 本文未接入 rerank、图节点/API 与 golden set；这些仍由后续 ticket 完成。
+
+## 34. M4a-06：检索 golden set 草稿与可复现评测
+
+**日期与范围**：2026-11-19。实现 issue #13 的检索评测 harness、首批 30 条 Agent
+草稿和冻结 fixture baseline；不宣称 Francis 已完成 domain owner 定标，也不验收真实
+rerank 模型质量。
+
+### 实现
+
+- 新增不可变版本目录 `data/golden/retrieval-hunan-2025-v0.1.0-draft/`。30 条 Case
+  覆盖院校章程、全国/省级长期政策占位、学校+专业组合、`NO_EVIDENCE`、跨省、跨年、
+  跨科类与错误学校干扰；院校章程用例按现有 ETL 规则绑定 2025 本地原料生成的稳定
+  `doc_id/chunk_id`。
+- manifest 固定 `dataset_version`、Case 文件 SHA256、case count、release、owner、
+  `owner_status=PENDING_SIGNOFF` 与创建时间。loader 在构造查询前校验 manifest/Case
+  hash、必填字段、湖南 scope 值域、criticality、预期证据和 must-exclude 冲突。
+- `eval/retrieval_eval.py` 的 runner 只调用注入对象的 `retrieve` seam，生产 CLI 传入
+  实际 `RetrievePolicy`。查询固定 `top_k=pool_k=20`，可同时计算 recall@5/20 与 MRR。
+- `NO_EVIDENCE` Case 只断言结果为精确 `NO_EVIDENCE`，不进入 recall/MRR 分母；普通
+  Case 未命中进入分母并计 0。
+- 每条实际证据逐项检查省、有效年份、科类、批次、学校和 must-exclude 来源；
+  `scope_leak_rate > 0` 绝对使门禁失败。失败 Case 保留实际证据和 first diff，安全
+  泄漏优先于质量差异展示。
+- baseline 记录 dataset hash、release、Git/源码树身份、Python/平台、embedder、
+  rerank、RRF、index version、`as_of`、top/pool 与逐例结果。运行身份不含生成时间，
+  相同输入可复现同一 `result_sha256/eval_run_id`。
+- `scripts/run_retrieval_eval.py` 支持实际 `RetrievePolicy` 与确定性 boundary
+  fixture。CI fixture 不连数据库、不下载模型；其
+  `authoritative_quality=false`，只用于验证 harness，不作为真实检索质量结论。
+
+### 测试与 baseline
+
+- 新增 10 项离线测试和 1 项 DSN gated 隔离 PostgreSQL 测试，覆盖 manifest hash、
+  字段/scope/冲突校验、30 条草稿覆盖、recall/MRR 分母、`NO_EVIDENCE`、技术故障、
+  逐例 scope/must-exclude leak、first diff、真实 `RetrievePolicy` seam 与 baseline
+  身份复现。
+- 冻结 30 条 fixture 运行通过：recall@5=1.0、recall@20=1.0、MRR=1.0、
+  scope leak=0、28 条有效检索 Case、2 条 `NO_EVIDENCE` 通过。上述数值仅为 harness
+  冒烟，不代表真实 release 上的检索质量。
+- baseline 写入
+  `data/golden/baselines/retrieval-hunan-2025-v0.1.0-draft.rerank-off.fixture.json`。
+
+### 风险与边界
+
+- 全国/省级长期政策两条仍标记 `PENDING_RELEASE_BINDING`，没有伪造正式 chunk ID；
+  真实运行前必须绑定不可变 release 与真实政策文档。
+- 当前真实政策索引、真实 embedding 模型与正式 release 尚未在本票内运行；真实
+  baseline 仍需显式 DSN、release 和 index version。
+- `rerank_enabled=false` 基线可运行；rerank 打开的真实模型质量留待后续 ticket。
+- Francis 的 `PENDING_SIGNOFF` 必须保留。签字前不得把 fixture PASS、草稿标注或
+  baseline 当作正式质量门禁。

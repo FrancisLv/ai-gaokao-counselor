@@ -244,3 +244,25 @@
 
 > 📌 **目录结构、模块划分、函数签名以 [`task2-implementation-plan.md`](./task2-implementation-plan.md) §1.1、§3 为准**（本文不列签名，避免过时）。
 > 设计原则：算法层均为**纯函数**——不访问数据库、不发网络请求，数据由 data 层查好后注入，可独立测试、结果可复现（详见 task2 §1.2）。
+
+---
+
+## 11. 检索 golden set 指标口径
+
+检索评测只通过 `RetrievePolicy` 的公开结果计算，不读取 SQL 行、向量距离或 rerank
+模型私有结构。
+
+- `recall@k = 至少命中一条 expected chunk/doc 的有效 Case 数 / 有效 Case 数`；
+- `expected` 命中要求最终 `EvidenceRef` 的 `chunk_id` 或 `doc_id` 在标注集合内，
+  相同关键词但非预期证据不计命中；
+- 普通 Case 未命中进入分母并计 0；只有明确 `NO_EVIDENCE` 的 Case 走独立状态验收，
+  不进入 recall/MRR 分母；
+- `MRR = mean(1 / 首次命中排名)`，未命中计 0；
+- 每条返回证据都检查省、年、科类、批次、学校与 `must_exclude_sources`。任一越界都
+  产生逐例 leak，`scope_leak_rate > 0` 直接使门禁失败，不能用平均 recall 抵消；
+- 失败 Case 保存实际证据和 first diff；baseline 同时记录 dataset hash、release、
+  代码身份、embedding、rerank、RRF、index version、运行环境与 `as_of`。
+
+`rerank_enabled=false` 是当前可执行基线。rerank 字段保留在报告中，但真实 rerank
+模型质量不在本阶段验收范围。确定性 fixture 基线只验证评测链路，其
+`authoritative_quality=false`，不得作为检索质量结论。
