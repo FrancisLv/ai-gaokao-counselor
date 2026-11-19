@@ -63,15 +63,16 @@ func attachMajors(candidates []biz.Candidate, index map[biz.GroupKey]int, rows [
 // majorFromRow 保留 SQL 已处理的空值兜底，不用专业级位次参与组概率计算。
 func majorFromRow(row dbgen.ListCandidateMajorsRow) biz.MajorDetail {
 	return biz.MajorDetail{
-		MajorCode:  row.MajorCode,
-		MajorName:  row.MajorName,
-		SubjectReq: row.SubjectReq,
-		Duration:   row.Duration,
-		Tuition:    row.Tuition,
-		MajorNote:  row.MajorNote,
-		MinScore:   int(row.MinScore),
-		MinRank:    int(row.MinRank),
-		AdmitCount: int(row.AdmitCount),
+		MajorCode:     row.MajorCode,
+		MajorName:     row.MajorName,
+		SubjectReq:    row.SubjectReq,
+		Duration:      row.Duration,
+		Tuition:       row.Tuition,
+		MajorNote:     row.MajorNote,
+		MinScore:      int(row.MinScore),
+		MinRank:       int(row.MinRank),
+		AdmitCount:    int(row.AdmitCount),
+		InCurrentPlan: row.InCurrentPlan,
 	}
 }
 

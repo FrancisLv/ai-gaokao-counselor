@@ -274,6 +274,8 @@ const (
 	ReasonCandidateMajorInvalid   = "CANDIDATE_MAJOR_INVALID"
 	ReasonCandidateNotInPlan      = "CANDIDATE_NOT_IN_PLAN"
 	ReasonEligibilityScopeInvalid = "ELIGIBILITY_SCOPE_INVALID"
+	ReasonRuleSourceMissing       = "RULE_SOURCE_MISSING"
+	ReasonBatchUnsupported        = "BATCH_UNSUPPORTED"
 )
 
 type EligibilityUsecase struct {
@@ -300,6 +302,17 @@ func (u *EligibilityUsecase) EvaluateEligibility(ctx context.Context, req Eligib
 		result := EligibilityResult{
 			Status:           EligibilityBlocked,
 			Groups:           blockedGroups(req.CandidateGroups, ReasonEligibilityScopeInvalid),
+			EvidenceBundleID: "eligibility:" + req.ReleaseID + ":" + req.ConfirmedProfileVersion,
+			Diagnostics: EligibilityDiagnostics{
+				UnknownCount: maxInt(1, candidateMajorCount(req.CandidateGroups)),
+			},
+		}
+		return result, nil
+	}
+	if req.Scope.Batch != "本科批" {
+		result := EligibilityResult{
+			Status:           EligibilityBlocked,
+			Groups:           blockedGroups(req.CandidateGroups, ReasonBatchUnsupported),
 			EvidenceBundleID: "eligibility:" + req.ReleaseID + ":" + req.ConfirmedProfileVersion,
 			Diagnostics: EligibilityDiagnostics{
 				UnknownCount: maxInt(1, candidateMajorCount(req.CandidateGroups)),
@@ -356,7 +369,7 @@ func (u *EligibilityUsecase) EvaluateEligibility(ctx context.Context, req Eligib
 			return result, nil
 		}
 	}
-	if hasDuplicateGroupKeys(req.Scope, req.CandidateGroups) {
+	if hasDuplicateGroupKeys(req.CandidateGroups) {
 		result.Status = EligibilityBlocked
 		result.Diagnostics.UnknownCount = candidateMajorCount(req.CandidateGroups)
 		result.Groups = blockedGroups(req.CandidateGroups, ReasonCandidateGroupDuplicate)
@@ -416,7 +429,7 @@ func evaluateGroup(
 	facts map[string]ProfileFact,
 ) GroupEligibility {
 	out := GroupEligibility{
-		GroupKey: eligibilityGroupKey(scope, group),
+		GroupKey: candidateGroupKey(group),
 	}
 	majors := append([]CandidateMajor(nil), group.Majors...)
 	sort.Slice(majors, func(i, j int) bool { return majors[i].MajorCode < majors[j].MajorCode })
@@ -515,7 +528,7 @@ func evaluateMajor(
 	}
 
 	invalidatedRuleTypes := invalidatedRuleTypesFor(revokedRules, scope, group, major)
-	for _, ruleType := range requiredRuleTypes(applicable, invalidatedRuleTypes) {
+	for _, ruleType := range requiredRuleTypes(applicable, invalidatedRuleTypes, coverage) {
 		declaration, found, _ := resolveCoverage(coverage, ruleType, scope, group, major)
 		if containsString(invalidatedRuleTypes, ruleType) ||
 			!found ||
@@ -685,10 +698,17 @@ func invalidatedRuleTypesFor(
 	return stableStrings(ruleTypes)
 }
 
-func requiredRuleTypes(applicable []RuleVersion, invalidated []string) []string {
+func requiredRuleTypes(
+	applicable []RuleVersion,
+	invalidated []string,
+	coverage []RuleCoverage,
+) []string {
 	required := append([]string{RuleTypeSubjectRequirement}, invalidated...)
 	for _, rule := range applicable {
 		required = append(required, rule.RuleType)
+	}
+	for _, declaration := range coverage {
+		required = append(required, declaration.RuleType)
 	}
 	return stableStrings(required)
 }
@@ -713,7 +733,7 @@ func countCoverageConflicts(
 				}
 			}
 			invalidated := invalidatedRuleTypesFor(revokedRules, req.Scope, group, major)
-			for _, ruleType := range requiredRuleTypes(applicable, invalidated) {
+			for _, ruleType := range requiredRuleTypes(applicable, invalidated, coverage) {
 				_, _, conflict := resolveCoverage(
 					coverage,
 					ruleType,
@@ -800,7 +820,7 @@ func (s RuleScope) String() string {
 	}, "|")
 }
 
-func eligibilityGroupKey(scope EligibilityScope, group CandidateGroup) string {
+func candidateGroupKey(group CandidateGroup) string {
 	return group.UniversityCode + "|" + group.MajorGroup
 }
 
@@ -825,7 +845,7 @@ func appendUniqueEvidence(current []EvidenceRef, refs ...EvidenceRef) []Evidence
 func blockedGroups(groups []CandidateGroup, reason string) []GroupEligibility {
 	out := make([]GroupEligibility, 0, len(groups))
 	for _, group := range groups {
-		ground := GroupEligibility{GroupKey: group.UniversityCode + "|" + group.MajorGroup, GroupStatus: GroupUnknown}
+		ground := GroupEligibility{GroupKey: candidateGroupKey(group), GroupStatus: GroupUnknown}
 		for _, major := range group.Majors {
 			ground.Majors = append(ground.Majors, MajorEligibility{
 				MajorCode:      major.MajorCode,
@@ -873,10 +893,10 @@ func hasDuplicateMajorCodes(majors []CandidateMajor) bool {
 	return false
 }
 
-func hasDuplicateGroupKeys(scope EligibilityScope, groups []CandidateGroup) bool {
+func hasDuplicateGroupKeys(groups []CandidateGroup) bool {
 	seen := make(map[string]struct{}, len(groups))
 	for _, group := range groups {
-		key := eligibilityGroupKey(scope, group)
+		key := candidateGroupKey(group)
 		if _, ok := seen[key]; ok {
 			return true
 		}

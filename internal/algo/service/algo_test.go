@@ -53,7 +53,9 @@ func TestService_EvaluateEligibility(t *testing.T) {
 			When: biz.RuleExpression{Operator: biz.OperatorNot, Child: &biz.RuleExpression{
 				Operator: biz.OperatorSubjectMatch,
 			}},
-			SourceEvidence: []biz.EvidenceRef{{EvidenceID: "ev-1", EvidenceType: "DOCUMENT", ReleaseID: "rel-test"}},
+			OutcomeWhenTrue: biz.OutcomeFail,
+			ReasonCode:      "SUBJECT_NOT_MATCHED",
+			SourceEvidence:  []biz.EvidenceRef{{EvidenceID: "ev-1", EvidenceType: "DOCUMENT", ReleaseID: "rel-test"}},
 		}},
 		Coverage: []biz.RuleCoverage{{RuleType: biz.RuleTypeSubjectRequirement, Status: biz.CoverageFull}},
 	}})
@@ -106,6 +108,11 @@ func TestService_EvaluateEligibility_BlocksInvalidASTContract(t *testing.T) {
 				Operator: "SQL",
 				Field:    biz.FieldCategory,
 			},
+			OutcomeWhenTrue: biz.OutcomeFail,
+			ReasonCode:      "INVALID_EXPRESSION",
+			SourceEvidence: []biz.EvidenceRef{{
+				EvidenceID: "ev-invalid", EvidenceType: "DOCUMENT", ReleaseID: "rel-test",
+			}},
 		}},
 		Coverage: []biz.RuleCoverage{{RuleType: biz.RuleTypeSubjectRequirement, Status: biz.CoverageFull}},
 	}})

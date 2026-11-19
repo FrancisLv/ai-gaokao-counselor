@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -109,15 +110,40 @@ func (r *RuleLifecycleRepo) Transition(ctx context.Context, change RuleTransitio
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var currentState, ruleType string
-	var scope, evidenceJSON []byte
+	var currentState, ruleKey, ruleType, outcomeWhenTrue, reasonCode string
+	var scope, requiredFieldsJSON, expressionJSON, evidenceJSON []byte
+	var expressionVersion int
+	var validInterval bool
 	err = tx.QueryRow(ctx, `
-		SELECT review_status, rule_type, scope, source_evidence
+		SELECT
+			review_status,
+			rule_key,
+			rule_type,
+			scope,
+			required_profile_fields,
+			expression,
+			expression_version,
+			outcome_when_true,
+			reason_code,
+			source_evidence,
+			valid_to IS NULL OR valid_to > valid_from
 		FROM rule_version
 		WHERE rule_id = $1 AND version = $2
 		FOR UPDATE`,
 		change.RuleID, change.Version,
-	).Scan(&currentState, &ruleType, &scope, &evidenceJSON)
+	).Scan(
+		&currentState,
+		&ruleKey,
+		&ruleType,
+		&scope,
+		&requiredFieldsJSON,
+		&expressionJSON,
+		&expressionVersion,
+		&outcomeWhenTrue,
+		&reasonCode,
+		&evidenceJSON,
+		&validInterval,
+	)
 	if errors.Is(err, pgx.ErrNoRows) || currentState != change.ExpectedState {
 		return errs.ErrRuleStateConflict
 	}
@@ -126,6 +152,38 @@ func (r *RuleLifecycleRepo) Transition(ctx context.Context, change RuleTransitio
 	}
 	if !validRuleTransition(currentState, change.TargetState) {
 		return errs.ErrRuleStateConflict
+	}
+	if !validInterval {
+		return errs.ErrRulePublishIncomplete
+	}
+
+	rule, err := decodeLifecycleRule(
+		change.RuleID,
+		change.Version,
+		currentState,
+		ruleKey,
+		ruleType,
+		scope,
+		requiredFieldsJSON,
+		expressionJSON,
+		expressionVersion,
+		outcomeWhenTrue,
+		reasonCode,
+		evidenceJSON,
+	)
+	if err != nil {
+		return errs.ErrRulePublishIncomplete
+	}
+	definitionReleaseID := ""
+	if change.TargetState == biz.ReviewStatePublished {
+		definitionReleaseID = change.ReleaseID
+	}
+	definitions, err := loadLifecycleProfileFields(ctx, tx, definitionReleaseID)
+	if err != nil {
+		return err
+	}
+	if reason := biz.ValidateRuleVersionForLifecycle(rule, definitions); reason != "" {
+		return fmt.Errorf("%w: %s", errs.ErrRulePublishIncomplete, reason)
 	}
 
 	switch change.TargetState {
@@ -142,11 +200,7 @@ func (r *RuleLifecycleRepo) Transition(ctx context.Context, change RuleTransitio
 		if strings.TrimSpace(change.ReleaseID) == "" {
 			return errs.ErrRulePublishIncomplete
 		}
-		var evidence []biz.EvidenceRef
-		if err := json.Unmarshal(evidenceJSON, &evidence); err != nil {
-			return errs.ErrRulePublishIncomplete
-		}
-		for _, ref := range evidence {
+		for _, ref := range rule.SourceEvidence {
 			if strings.TrimSpace(ref.EvidenceID) == "" || ref.ReleaseID != change.ReleaseID {
 				return errs.ErrRulePublishIncomplete
 			}
@@ -212,6 +266,105 @@ func (r *RuleLifecycleRepo) Transition(ctx context.Context, change RuleTransitio
 		return mapRuleLifecycleDBError(err)
 	}
 	return tx.Commit(ctx)
+}
+
+func decodeLifecycleRule(
+	ruleID string,
+	version int,
+	state string,
+	ruleKey string,
+	ruleType string,
+	scopeJSON []byte,
+	requiredFieldsJSON []byte,
+	expressionJSON []byte,
+	expressionVersion int,
+	outcomeWhenTrue string,
+	reasonCode string,
+	evidenceJSON []byte,
+) (biz.RuleVersion, error) {
+	var scope biz.RuleScope
+	if err := json.Unmarshal(scopeJSON, &scope); err != nil {
+		return biz.RuleVersion{}, err
+	}
+	var required []string
+	if err := json.Unmarshal(requiredFieldsJSON, &required); err != nil {
+		return biz.RuleVersion{}, err
+	}
+	var expression biz.RuleExpression
+	if err := json.Unmarshal(expressionJSON, &expression); err != nil {
+		return biz.RuleVersion{}, err
+	}
+	var evidence []biz.EvidenceRef
+	if err := json.Unmarshal(evidenceJSON, &evidence); err != nil {
+		return biz.RuleVersion{}, err
+	}
+	return biz.RuleVersion{
+		RuleID:                ruleID,
+		Version:               version,
+		RuleKey:               ruleKey,
+		RuleType:              ruleType,
+		Scope:                 scope,
+		RequiredProfileFields: required,
+		When:                  expression,
+		OutcomeWhenTrue:       outcomeWhenTrue,
+		ReasonCode:            reasonCode,
+		ReviewState:           state,
+		ExpressionVersion:     expressionVersion,
+		SourceEvidence:        evidence,
+	}, nil
+}
+
+func loadLifecycleProfileFields(
+	ctx context.Context,
+	tx pgx.Tx,
+	releaseID string,
+) (map[string]biz.ProfileFieldDefinition, error) {
+	query := `
+		SELECT field_key, value_type, allowed_values
+		FROM eligibility_profile_field
+		WHERE ($1::text = '' OR release_id = $1::text)
+		ORDER BY field_key, release_id`
+	rows, err := tx.Query(ctx, query, releaseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	definitions := make(map[string]biz.ProfileFieldDefinition)
+	for rows.Next() {
+		var definition biz.ProfileFieldDefinition
+		if err := rows.Scan(
+			&definition.FieldKey,
+			&definition.ValueType,
+			&definition.AllowedValues,
+		); err != nil {
+			return nil, err
+		}
+		if existing, ok := definitions[definition.FieldKey]; ok {
+			if existing.ValueType != definition.ValueType ||
+				!sameStringSlice(existing.AllowedValues, definition.AllowedValues) {
+				return nil, fmt.Errorf("%w: %s", errs.ErrRulePublishIncomplete, biz.ReasonRuleUnknownField)
+			}
+			continue
+		}
+		definitions[definition.FieldKey] = definition
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return definitions, nil
+}
+
+func sameStringSlice(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func validateRuleDraft(draft RuleDraft) error {

@@ -60,7 +60,18 @@ SELECT
     COALESCE(ma.min_rank, 0)::int AS min_rank,
     COALESCE(ma.admit_count, 0)::int AS admit_count,
     COALESCE(m.duration, '') AS duration,
-    COALESCE(m.tuition, 0)::float8 AS tuition
+    COALESCE(m.tuition, 0)::float8 AS tuition,
+    EXISTS (
+        SELECT 1 FROM enrollment_plan ep
+        WHERE ep.university_code = ma.university_code
+          AND ep.major_group = ma.major_group
+          AND ep.major_code = ma.major_code
+          AND ep.release_id = @release_id::text
+          AND ep.province = @province::text
+          AND ep.category = @category::text
+          AND ep.batch = @batch::text
+          AND ep.year = @report_year::int
+    ) AS in_current_plan
 FROM major_admission ma
 LEFT JOIN major m ON ma.major_id = m.id
 WHERE ma.release_id = @release_id::text

@@ -25,6 +25,7 @@ MIGRATIONS = (
     "migrations/23_rule_expression_contract.sql",
     "migrations/24_eligibility_profile_fields.sql",
     "migrations/25_rule_coverage_contract.sql",
+    "migrations/26_release_bound_profile_fields.sql",
 )
 
 

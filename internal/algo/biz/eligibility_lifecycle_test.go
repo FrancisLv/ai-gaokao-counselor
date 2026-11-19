@@ -163,6 +163,7 @@ func eligibilityFixtureRuleSet() EligibilityRuleSet {
 				Operator: OperatorSubjectMatch,
 			}},
 			OutcomeWhenTrue: OutcomeFail,
+			ReasonCode:      "SUBJECT_NOT_MATCHED",
 			SourceEvidence: []EvidenceRef{{
 				EvidenceID: "ev-subject", EvidenceType: "DOCUMENT",
 				ReleaseID: "rel-test", ContentSHA: "sha256:subject",

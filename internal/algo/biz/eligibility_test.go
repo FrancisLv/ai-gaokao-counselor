@@ -42,6 +42,7 @@ func TestEvaluateEligibility_SubjectRulePassAndFail(t *testing.T) {
 				Operator: OperatorSubjectMatch,
 			}},
 			ReasonCode:        "SUBJECT_NOT_MATCHED",
+			OutcomeWhenTrue:   OutcomeFail,
 			ReviewState:       ReviewStatePublished,
 			ExpressionVersion: ExpressionVersionV1,
 			SourceEvidence: []EvidenceRef{{
@@ -143,6 +144,12 @@ func TestEvaluateEligibility_BlocksReleaseAndDoesNotTreatUnknownAsPass(t *testin
 				RequiredProfileFields: []string{FieldSubjects, FieldCategory},
 				ExpressionVersion:     ExpressionVersionV1,
 				When:                  RuleExpression{Operator: OperatorNot, Child: &RuleExpression{Operator: OperatorSubjectMatch}},
+				OutcomeWhenTrue:       OutcomeFail,
+				ReasonCode:            "SUBJECT_NOT_MATCHED",
+				SourceEvidence: []EvidenceRef{{
+					EvidenceID: "ev-missing-coverage", EvidenceType: "DOCUMENT",
+					ReleaseID: "rel-test", ContentSHA: "sha256:missing-coverage",
+				}},
 			}},
 		}})
 		result, err := uc.EvaluateEligibility(context.Background(), eligibilityFixtureRequest())
@@ -171,6 +178,10 @@ func TestEvaluateEligibility_BlocksReleaseAndDoesNotTreatUnknownAsPass(t *testin
 				OutcomeWhenTrue:       "PASS",
 				When: RuleExpression{Operator: OperatorNot, Child: &RuleExpression{
 					Operator: OperatorSubjectMatch,
+				}},
+				SourceEvidence: []EvidenceRef{{
+					EvidenceID: "ev-invalid-outcome", EvidenceType: "DOCUMENT",
+					ReleaseID: "rel-test", ContentSHA: "sha256:invalid-outcome",
 				}},
 			}},
 			Coverage: []RuleCoverage{{RuleType: RuleTypeSubjectRequirement, Status: CoverageFull}},

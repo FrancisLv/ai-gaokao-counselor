@@ -105,6 +105,13 @@ func TestIntegration_EligibilityProfileFieldCatalog(t *testing.T) {
 		t.Fatalf("pgxpool.New: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	applyMigrationIfNeeded(
+		t,
+		pool,
+		"26_release_bound_profile_fields.sql",
+		"eligibility_profile_field",
+		"release_id",
+	)
 
 	expected := map[string]string{
 		"single_subject_scores.数学":     "INT",
@@ -119,7 +126,7 @@ func TestIntegration_EligibilityProfileFieldCatalog(t *testing.T) {
 		if err := pool.QueryRow(context.Background(),
 			`SELECT value_type
 			 FROM eligibility_profile_field
-			 WHERE field_key = $1`, fieldKey,
+			 WHERE release_id = 'rel_legacy_v1' AND field_key = $1`, fieldKey,
 		).Scan(&gotType); err != nil {
 			t.Fatalf("load %s field contract: %v", fieldKey, err)
 		}
@@ -132,7 +139,8 @@ func TestIntegration_EligibilityProfileFieldCatalog(t *testing.T) {
 	if err := pool.QueryRow(context.Background(),
 		`SELECT allowed_values
 		 FROM eligibility_profile_field
-		 WHERE field_key = 'physical_exam.color_vision'`,
+			 WHERE release_id = 'rel_legacy_v1'
+			   AND field_key = 'physical_exam.color_vision'`,
 	).Scan(&colorValues); err != nil {
 		t.Fatalf("load color-vision values: %v", err)
 	}
@@ -143,6 +151,7 @@ func TestIntegration_EligibilityProfileFieldCatalog(t *testing.T) {
 	rows, err := pool.Query(context.Background(),
 		`SELECT field_key, value_type, allowed_values
 		 FROM eligibility_profile_field
+		 WHERE release_id = 'rel_legacy_v1'
 		 ORDER BY field_key`,
 	)
 	if err != nil {
@@ -175,13 +184,147 @@ func TestIntegration_EligibilityProfileFieldCatalog(t *testing.T) {
 		}
 	}
 
+	stagingReleaseID := fmt.Sprintf("rel_m4b_field_contract_%d", time.Now().UnixNano())
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
+		VALUES ($1, 'STAGING', '{}'::jsonb, 'sha256:m4b-field-contract', NULL)`,
+		stagingReleaseID,
+	); err != nil {
+		t.Fatalf("insert staging release: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM release WHERE release_id = $1`, stagingReleaseID)
+	})
 	_, err = pool.Exec(context.Background(),
 		`INSERT INTO eligibility_profile_field (
-			field_key, value_type, allowed_values, description
-		 ) VALUES ('invalid-field-type', 'BOOLEAN', ARRAY[]::TEXT[], 'invalid')`,
+			release_id, field_key, value_type, allowed_values, description
+		 ) VALUES ($1, 'invalid-field-type', 'BOOLEAN', ARRAY[]::TEXT[], 'invalid')`,
+		stagingReleaseID,
 	)
 	if !isCheckViolation(err, "eligibility_profile_field_value_type_check") {
 		t.Fatalf("invalid field value_type should be rejected by CHECK, got %v", err)
+	}
+}
+
+func TestIntegration_EligibilityProfileFieldCatalogIsReleaseBound(t *testing.T) {
+	dsn := os.Getenv("ALGO_TEST_DSN")
+	if dsn == "" {
+		t.Skip("ALGO_TEST_DSN 未设置，跳过集成测试")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	applyMigrationIfNeeded(
+		t,
+		pool,
+		"26_release_bound_profile_fields.sql",
+		"eligibility_profile_field",
+		"release_id",
+	)
+
+	firstRelease := fmt.Sprintf("rel_m4b_field_first_%d", time.Now().UnixNano())
+	secondRelease := fmt.Sprintf("rel_m4b_field_second_%d", time.Now().UnixNano())
+	for _, releaseID := range []string{firstRelease, secondRelease} {
+		if _, err := pool.Exec(context.Background(), `
+			INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
+			VALUES ($1, 'STAGING', '{}'::jsonb, 'sha256:m4b-fields', NULL)`,
+			releaseID,
+		); err != nil {
+			t.Fatalf("insert release %s: %v", releaseID, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM release WHERE release_id = ANY($1::text[])`,
+			[]string{firstRelease, secondRelease},
+		)
+	})
+
+	fieldKey := fmt.Sprintf("single_subject_scores.技术%d", time.Now().UnixNano())
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO eligibility_profile_field (
+			release_id, field_key, value_type, allowed_values, description
+		) VALUES ($1, $2, 'INT', ARRAY[]::TEXT[], 'first release only')`,
+		firstRelease, fieldKey,
+	); err != nil {
+		t.Fatalf("insert release-scoped field: %v", err)
+	}
+
+	load := func(releaseID string) int {
+		t.Helper()
+		var count int
+		if err := pool.QueryRow(context.Background(), `
+			SELECT count(*)
+			FROM eligibility_profile_field
+			WHERE release_id = $1 AND field_key = $2`,
+			releaseID, fieldKey,
+		).Scan(&count); err != nil {
+			t.Fatalf("load field count: %v", err)
+		}
+		return count
+	}
+	if got := load(firstRelease); got != 1 {
+		t.Fatalf("first release custom field count = %d, want 1", got)
+	}
+	if got := load(secondRelease); got != 0 {
+		t.Fatalf("second release custom field count = %d, want 0", got)
+	}
+
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE release SET status = 'PUBLISHED', published_at = clock_timestamp()
+		WHERE release_id = $1`, firstRelease,
+	); err != nil {
+		t.Fatalf("publish first release: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE eligibility_profile_field
+		SET allowed_values = ARRAY['changed']
+		WHERE release_id = $1 AND field_key = $2`,
+		firstRelease, fieldKey,
+	); !isPostgresCode(err, "23514") {
+		t.Fatalf("published field update err = %v, want 23514", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		DELETE FROM eligibility_profile_field
+		WHERE release_id = $1 AND field_key = $2`,
+		firstRelease, fieldKey,
+	); !isPostgresCode(err, "23514") {
+		t.Fatalf("published field delete err = %v, want 23514", err)
+	}
+}
+
+func applyMigrationIfNeeded(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	file string,
+	table string,
+	column string,
+) {
+	t.Helper()
+	var present bool
+	if err := pool.QueryRow(context.Background(), `
+		SELECT EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = $1
+			  AND column_name = $2
+		)`, table, column,
+	).Scan(&present); err != nil {
+		t.Fatalf("inspect %s.%s: %v", table, column, err)
+	}
+	if present {
+		return
+	}
+	body, err := os.ReadFile("../../../migrations/" + file)
+	if err != nil {
+		t.Fatalf("read migration %s: %v", file, err)
+	}
+	if _, err := pool.Exec(context.Background(), string(body)); err != nil {
+		t.Fatalf("apply migration %s: %v", file, err)
 	}
 }
 

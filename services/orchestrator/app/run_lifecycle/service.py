@@ -1751,7 +1751,7 @@ class RunLifecycle:
                         major_code=major.major_code,
                         major_name=major.major_name,
                         subject_requirement=major.subject_req,
-                        in_current_plan=True,
+                        in_current_plan=major.in_current_plan,
                     )
                 )
             groups.append(
@@ -1953,13 +1953,18 @@ class RunLifecycle:
                 "VALIDATION_FAILED",
                 "PARTIAL 资格结果缺少 UNKNOWN 诊断",
             )
+        coverage_full = bool(eligibility.coverage) and all(
+            declaration.status
+            == algo_pb2.RuleCoverageStatus.RULE_COVERAGE_STATUS_FULL
+            for declaration in eligibility.coverage
+        )
         if not eligible_keys:
             raise RunLifecycleError(
                 "NO_RELIABLE_DATA",
                 "没有通过资格的候选组",
             )
         return {
-            "formal_eligibility_ready": status == complete,
+            "formal_eligibility_ready": status == complete and coverage_full,
             "eligible_group_keys": sorted(eligible_keys),
             "restricted_group_keys": sorted(restricted_keys),
             "unknown_group_keys": sorted(unknown_keys),

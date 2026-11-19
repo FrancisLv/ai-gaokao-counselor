@@ -270,8 +270,15 @@ func TestEvaluateEligibility_SingleSubjectMinPassFailAndMissing(t *testing.T) {
 			},
 		},
 		OutcomeWhenTrue:   OutcomeFail,
+		ReasonCode:        "MATH_MIN_NOT_MET",
 		ReviewState:       ReviewStatePublished,
 		ExpressionVersion: ExpressionVersionV1,
+		SourceEvidence: []EvidenceRef{{
+			EvidenceID:   "ev-math-min",
+			EvidenceType: "DOCUMENT",
+			ReleaseID:    "rel-test",
+			ContentSHA:   "sha256:math-min",
+		}},
 	}
 
 	cases := []struct {
@@ -724,8 +731,15 @@ func eligibilityExpressionRule(expression RuleExpression, requiredFields []strin
 		RequiredProfileFields: requiredFields,
 		When:                  expression,
 		OutcomeWhenTrue:       OutcomeFail,
+		ReasonCode:            "EXPRESSION_MATCHED",
 		ReviewState:           ReviewStatePublished,
 		ExpressionVersion:     ExpressionVersionV1,
+		SourceEvidence: []EvidenceRef{{
+			EvidenceID:   "ev-expression",
+			EvidenceType: "DOCUMENT",
+			ReleaseID:    "rel-test",
+			ContentSHA:   "sha256:expression",
+		}},
 	}
 }
 

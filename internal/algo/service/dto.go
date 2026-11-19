@@ -23,15 +23,16 @@ func toInt(v int32) int { return int(v) }
 
 func toPbMajorDetail(m biz.MajorDetail) *algov1.MajorDetail {
 	return &algov1.MajorDetail{
-		MajorCode:  m.MajorCode,
-		MajorName:  m.MajorName,
-		SubjectReq: m.SubjectReq,
-		Duration:   m.Duration,
-		Tuition:    m.Tuition,
-		MajorNote:  m.MajorNote,
-		MinScore:   i32(m.MinScore),
-		MinRank:    i32(m.MinRank),
-		AdmitCount: i32(m.AdmitCount),
+		MajorCode:     m.MajorCode,
+		MajorName:     m.MajorName,
+		SubjectReq:    m.SubjectReq,
+		Duration:      m.Duration,
+		Tuition:       m.Tuition,
+		MajorNote:     m.MajorNote,
+		MinScore:      i32(m.MinScore),
+		MinRank:       i32(m.MinRank),
+		AdmitCount:    i32(m.AdmitCount),
+		InCurrentPlan: m.InCurrentPlan,
 	}
 }
 
@@ -40,15 +41,16 @@ func fromPbMajorDetail(m *algov1.MajorDetail) biz.MajorDetail {
 		return biz.MajorDetail{}
 	}
 	return biz.MajorDetail{
-		MajorCode:  m.GetMajorCode(),
-		MajorName:  m.GetMajorName(),
-		SubjectReq: m.GetSubjectReq(),
-		Duration:   m.GetDuration(),
-		Tuition:    m.GetTuition(),
-		MajorNote:  m.GetMajorNote(),
-		MinScore:   toInt(m.GetMinScore()),
-		MinRank:    toInt(m.GetMinRank()),
-		AdmitCount: toInt(m.GetAdmitCount()),
+		MajorCode:     m.GetMajorCode(),
+		MajorName:     m.GetMajorName(),
+		SubjectReq:    m.GetSubjectReq(),
+		Duration:      m.GetDuration(),
+		Tuition:       m.GetTuition(),
+		MajorNote:     m.GetMajorNote(),
+		MinScore:      toInt(m.GetMinScore()),
+		MinRank:       toInt(m.GetMinRank()),
+		AdmitCount:    toInt(m.GetAdmitCount()),
+		InCurrentPlan: m.GetInCurrentPlan(),
 	}
 }
 
