@@ -42,7 +42,17 @@ SELECT
     value_type,
     allowed_values
 FROM eligibility_profile_field
+WHERE release_id = @release_id::text
 ORDER BY field_key;
+
+-- name: ListAllEligibilityProfileFields :many
+SELECT
+    release_id,
+    field_key,
+    value_type,
+    allowed_values
+FROM eligibility_profile_field
+ORDER BY field_key, release_id;
 
 -- name: ListRevokedEligibilityRules :many
 SELECT rule_key, rule_type, scope

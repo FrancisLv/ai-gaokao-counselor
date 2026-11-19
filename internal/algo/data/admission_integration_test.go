@@ -15,11 +15,14 @@ package data
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/choucisan/ai-gaokao-counselor/conf"
 	"github.com/choucisan/ai-gaokao-counselor/internal/algo/biz"
@@ -78,6 +81,118 @@ func TestIntegration_MissingEnrollmentPlan(t *testing.T) {
 	_, err := repo.LoadCandidates(context.Background(), itRelease, itProvince, itCategory, itBatch, 9999)
 	if !errors.Is(err, errs.ErrMissingEnrollmentPlan) {
 		t.Fatalf("缺报考年计划必须报错，got %v", err)
+	}
+}
+
+func TestIntegration_CurrentPlanMembershipUsesReportYearPlan(t *testing.T) {
+	dsn := os.Getenv("ALGO_TEST_DSN")
+	if dsn == "" {
+		t.Skip("ALGO_TEST_DSN 未设置，跳过集成测试")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	releaseID := "rel_m4b_membership_" + suffix
+	universityCode := "T" + suffix
+	majorGroup := "G" + suffix
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
+		VALUES ($1, 'STAGING', '{}'::jsonb, 'sha256:m4b-membership', NULL)`,
+		releaseID,
+	); err != nil {
+		t.Fatalf("insert release: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM major_admission WHERE release_id = $1`, releaseID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM enrollment_plan WHERE release_id = $1`, releaseID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM major WHERE release_id = $1`, releaseID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM university WHERE release_id = $1`, releaseID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
+	})
+	var universityID int64
+	if err := pool.QueryRow(context.Background(), `
+		INSERT INTO university (
+			school_id, enrollment_code, name, province, release_id
+		) VALUES ($1, $2, $3, '湖南', $4)
+		RETURNING id`,
+		"s"+suffix, universityCode, "成员核验测试大学", releaseID,
+	).Scan(&universityID); err != nil {
+		t.Fatalf("insert university: %v", err)
+	}
+	insertMajor := func(code, name string) int64 {
+		t.Helper()
+		var majorID int64
+		if err := pool.QueryRow(context.Background(), `
+			INSERT INTO major (
+				university_id, major_code, major_name, major_group, release_id
+			) VALUES ($1, $2, $3, $4, $5)
+			RETURNING id`,
+			universityID, code, name, majorGroup, releaseID,
+		).Scan(&majorID); err != nil {
+			t.Fatalf("insert major %s: %v", code, err)
+		}
+		return majorID
+	}
+	currentMajorID := insertMajor("M01", "当年计划专业")
+	historicalOnlyMajorID := insertMajor("M02", "仅历史专业")
+	for _, row := range []struct {
+		majorID int64
+		code    string
+		name    string
+	}{
+		{majorID: currentMajorID, code: "M01", name: "当年计划专业"},
+		{majorID: historicalOnlyMajorID, code: "M02", name: "仅历史专业"},
+	} {
+		if _, err := pool.Exec(context.Background(), `
+			INSERT INTO major_admission (
+				university_id, major_id, release_id, province, year, category, batch,
+				university_code, university_name, major_group, major_code, major_name,
+				min_rank, subject_req
+			) VALUES (
+				$1, $2, $3, '湖南', 2024, '物理类', '本科批',
+				$4, '成员核验测试大学', $5, $6, $7,
+				10000, '首选物理，再选不限'
+			)`,
+			universityID, row.majorID, releaseID, universityCode,
+			majorGroup, row.code, row.name,
+		); err != nil {
+			t.Fatalf("insert historical major %s: %v", row.code, err)
+		}
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO enrollment_plan (
+			university_id, major_id, release_id, province, year, category, batch,
+			university_code, university_name, major_group, major_code, major_name,
+			plan_count
+		) VALUES (
+			$1, $2, $3, '湖南', 2025, '物理类', '本科批',
+			$4, '成员核验测试大学', $5, 'M01', '当年计划专业', 10
+		)`,
+		universityID, currentMajorID, releaseID, universityCode, majorGroup,
+	); err != nil {
+		t.Fatalf("insert enrollment plan: %v", err)
+	}
+
+	repo := setupRepo(t)
+	candidates, err := repo.LoadCandidates(
+		context.Background(), releaseID, "湖南", "物理类", "本科批", 2025,
+	)
+	if err != nil {
+		t.Fatalf("LoadCandidates: %v", err)
+	}
+	if len(candidates) != 1 || len(candidates[0].Majors) != 2 {
+		t.Fatalf("candidates = %+v, want one group with two historical majors", candidates)
+	}
+	got := map[string]bool{}
+	for _, major := range candidates[0].Majors {
+		got[major.MajorCode] = major.InCurrentPlan
+	}
+	if !got["M01"] || got["M02"] {
+		t.Fatalf("current-plan membership = %v, want M01=true M02=false", got)
 	}
 }
 

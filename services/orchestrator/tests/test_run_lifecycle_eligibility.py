@@ -14,6 +14,7 @@ def _candidate(
     *,
     probability: float = 0.67,
     major_codes: tuple[str, ...] = ("M01",),
+    in_current_plan: bool = True,
 ) -> algo_pb2.CandidateWithProb:
     return algo_pb2.CandidateWithProb(
         candidate=algo_pb2.Candidate(
@@ -26,6 +27,7 @@ def _candidate(
                     major_code=major_code,
                     major_name=f"{major_code}专业",
                     subject_req="首选物理，再选不限",
+                    in_current_plan=in_current_plan,
                 )
                 for major_code in major_codes
             ],
@@ -220,6 +222,12 @@ class EligibilityRunLifecycleTests(RunLifecyclePostgresTest):
             [major.major_code for major in request.candidate_groups[0].majors],
             ["M01", "M02"],
         )
+        self.assertTrue(
+            all(
+                major.in_current_plan
+                for major in request.candidate_groups[0].majors
+            )
+        )
         self.assertIn(
             "subjects",
             {fact.field_key for fact in request.profile_facts},
@@ -244,6 +252,74 @@ class EligibilityRunLifecycleTests(RunLifecyclePostgresTest):
             "FULL_ELIGIBILITY_RULES",
             {item["code"] for item in preview["unverified_conditions"]},
         )
+
+    async def test_non_full_coverage_cannot_be_formal_even_if_reply_is_complete(self):
+        source = _candidate("U001")
+        reply = algo_pb2.EvaluateEligibilityReply(
+            status=algo_pb2.EligibilityResultStatus.ELIGIBILITY_RESULT_STATUS_COMPLETE,
+            groups=[
+                _group(
+                    "U001",
+                    algo_pb2.GroupEligibilityStatus.GROUP_ELIGIBILITY_STATUS_PASS,
+                    [
+                        algo_pb2.MajorEligibility(
+                            major_code="M01",
+                            status=algo_pb2.MajorEligibilityStatus.MAJOR_ELIGIBILITY_STATUS_PASS,
+                        )
+                    ],
+                )
+            ],
+            coverage=[
+                algo_pb2.EligibilityRuleCoverage(
+                    rule_type="SUBJECT_REQUIREMENT",
+                    status=algo_pb2.RuleCoverageStatus.RULE_COVERAGE_STATUS_FULL,
+                ),
+                algo_pb2.EligibilityRuleCoverage(
+                    rule_type="GENDER_RESTRICTION",
+                    status=algo_pb2.RuleCoverageStatus.RULE_COVERAGE_STATUS_NONE,
+                    notes="gender rules not published",
+                ),
+            ],
+            diagnostics=algo_pb2.EligibilityDiagnostics(unknown_count=0),
+        )
+        algo = EligibilityAlgo([source], reply)
+
+        _, _, _, completed = await self._run_preview(algo, "coverage-gap")
+
+        self.assertEqual(completed.state, "SUCCEEDED", completed.terminal_reason)
+        self.assertFalse(
+            completed.result_payload["eligibility_gate"][
+                "formal_eligibility_ready"
+            ]
+        )
+
+    async def test_current_plan_membership_comes_from_algorithm_candidate(self):
+        source = _candidate("U001", in_current_plan=False)
+        reply = algo_pb2.EvaluateEligibilityReply(
+            status=algo_pb2.EligibilityResultStatus.ELIGIBILITY_RESULT_STATUS_PARTIAL,
+            groups=[
+                _group(
+                    "U001",
+                    algo_pb2.GroupEligibilityStatus.GROUP_ELIGIBILITY_STATUS_FAIL,
+                    [
+                        algo_pb2.MajorEligibility(
+                            major_code="M01",
+                            status=algo_pb2.MajorEligibilityStatus.MAJOR_ELIGIBILITY_STATUS_NOT_APPLICABLE,
+                            unknown_reasons=["CANDIDATE_NOT_IN_PLAN"],
+                        )
+                    ],
+                )
+            ],
+            diagnostics=algo_pb2.EligibilityDiagnostics(unknown_count=1),
+        )
+        algo = EligibilityAlgo([source], reply)
+
+        _, _, _, completed = await self._run_preview(algo, "historical-major")
+
+        request = algo.calls[2][1]
+        self.assertFalse(request.candidate_groups[0].majors[0].in_current_plan)
+        self.assertEqual(completed.state, "FAILED")
+        self.assertEqual(completed.terminal_reason, "NO_RELIABLE_DATA")
 
     async def test_partial_eligibility_excludes_unknown_from_formal_and_optimization(self):
         eligible = _candidate("U001")
@@ -321,6 +397,13 @@ class EligibilityRunLifecycleTests(RunLifecyclePostgresTest):
                             failure_rule_keys=["single_subject.math"],
                         ),
                     ],
+                )
+            ],
+            coverage=[
+                algo_pb2.EligibilityRuleCoverage(
+                    rule_type="SUBJECT_REQUIREMENT",
+                    status=algo_pb2.RuleCoverageStatus.RULE_COVERAGE_STATUS_FULL,
+                    covered_data_sources=["2025 admissions plan"],
                 )
             ],
         )

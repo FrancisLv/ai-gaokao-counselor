@@ -1599,3 +1599,33 @@ FULL/PARTIAL/NONE/缺失覆盖语义和 release 发布后冻结；不接入条�
   表示资格事实完整，不代表报告证据或全部发布门禁通过。
 - 当年招生计划身份、在线 RAG、三类证据 Verifier、LLM Gateway、Strategy、
   Critic 和正式报告仍未完成，继续作为未核验条件与后续 milestone。
+
+## 49. M4b code review 修复：资格门禁与 release 快照收口
+
+**日期与范围**：2026-11-19。修复 M4b 双轴审查发现的正式门禁、历史专业身份、
+规则静态校验、release 字段目录和稳定原因缺口；不扩展文本检索、报告 Verifier 或
+LLM 规则生成。
+
+### 实现
+
+- 迁移 26 将画像字段目录改为 `release-scoped`：发布后冻结，新 release 从不可变模板
+  初始化；`EvaluateEligibility` 只读取 run 绑定 release 的字段快照。
+- 所有声明的 `RuleCoverage` 类型都进入候选覆盖检查；只要存在 PARTIAL/NONE 或缺失
+  声明，候选保持 UNKNOWN，结果不得成为 COMPLETE。RunLifecycle 还会独立校验
+  coverage 全为 FULL，防止错误回复把部分覆盖提升为正式资格。
+- `EstimateProb` 的候选专业新增 `in_current_plan`，由报考年 `enrollment_plan`
+  的专业代码成员查询产生。RunLifecycle 原样转交该事实，历史专业不再被无条件标为当年
+  可报。
+- `RuleVersion` 进入 REVIEWED/PUBLISHED 前执行与运行时共享的静态校验：受限 AST、
+  allowlist/required fields、literal 类型、来源证据、scope 和有效区间不合法时拒绝状态
+  转换。
+- 补齐 `RULE_SOURCE_MISSING` 与 `BATCH_UNSUPPORTED` 稳定原因；清理误导性的
+  group key 参数命名。
+
+### 验证
+
+- 新增覆盖缺口、非本科批、缺来源、字段目录 release 隔离、调用方错误标记 COMPLETE
+  覆盖、历史专业计划成员和非法规则审查的回归测试。
+- Go 纯逻辑与全部 M4b 真实 PostgreSQL 集成测试通过；fresh schema 从 00→26 通过。
+- Python 全量通过；完整 RunLifecycle 真实库套件 79 tests OK，仅真实
+  svc-algo TCP 用例因未设置地址按约定跳过。

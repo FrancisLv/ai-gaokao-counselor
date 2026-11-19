@@ -92,7 +92,7 @@ func (r *eligibilityRepo) LoadEligibilityRuleSet(ctx context.Context, releaseID 
 			Notes:              row.Notes,
 		})
 	}
-	fieldRows, err := r.d.queries.ListEligibilityProfileFields(ctx)
+	fieldRows, err := r.d.queries.ListEligibilityProfileFields(ctx, releaseID)
 	if err != nil {
 		return biz.EligibilityRuleSet{}, err
 	}

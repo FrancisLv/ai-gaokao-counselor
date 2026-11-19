@@ -58,26 +58,84 @@ func validateEligibilityRules(
 		if rule.ReviewState != ReviewStatePublished {
 			continue
 		}
-		if rule.ValidationReason != "" {
-			return rule.ValidationReason
-		}
-		if rule.ExpressionVersion != ExpressionVersionV1 {
-			return ReasonRuleExpression
-		}
-		raw, err := json.Marshal(rule.When)
-		if err != nil || len(raw) > maxExpressionJSONByteCount {
-			return ReasonRuleExpression
-		}
-		nodes := 0
-		fields := make([]string, 0)
-		if reason := validateRuleExpression(rule.When, 1, &nodes, &fields, definitions); reason != "" {
+		if reason := ValidateRuleVersionForLifecycle(rule, definitions); reason != "" {
 			return reason
-		}
-		if !sameProfileFieldSet(rule.RequiredProfileFields, fields) {
-			return ReasonRuleExpression
 		}
 	}
 	return ""
+}
+
+// ValidateRuleVersionForLifecycle is the single static validation used by both
+// publication and runtime. It validates rule content without writing storage.
+func ValidateRuleVersionForLifecycle(
+	rule RuleVersion,
+	definitions map[string]ProfileFieldDefinition,
+) string {
+	if rule.ValidationReason != "" {
+		return rule.ValidationReason
+	}
+	if strings.TrimSpace(rule.RuleKey) == "" ||
+		!validRuleType(rule.RuleType) ||
+		strings.TrimSpace(rule.ReasonCode) == "" ||
+		rule.OutcomeWhenTrue != OutcomeFail {
+		return ReasonRuleExpression
+	}
+	if !validRuleScope(rule.Scope) {
+		return ReasonRuleExpression
+	}
+	if len(rule.SourceEvidence) == 0 {
+		return ReasonRuleSourceMissing
+	}
+	for _, evidence := range rule.SourceEvidence {
+		if strings.TrimSpace(evidence.EvidenceID) == "" {
+			return ReasonRuleSourceMissing
+		}
+	}
+	if rule.ExpressionVersion != ExpressionVersionV1 {
+		return ReasonRuleExpression
+	}
+	raw, err := json.Marshal(rule.When)
+	if err != nil || len(raw) > maxExpressionJSONByteCount {
+		return ReasonRuleExpression
+	}
+	nodes := 0
+	fields := make([]string, 0)
+	if reason := validateRuleExpression(rule.When, 1, &nodes, &fields, definitions); reason != "" {
+		return reason
+	}
+	if !sameProfileFieldSet(rule.RequiredProfileFields, fields) {
+		return ReasonRuleExpression
+	}
+	return ""
+}
+
+func validRuleType(ruleType string) bool {
+	switch ruleType {
+	case RuleTypeSubjectRequirement,
+		"SINGLE_SUBJECT_MIN",
+		"PHYSICAL_RESTRICTION",
+		"GENDER_RESTRICTION",
+		"BATCH_RESTRICTION",
+		"TUITION_LIMIT",
+		"OTHER_HARD":
+		return true
+	default:
+		return false
+	}
+}
+
+func validRuleScope(scope RuleScope) bool {
+	return scope.ApplicationYear >= 0 &&
+		scope.UniversityID >= 0 &&
+		nonBlankOrEmpty(scope.Province) &&
+		nonBlankOrEmpty(scope.Category) &&
+		nonBlankOrEmpty(scope.Batch) &&
+		nonBlankOrEmpty(scope.MajorGroup) &&
+		nonBlankOrEmpty(scope.MajorCode)
+}
+
+func nonBlankOrEmpty(value string) bool {
+	return value == "" || strings.TrimSpace(value) != ""
 }
 
 func validateRuleExpression(

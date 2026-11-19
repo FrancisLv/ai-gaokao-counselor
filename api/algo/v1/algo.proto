@@ -55,6 +55,7 @@ message MajorDetail {
   int32 min_score = 7;    // 该专业历史最低分（专业级参考）
   int32 min_rank = 8;     // 该专业历史最低位次（仅展示，不用于概率计算）
   int32 admit_count = 9;  // 录取人数
+  bool in_current_plan = 10; // 该专业代码是否存在于报考年招生计划
 }
 
 // AdmissionRecord 某年录取记录（专业组维度）。

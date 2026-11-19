@@ -649,20 +649,8 @@ func TestIntegration_EvaluateEligibility_ProfileFieldCatalogIsAuthoritative(t *t
 	ruleID := fmt.Sprintf("rule-field-catalog-%d", suffix)
 	fieldKey := fmt.Sprintf("single_subject_scores.技术%d", suffix)
 	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO eligibility_profile_field (
-			field_key, value_type, allowed_values, description
-		 ) VALUES ($1, 'INT', ARRAY[]::TEXT[], 'integration fixture')`,
-		fieldKey,
-	); err != nil {
-		t.Fatalf("insert profile field contract: %v", err)
-	}
-	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(),
-			`DELETE FROM eligibility_profile_field WHERE field_key = $1`, fieldKey)
-	})
-	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
-		 VALUES ($1, 'PUBLISHED', '{}'::jsonb, 'sha256:m4b-field-catalog', NOW())`,
+		 VALUES ($1, 'STAGING', '{}'::jsonb, 'sha256:m4b-field-catalog', NULL)`,
 		releaseID,
 	); err != nil {
 		t.Fatalf("insert release: %v", err)
@@ -670,6 +658,14 @@ func TestIntegration_EvaluateEligibility_ProfileFieldCatalogIsAuthoritative(t *t
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
 	})
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO eligibility_profile_field (
+			release_id, field_key, value_type, allowed_values, description
+		 ) VALUES ($1, $2, 'INT', ARRAY[]::TEXT[], 'integration fixture')`,
+		releaseID, fieldKey,
+	); err != nil {
+		t.Fatalf("insert profile field contract: %v", err)
+	}
 	publishEligibilityRuleFixture(
 		t,
 		pool,

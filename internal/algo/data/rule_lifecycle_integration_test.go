@@ -248,6 +248,46 @@ func TestIntegration_RuleLifecycleRejectsDirectPublishAndMissingCoverage(t *test
 	}
 }
 
+func TestIntegration_RuleLifecycleRejectsInvalidContentBeforeReview(t *testing.T) {
+	pool, repo, _ := setupRuleLifecycleIntegration(t)
+	releaseID := fmt.Sprintf("rel_m4b_lifecycle_validation_%d", time.Now().UnixNano())
+	insertLifecycleRelease(t, pool, releaseID)
+	insertLifecycleCoverage(t, pool, releaseID)
+
+	draft := lifecycleRuleDraft(
+		releaseID,
+		"rule-invalid-review-"+releaseID,
+		"subject-requirement",
+	)
+	draft.RequiredProfileFields = []string{"category"}
+	draft.Expression = biz.RuleExpression{
+		Operator: biz.OperatorEQ,
+		Field:    "unknown.profile.field",
+		Value:    []byte(`"物理类"`),
+	}
+	cleanupLifecycleRule(t, pool, draft.RuleID)
+	if err := repo.CreateDraft(context.Background(), draft); err != nil {
+		t.Fatalf("CreateDraft: %v", err)
+	}
+	if err := repo.Transition(context.Background(), RuleTransition{
+		RuleID: draft.RuleID, Version: draft.Version,
+		ExpectedState: "DRAFT", TargetState: "REVIEWED", Actor: "reviewer",
+	}); !errors.Is(err, errs.ErrRulePublishIncomplete) {
+		t.Fatalf("invalid rule review err = %v, want ErrRulePublishIncomplete", err)
+	}
+	var state string
+	if err := pool.QueryRow(context.Background(), `
+		SELECT review_status FROM rule_version
+		WHERE rule_id = $1 AND version = $2`,
+		draft.RuleID, draft.Version,
+	).Scan(&state); err != nil {
+		t.Fatalf("read rejected rule state: %v", err)
+	}
+	if state != biz.ReviewStateDraft {
+		t.Fatalf("rejected rule state = %q, want DRAFT", state)
+	}
+}
+
 func setupRuleLifecycleIntegration(t *testing.T) (*pgxpool.Pool, *RuleLifecycleRepo, *Data) {
 	t.Helper()
 	dsn := os.Getenv("ALGO_TEST_DSN")
@@ -260,6 +300,27 @@ func setupRuleLifecycleIntegration(t *testing.T) (*pgxpool.Pool, *RuleLifecycleR
 	}
 	t.Cleanup(pool.Close)
 	applyRuleLifecycleMigration(t, pool)
+	applyMigrationIfNeeded(
+		t,
+		pool,
+		"23_rule_expression_contract.sql",
+		"rule_version",
+		"expression_version",
+	)
+	applyMigrationIfNeeded(
+		t,
+		pool,
+		"24_eligibility_profile_fields.sql",
+		"eligibility_profile_field",
+		"field_key",
+	)
+	applyMigrationIfNeeded(
+		t,
+		pool,
+		"26_release_bound_profile_fields.sql",
+		"eligibility_profile_field",
+		"release_id",
+	)
 
 	t.Setenv("ALGO_DATA_DSN", dsn)
 	d, cleanup, err := NewData(&conf.Bootstrap{

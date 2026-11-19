@@ -30,12 +30,12 @@ func TestMajorFromRow_AllFields(t *testing.T) {
 	row := dbgen.ListCandidateMajorsRow{
 		MajorCode: "01", MajorName: "计算机", SubjectReq: "首选物理，再选化学",
 		Duration: "四年", Tuition: 5200.5, MajorNote: "示例备注",
-		MinScore: 600, MinRank: 10000, AdmitCount: 25,
+		MinScore: 600, MinRank: 10000, AdmitCount: 25, InCurrentPlan: true,
 	}
 	want := biz.MajorDetail{
 		MajorCode: "01", MajorName: "计算机", SubjectReq: "首选物理，再选化学",
 		Duration: "四年", Tuition: 5200.5, MajorNote: "示例备注",
-		MinScore: 600, MinRank: 10000, AdmitCount: 25,
+		MinScore: 600, MinRank: 10000, AdmitCount: 25, InCurrentPlan: true,
 	}
 	if got := majorFromRow(row); got != want {
 		t.Fatalf("专业字段映射错误: %+v", got)

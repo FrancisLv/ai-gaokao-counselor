@@ -139,8 +139,15 @@ func TestEvaluateEligibility_MissingFactMakesGroupUnknown(t *testing.T) {
 		RequiredProfileFields: []string{"single_subject_scores.数学"},
 		When:                  RuleExpression{Operator: OperatorPRESENT, Field: "single_subject_scores.数学"},
 		OutcomeWhenTrue:       OutcomeFail,
+		ReasonCode:            "MATH_REQUIRED",
 		ReviewState:           ReviewStatePublished,
 		ExpressionVersion:     ExpressionVersionV1,
+		SourceEvidence: []EvidenceRef{{
+			EvidenceID:   "ev-math-required",
+			EvidenceType: "DOCUMENT",
+			ReleaseID:    "rel-test",
+			ContentSHA:   "sha256:math-required",
+		}},
 	})
 	set.Coverage = append(set.Coverage, RuleCoverage{
 		RuleType: "SINGLE_SUBJECT_MIN",

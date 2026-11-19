@@ -24,6 +24,48 @@ func (q *Queries) GetEligibilityRelease(ctx context.Context, releaseID string) (
 	return status, err
 }
 
+const listAllEligibilityProfileFields = `-- name: ListAllEligibilityProfileFields :many
+SELECT
+    release_id,
+    field_key,
+    value_type,
+    allowed_values
+FROM eligibility_profile_field
+ORDER BY field_key, release_id
+`
+
+type ListAllEligibilityProfileFieldsRow struct {
+	ReleaseID     string
+	FieldKey      string
+	ValueType     string
+	AllowedValues []string
+}
+
+func (q *Queries) ListAllEligibilityProfileFields(ctx context.Context) ([]ListAllEligibilityProfileFieldsRow, error) {
+	rows, err := q.db.Query(ctx, listAllEligibilityProfileFields)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAllEligibilityProfileFieldsRow
+	for rows.Next() {
+		var i ListAllEligibilityProfileFieldsRow
+		if err := rows.Scan(
+			&i.ReleaseID,
+			&i.FieldKey,
+			&i.ValueType,
+			&i.AllowedValues,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listEligibilityCoverage = `-- name: ListEligibilityCoverage :many
 SELECT
     rule_type,
@@ -76,6 +118,7 @@ SELECT
     value_type,
     allowed_values
 FROM eligibility_profile_field
+WHERE release_id = $1::text
 ORDER BY field_key
 `
 
@@ -85,8 +128,8 @@ type ListEligibilityProfileFieldsRow struct {
 	AllowedValues []string
 }
 
-func (q *Queries) ListEligibilityProfileFields(ctx context.Context) ([]ListEligibilityProfileFieldsRow, error) {
-	rows, err := q.db.Query(ctx, listEligibilityProfileFields)
+func (q *Queries) ListEligibilityProfileFields(ctx context.Context, releaseID string) ([]ListEligibilityProfileFieldsRow, error) {
+	rows, err := q.db.Query(ctx, listEligibilityProfileFields, releaseID)
 	if err != nil {
 		return nil, err
 	}

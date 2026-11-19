@@ -82,15 +82,16 @@ type AdmissionRecord struct {
 
 // MajorDetail 组内专业详情（major_admission JOIN major）。
 type MajorDetail struct {
-	MajorCode  string  // 专业代码
-	MajorName  string  // 专业名称
-	SubjectReq string  // 选科要求，如"首选物理，再选不限"
-	Duration   string  // 学制，如"四年"（来自 major 表）
-	Tuition    float64 // 学费（元/年，来自 major 表）
-	MajorNote  string  // 备注，如"（卓越班）"、中外合作等
-	MinScore   int     // 该专业历史最低分（专业级参考）
-	MinRank    int     // 该专业历史最低位次（仅展示，不用于概率计算）
-	AdmitCount int     // 录取人数
+	MajorCode     string  // 专业代码
+	MajorName     string  // 专业名称
+	SubjectReq    string  // 选科要求，如"首选物理，再选不限"
+	Duration      string  // 学制，如"四年"（来自 major 表）
+	Tuition       float64 // 学费（元/年，来自 major 表）
+	MajorNote     string  // 备注，如"（卓越班）"、中外合作等
+	MinScore      int     // 该专业历史最低分（专业级参考）
+	MinRank       int     // 该专业历史最低位次（仅展示，不用于概率计算）
+	AdmitCount    int     // 录取人数
+	InCurrentPlan bool    // 该专业代码是否存在于报考年招生计划
 }
 
 // Category 分档标签（ProbEstimate.Category 取值；单一真相源，prob/optimize 共用，§3.2/§3.5）。

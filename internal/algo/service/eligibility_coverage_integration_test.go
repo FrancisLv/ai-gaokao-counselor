@@ -245,6 +245,21 @@ func applyEligibilityCoverageTestMigrations(t *testing.T, pool *pgxpool.Pool) {
 		applyCoverageSQLFile(t, pool, "24_eligibility_profile_fields.sql")
 	}
 	applyCoverageSQLFile(t, pool, "25_rule_coverage_contract.sql")
+	var profileFieldReleaseBound bool
+	if err := pool.QueryRow(context.Background(), `
+		SELECT EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = 'eligibility_profile_field'
+			  AND column_name = 'release_id'
+		)`,
+	).Scan(&profileFieldReleaseBound); err != nil {
+		t.Fatalf("inspect release-bound profile field catalog: %v", err)
+	}
+	if !profileFieldReleaseBound {
+		applyCoverageSQLFile(t, pool, "26_release_bound_profile_fields.sql")
+	}
 }
 
 func applyCoverageSQLFile(t *testing.T, pool *pgxpool.Pool, name string) {
