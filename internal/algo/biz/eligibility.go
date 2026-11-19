@@ -281,6 +281,14 @@ func (u *EligibilityUsecase) EvaluateEligibility(ctx context.Context, req Eligib
 		result.Groups = blockedGroups(req.CandidateGroups, reason)
 		return result, nil
 	}
+	coverageConflicts := countCoverageConflicts(req, rules, set.Coverage, set.RevokedRules)
+	result.Diagnostics.ConflictCount += coverageConflicts
+	if coverageConflicts > 0 {
+		result.Status = EligibilityBlocked
+		result.Diagnostics.UnknownCount = candidateMajorCount(req.CandidateGroups)
+		result.Groups = blockedGroups(req.CandidateGroups, ReasonRuleConflict)
+		return result, nil
+	}
 	for _, group := range req.CandidateGroups {
 		ground := evaluateGroup(req.Scope, group, rules, set.Coverage, set.RevokedRules, facts)
 		result.Groups = append(result.Groups, ground)
@@ -407,12 +415,11 @@ func evaluateMajor(
 	}
 
 	invalidatedRuleTypes := invalidatedRuleTypesFor(revokedRules, scope, group, major)
-	required := append([]string{RuleTypeSubjectRequirement}, invalidatedRuleTypes...)
-	for _, rule := range applicable {
-		required = append(required, rule.RuleType)
-	}
-	for _, ruleType := range stableStrings(required) {
-		if containsString(invalidatedRuleTypes, ruleType) || !hasFullCoverage(coverage, ruleType) {
+	for _, ruleType := range requiredRuleTypes(applicable, invalidatedRuleTypes) {
+		declaration, found, _ := resolveCoverage(coverage, ruleType, scope, group, major)
+		if containsString(invalidatedRuleTypes, ruleType) ||
+			!found ||
+			declaration.Status != CoverageFull {
 			out.Status = MajorUnknown
 			out.UnknownReasons = append(out.UnknownReasons, ReasonRuleCoverageMissing)
 		}
@@ -455,6 +462,29 @@ func (s RuleScope) Covers(other RuleScope) bool {
 		scopeCovers(s.MajorCode, other.MajorCode)
 }
 
+func (s RuleScope) Specificity() int {
+	values := []string{
+		s.Province,
+		s.Category,
+		s.Batch,
+		s.MajorGroup,
+		s.MajorCode,
+	}
+	specificity := 0
+	for _, value := range values {
+		if value != "" {
+			specificity++
+		}
+	}
+	if s.ApplicationYear != 0 {
+		specificity++
+	}
+	if s.UniversityID != 0 {
+		specificity++
+	}
+	return specificity
+}
+
 func scopesOverlap(left, right string) bool {
 	return left == "" || right == "" || left == right
 }
@@ -488,15 +518,6 @@ func conflictingRuleKeys(rules []RuleVersion) []string {
 		}
 	}
 	return stableStrings(conflicts)
-}
-
-func hasFullCoverage(coverage []RuleCoverage, ruleType string) bool {
-	for _, item := range coverage {
-		if item.RuleType == ruleType && item.Status == CoverageFull {
-			return true
-		}
-	}
-	return false
 }
 
 func profileFactIndex(facts []ProfileFact) map[string]ProfileFact {
@@ -555,6 +576,84 @@ func invalidatedRuleTypesFor(
 		}
 	}
 	return stableStrings(ruleTypes)
+}
+
+func requiredRuleTypes(applicable []RuleVersion, invalidated []string) []string {
+	required := append([]string{RuleTypeSubjectRequirement}, invalidated...)
+	for _, rule := range applicable {
+		required = append(required, rule.RuleType)
+	}
+	return stableStrings(required)
+}
+
+func countCoverageConflicts(
+	req EligibilityRequest,
+	rules []RuleVersion,
+	coverage []RuleCoverage,
+	revokedRules []RevokedRuleVersion,
+) int {
+	conflicts := 0
+	for _, group := range req.CandidateGroups {
+		for _, major := range group.Majors {
+			if !major.InCurrentPlan {
+				continue
+			}
+			var applicable []RuleVersion
+			for _, rule := range rules {
+				if rule.ReviewState == ReviewStatePublished &&
+					rule.Scope.Applies(req.Scope, group, major) {
+					applicable = append(applicable, rule)
+				}
+			}
+			invalidated := invalidatedRuleTypesFor(revokedRules, req.Scope, group, major)
+			for _, ruleType := range requiredRuleTypes(applicable, invalidated) {
+				_, _, conflict := resolveCoverage(
+					coverage,
+					ruleType,
+					req.Scope,
+					group,
+					major,
+				)
+				if conflict {
+					conflicts++
+				}
+			}
+		}
+	}
+	return conflicts
+}
+
+// resolveCoverage 选择适用于当前专业的最高具体度声明。覆盖范围越窄越优先；
+// 同具体度出现多个适用声明时无法确定唯一事实，必须阻断而不是按输入顺序任选。
+func resolveCoverage(
+	coverage []RuleCoverage,
+	ruleType string,
+	scope EligibilityScope,
+	group CandidateGroup,
+	major CandidateMajor,
+) (RuleCoverage, bool, bool) {
+	var applicable []RuleCoverage
+	maxSpecificity := -1
+	for _, item := range coverage {
+		if item.RuleType != ruleType || !item.Scope.Applies(scope, group, major) {
+			continue
+		}
+		specificity := item.Scope.Specificity()
+		switch {
+		case specificity > maxSpecificity:
+			maxSpecificity = specificity
+			applicable = append(applicable[:0], item)
+		case specificity == maxSpecificity:
+			applicable = append(applicable, item)
+		}
+	}
+	if len(applicable) == 0 {
+		return RuleCoverage{}, false, false
+	}
+	if len(applicable) > 1 {
+		return RuleCoverage{}, true, true
+	}
+	return applicable[0], true, false
 }
 
 func sortedRules(rules []RuleVersion) []RuleVersion {

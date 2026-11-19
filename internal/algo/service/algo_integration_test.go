@@ -83,6 +83,13 @@ func publishEligibilityRuleFixture(
 		_, _ = pool.Exec(context.Background(), `DELETE FROM rule_version WHERE rule_id = $1`, ruleID)
 	})
 	if _, err := pool.Exec(context.Background(), `
+		UPDATE release
+		SET status = 'STAGING', published_at = NULL
+		WHERE release_id = $1`, releaseID,
+	); err != nil {
+		t.Fatalf("stage eligibility release: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
 		INSERT INTO rule_version (
 			rule_id, version, rule_key, rule_type, scope, required_profile_fields,
 			expression, expression_version, outcome_when_true, reason_code,
@@ -108,7 +115,7 @@ func publishEligibilityRuleFixture(
 			) VALUES (
 				$1, $2, '{}'::jsonb, 'FULL', '["major_admission"]'::jsonb, 'test fixture'
 			)
-			ON CONFLICT (release_id, rule_type, scope) DO NOTHING`,
+			ON CONFLICT ON CONSTRAINT rule_coverage_release_type_scope_key_key DO NOTHING`,
 			releaseID, coverageType,
 		); err != nil {
 			t.Fatalf("insert eligibility coverage: %v", err)
@@ -132,6 +139,13 @@ func publishEligibilityRuleFixture(
 		WHERE rule_id = $1 AND version = 1`, ruleID, releaseID,
 	); err != nil {
 		t.Fatalf("publish eligibility rule: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE release
+		SET status = 'PUBLISHED', published_at = clock_timestamp()
+		WHERE release_id = $1`, releaseID,
+	); err != nil {
+		t.Fatalf("publish eligibility release: %v", err)
 	}
 }
 
@@ -369,7 +383,7 @@ func TestIntegration_EvaluateEligibility_SubjectRule(t *testing.T) {
 	ruleID := "rule-subject-test-" + releaseID
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
-		 VALUES ($1, 'PUBLISHED', '{}'::jsonb, 'sha256:m4b', NOW())`, releaseID); err != nil {
+		 VALUES ($1, 'STAGING', '{}'::jsonb, 'sha256:m4b', NULL)`, releaseID); err != nil {
 		t.Fatalf("insert release: %v", err)
 	}
 	t.Cleanup(func() {
@@ -428,6 +442,12 @@ func TestIntegration_EvaluateEligibility_SubjectRule(t *testing.T) {
 		releaseID, ruleID,
 	); err != nil {
 		t.Fatalf("publish rule_version: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE release SET status = 'PUBLISHED', published_at = clock_timestamp()
+		 WHERE release_id = $1`, releaseID,
+	); err != nil {
+		t.Fatalf("publish release: %v", err)
 	}
 
 	t.Setenv("ALGO_DATA_DSN", dsn)

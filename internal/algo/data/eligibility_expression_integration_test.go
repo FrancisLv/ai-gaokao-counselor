@@ -29,7 +29,7 @@ func TestIntegration_RuleExpressionStorageContract(t *testing.T) {
 	releaseID := fmt.Sprintf("rel_m4b_ast_storage_%d", time.Now().UnixNano())
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
-		 VALUES ($1, 'PUBLISHED', '{}'::jsonb, 'sha256:m4b-ast-storage', NOW())`, releaseID); err != nil {
+		 VALUES ($1, 'STAGING', '{}'::jsonb, 'sha256:m4b-ast-storage', NULL)`, releaseID); err != nil {
 		t.Fatalf("insert release: %v", err)
 	}
 	t.Cleanup(func() {
