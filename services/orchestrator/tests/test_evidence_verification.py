@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, datetime, timezone
+from decimal import Decimal
 import hashlib
 import unittest
 
@@ -915,6 +916,388 @@ class VerifyPackageStructuredTests(unittest.TestCase):
 
 
 class VerifyPackageDerivedTests(unittest.TestCase):
+    def test_missing_derived_output_value_or_unit_is_unverifiable(self):
+        evidence = derived_evidence()
+        ref = derived_ref(evidence)
+        claim = derived_claim(ref)
+        cases = (
+            replace(evidence, output_value=None),
+            replace(evidence, unit=None),
+        )
+        for invalid_evidence in cases:
+            with self.subTest(evidence=invalid_evidence):
+                invalid_ref = derived_ref(invalid_evidence)
+                report = VerifyPackage(
+                    derived_package(invalid_evidence, invalid_ref),
+                    today=date(2025, 6, 1),
+                )
+                self.assertEqual(report.status, "BLOCKED")
+                self.assertEqual(
+                    report.claims[0].status,
+                    "UNVERIFIABLE",
+                )
+                self.assertEqual(
+                    report.claims[0].reason,
+                    "EVIDENCE_NOT_FOUND",
+                )
+
+        claim_cases = (
+            replace(claim.normalized, object=None),
+            replace(claim.normalized, unit=None),
+        )
+        for normalized in claim_cases:
+            with self.subTest(normalized=normalized):
+                report = VerifyPackage(
+                    replace(
+                        derived_package(evidence, ref),
+                        claims=(replace(claim, normalized=normalized),),
+                    ),
+                    today=date(2025, 6, 1),
+                )
+                self.assertEqual(report.status, "BLOCKED")
+                self.assertEqual(
+                    report.claims[0].status,
+                    "UNVERIFIABLE",
+                )
+                self.assertEqual(
+                    report.claims[0].reason,
+                    "DERIVED_IDENTITY_MISSING",
+                )
+
+    def test_decimal_string_artifact_uses_canonical_numeric_value(self):
+        evidence = replace(
+            derived_evidence(),
+            operation_id="probability",
+            algorithm="weighted_hit",
+            algorithm_version="weighted-hit-v1",
+            output_field="probability",
+            output_value="0.670",
+            unit="",
+            precision=2,
+        )
+        ref = derived_ref(evidence)
+        claim = replace(
+            derived_claim(ref),
+            normalized=replace(
+                derived_claim(ref).normalized,
+                predicate="probability",
+                object=0.67,
+                unit="",
+                precision=2,
+            ),
+            rendered_text="录取概率为0.67，样本年份为2022、2023、2024。",
+            rendered_bindings=(
+                RenderedBinding(
+                    fact_path="normalized.object",
+                    rendered_text="0.67",
+                    evidence_id=ref.evidence_id,
+                ),
+                RenderedBinding(
+                    fact_path="normalized.unit",
+                    rendered_text="",
+                    evidence_id=ref.evidence_id,
+                ),
+                RenderedBinding(
+                    fact_path="normalized.sample_years",
+                    rendered_text="2022、2023、2024",
+                    evidence_id=ref.evidence_id,
+                ),
+            ),
+        )
+
+        report = VerifyPackage(
+            replace(derived_package(evidence, ref), claims=(claim,)),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "PASS")
+        self.assertEqual(report.claims[0].status, "VERIFIED")
+
+    def test_derived_evidence_must_be_resolvable_typed_and_same_release(self):
+        evidence = derived_evidence()
+        ref = derived_ref(evidence)
+        other_release = replace(
+            evidence,
+            release_id="rel-other",
+        )
+        other_ref = replace(
+            ref,
+            release_id="rel-other",
+            derived=other_release,
+        )
+        document = document_evidence()
+        document_evidence_ref = document_ref(document)
+        cases = (
+            (
+                replace(
+                    derived_package(evidence, ref),
+                    evidence_registry=(),
+                ),
+                "EVIDENCE_NOT_FOUND",
+            ),
+            (
+                replace(
+                    derived_package(evidence, ref),
+                    evidence_registry=(
+                        replace(ref, derived=None),
+                    ),
+                ),
+                "EVIDENCE_NOT_FOUND",
+            ),
+            (
+                derived_package(other_release, other_ref),
+                "EVIDENCE_RELEASE_MISMATCH",
+            ),
+            (
+                replace(
+                    derived_package(evidence, ref),
+                    claims=(derived_claim(document_evidence_ref),),
+                    evidence_registry=(document_evidence_ref,),
+                ),
+                "CLAIM_UNSUPPORTED",
+            ),
+        )
+
+        for package, reason in cases:
+            with self.subTest(reason=reason):
+                report = VerifyPackage(
+                    package,
+                    today=date(2025, 6, 1),
+                )
+                self.assertEqual(report.status, "BLOCKED")
+                self.assertEqual(
+                    report.claims[0].status,
+                    "UNVERIFIABLE",
+                )
+                self.assertEqual(report.claims[0].reason, reason)
+
+    def test_derived_rendered_bindings_must_match_canonical_identity(self):
+        evidence = derived_evidence()
+        ref = derived_ref(evidence)
+        claim = derived_claim(ref)
+        cases = (
+            replace(
+                claim,
+                rendered_text=claim.rendered_text.replace("15860", "16000"),
+                rendered_bindings=(
+                    replace(
+                        claim.rendered_bindings[0],
+                        rendered_text="16000",
+                    ),
+                    *claim.rendered_bindings[1:],
+                ),
+            ),
+            replace(
+                claim,
+                rendered_bindings=claim.rendered_bindings[:-1],
+            ),
+            replace(
+                claim,
+                rendered_bindings=(
+                    replace(
+                        claim.rendered_bindings[0],
+                        evidence_id="ev-other",
+                    ),
+                    *claim.rendered_bindings[1:],
+                ),
+            ),
+        )
+
+        for invalid_claim in cases:
+            with self.subTest(claim=invalid_claim):
+                report = VerifyPackage(
+                    replace(
+                        derived_package(evidence, ref),
+                        claims=(invalid_claim,),
+                    ),
+                    today=date(2025, 6, 1),
+                )
+                self.assertEqual(report.status, "BLOCKED")
+                self.assertEqual(
+                    report.claims[0].status,
+                    "CONTRADICTED",
+                )
+                self.assertEqual(
+                    report.claims[0].reason,
+                    "CLAIM_RENDER_MISMATCH",
+                )
+
+    def test_equivalent_admission_guarantee_is_out_of_bounds(self):
+        evidence = derived_evidence()
+        ref = derived_ref(evidence)
+        claim = replace(
+            derived_claim(ref),
+            rendered_text="我将保证你被录取。",
+        )
+
+        report = VerifyPackage(
+            replace(derived_package(evidence, ref), claims=(claim,)),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.claims[0].status, "CONTRADICTED")
+        self.assertEqual(
+            report.claims[0].reason,
+            "DERIVED_PROMISE_OUT_OF_BOUNDS",
+        )
+
+    def test_negated_admission_guarantee_is_allowed(self):
+        evidence = derived_evidence()
+        ref = derived_ref(evidence)
+        claim = replace(
+            derived_claim(ref),
+            rendered_text=(
+                "考生位次为 15860 名，样本年份为 2022、2023、2024 年，"
+                "不保证录取。"
+            ),
+        )
+
+        report = VerifyPackage(
+            replace(derived_package(evidence, ref), claims=(claim,)),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "PASS")
+        self.assertEqual(report.claims[0].status, "VERIFIED")
+
+    def test_repeated_derived_verification_is_deterministic(self):
+        evidence = derived_evidence()
+        ref = derived_ref(evidence)
+        package = derived_package(evidence, ref)
+        recomputer = FixedDerivedRecomputer(evidence)
+
+        first = VerifyPackage(
+            package,
+            today=date(2025, 6, 1),
+            derived_recomputer=recomputer,
+        )
+        second = VerifyPackage(
+            package,
+            today=date(2025, 6, 1),
+            derived_recomputer=recomputer,
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(recomputer.calls, ["rank_convert", "rank_convert"])
+
+    def test_nearby_float_is_not_accepted_as_the_same_probability(self):
+        evidence = replace(
+            derived_evidence(),
+            operation_id="probability",
+            algorithm="weighted_hit",
+            algorithm_version="weighted-hit-v1",
+            output_field="probability",
+            output_value=0.67,
+            unit="",
+            precision=2,
+        )
+        ref = derived_ref(evidence)
+        claim = replace(
+            derived_claim(ref),
+            normalized=replace(
+                derived_claim(ref).normalized,
+                predicate="probability",
+                object=0.670001,
+                unit="",
+                precision=2,
+            ),
+        )
+
+        report = VerifyPackage(
+            replace(derived_package(evidence, ref), claims=(claim,)),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.claims[0].status, "CONTRADICTED")
+        self.assertEqual(
+            report.claims[0].reason,
+            "DERIVED_VALUE_MISMATCH",
+        )
+
+    def test_unavailable_recomputation_falls_back_to_immutable_artifact(self):
+        evidence = derived_evidence()
+        ref = derived_ref(evidence)
+        recomputer = FixedDerivedRecomputer(None)
+
+        report = VerifyPackage(
+            derived_package(evidence, ref),
+            today=date(2025, 6, 1),
+            derived_recomputer=recomputer,
+        )
+
+        self.assertEqual(report.status, "PASS")
+        self.assertEqual(report.claims[0].status, "VERIFIED")
+        self.assertEqual(recomputer.calls, ["rank_convert"])
+
+    def test_successful_recomputation_verifies_the_claim(self):
+        saved = replace(derived_evidence(), output_value=15000)
+        ref = derived_ref(saved)
+        recomputer = FixedDerivedRecomputer(
+            replace(saved, output_value=15860)
+        )
+
+        report = VerifyPackage(
+            derived_package(saved, ref),
+            today=date(2025, 6, 1),
+            derived_recomputer=recomputer,
+        )
+
+        self.assertEqual(report.status, "PASS")
+        self.assertEqual(report.claims[0].status, "VERIFIED")
+        self.assertTrue(report.claims[0].deterministic)
+        self.assertEqual(recomputer.calls, ["rank_convert"])
+
+    def test_derived_values_use_canonical_decimal_comparison(self):
+        evidence = replace(
+            derived_evidence(),
+            operation_id="probability",
+            algorithm="weighted_hit",
+            algorithm_version="weighted-hit-v1",
+            output_field="probability",
+            output_value=Decimal("0.67"),
+            unit="",
+            precision=2,
+        )
+        ref = derived_ref(evidence)
+        claim = replace(
+            derived_claim(ref),
+            normalized=replace(
+                derived_claim(ref).normalized,
+                predicate="probability",
+                object=0.67,
+                unit="",
+                precision=2,
+            ),
+            rendered_text="录取概率为0.67，样本年份为2022、2023、2024。",
+            rendered_bindings=(
+                RenderedBinding(
+                    fact_path="normalized.object",
+                    rendered_text="0.67",
+                    evidence_id=ref.evidence_id,
+                ),
+                RenderedBinding(
+                    fact_path="normalized.unit",
+                    rendered_text="",
+                    evidence_id=ref.evidence_id,
+                ),
+                RenderedBinding(
+                    fact_path="normalized.sample_years",
+                    rendered_text="2022、2023、2024",
+                    evidence_id=ref.evidence_id,
+                ),
+            ),
+        )
+
+        report = VerifyPackage(
+            replace(derived_package(evidence, ref), claims=(claim,)),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "PASS")
+        self.assertEqual(report.claims[0].status, "VERIFIED")
+
     def test_derived_artifact_hash_must_match_evidence_ref(self):
         evidence = derived_evidence()
         ref = derived_ref(evidence)
@@ -1096,11 +1479,15 @@ class VerifyPackageDerivedTests(unittest.TestCase):
         evidence = derived_evidence()
         cases = (
             replace(evidence, operation_id=""),
+            replace(evidence, algorithm=""),
             replace(evidence, algorithm_version=""),
             replace(evidence, config_sha256=""),
             replace(evidence, input_snapshot_sha256=""),
             replace(evidence, profile_version=""),
+            replace(evidence, sample_years=()),
             replace(evidence, output_field=""),
+            replace(evidence, output_value=float("nan")),
+            replace(evidence, precision=None),
             replace(evidence, artifact_sha256=""),
         )
         for invalid_evidence in cases:
@@ -1123,21 +1510,37 @@ class VerifyPackageDerivedTests(unittest.TestCase):
     def test_recomputed_algorithm_identity_must_match_artifact(self):
         evidence = derived_evidence()
         ref = derived_ref(evidence)
-
-        report = VerifyPackage(
-            derived_package(evidence, ref),
-            today=date(2025, 6, 1),
-            derived_recomputer=FixedDerivedRecomputer(
-                replace(evidence, profile_version="profile-v2")
-            ),
+        recomputed_cases = (
+            replace(evidence, operation_id="probability"),
+            replace(evidence, algorithm="weighted_hit"),
+            replace(evidence, algorithm_version="rank-v2"),
+            replace(evidence, config_sha256="f" * 64),
+            replace(evidence, input_snapshot_sha256="a" * 64),
+            replace(evidence, profile_version="profile-v2"),
+            replace(evidence, release_id="rel-other"),
+            replace(evidence, sample_years=(2021, 2023, 2024)),
+            replace(evidence, output_field="probability"),
+            replace(evidence, unit="位"),
+            replace(evidence, precision=2),
+            replace(evidence, assumptions=("改用另一假设",)),
+            replace(evidence, warnings=("改用另一告警",)),
         )
-
-        self.assertEqual(report.status, "BLOCKED")
-        self.assertEqual(report.claims[0].status, "CONTRADICTED")
-        self.assertEqual(
-            report.claims[0].reason,
-            "DERIVED_INPUT_MISMATCH",
-        )
+        for recomputed in recomputed_cases:
+            with self.subTest(recomputed=recomputed):
+                report = VerifyPackage(
+                    derived_package(evidence, ref),
+                    today=date(2025, 6, 1),
+                    derived_recomputer=FixedDerivedRecomputer(recomputed),
+                )
+                self.assertEqual(report.status, "BLOCKED")
+                self.assertEqual(
+                    report.claims[0].status,
+                    "CONTRADICTED",
+                )
+                self.assertEqual(
+                    report.claims[0].reason,
+                    "DERIVED_INPUT_MISMATCH",
+                )
 
     def test_sample_years_are_compared_as_a_sorted_set(self):
         evidence = replace(

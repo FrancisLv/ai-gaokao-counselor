@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from collections import Counter
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import hashlib
 import math
 import re
@@ -491,10 +491,8 @@ def _verify_derived_claim(
         if evidence.output_field != claim.normalized.predicate:
             return "CONTRADICTED", "DERIVED_VALUE_MISMATCH", True
         if (
-            _canonical_scalar(evidence.output_value)[0]
-            != _canonical_scalar(claim.normalized.object)[0]
-            or _canonical_scalar(evidence.output_value)[1]
-            != _canonical_scalar(claim.normalized.object)[1]
+            _canonical_derived_value(evidence.output_value)
+            != _canonical_derived_value(claim.normalized.object)
             or evidence.unit != claim.normalized.unit
             or evidence.precision != claim.normalized.precision
         ):
@@ -632,7 +630,9 @@ def _valid_derived_identity(evidence: DerivedEvidence) -> bool:
         return False
     if evidence.precision is None or evidence.precision < 0:
         return False
-    if _canonical_scalar(evidence.output_value)[0] == "invalid":
+    if evidence.output_value is None or evidence.unit is None:
+        return False
+    if _canonical_derived_value(evidence.output_value)[0] == "unsupported":
         return False
     return True
 
@@ -647,7 +647,9 @@ def _valid_derived_claim_identity(claim: Claim) -> bool:
         return False
     if claim.normalized.precision is None or claim.normalized.precision < 0:
         return False
-    if _canonical_scalar(claim.normalized.object)[0] == "invalid":
+    if claim.normalized.object is None or claim.normalized.unit is None:
+        return False
+    if _canonical_derived_value(claim.normalized.object)[0] == "unsupported":
         return False
     return True
 
@@ -679,16 +681,16 @@ def _derived_claim_exceeds_boundary(claim: Claim) -> bool:
     )
     for phrase in allowed_negations:
         compact = compact.replace(phrase, "")
-    forbidden = (
-        "保证录取",
-        "确保录取",
-        "必定录取",
-        "一定录取",
-        "包录取",
-        "100%录取",
-        "百分之百录取",
+    forbidden_patterns = (
+        r"(?:保证|确保|承诺|必定|一定).{0,6}录取",
+        r"(?:100%|百分之百).{0,2}录取",
+        r"录取.{0,2}(?:保证|无忧)",
+        r"包录取",
     )
-    return any(phrase in compact for phrase in forbidden)
+    return any(
+        re.search(pattern, compact)
+        for pattern in forbidden_patterns
+    )
 
 
 def _valid_document_identity(document: DocumentEvidence) -> bool:
@@ -953,8 +955,8 @@ def _canonical_scalar(value) -> tuple[str, str | None]:
 
 
 def _render_derived_value(value, precision: int | None) -> str:
-    canonical_type, canonical_value = _canonical_scalar(value)
-    if canonical_type in {"int", "decimal", "float"}:
+    canonical_type, canonical_value = _canonical_derived_value(value)
+    if canonical_type == "number":
         decimal = Decimal(canonical_value or "0")
         if precision is not None:
             return f"{decimal:.{precision}f}"
@@ -964,6 +966,24 @@ def _render_derived_value(value, precision: int | None) -> str:
     if canonical_type == "null":
         return "null"
     return canonical_value or ""
+
+
+def _canonical_derived_value(value) -> tuple[str, str | None]:
+    canonical_type, canonical_value = _canonical_scalar(value)
+    if canonical_type in {"int", "decimal", "float"}:
+        return (
+            "number",
+            _plain_decimal(Decimal(canonical_value or "0")),
+        )
+    if canonical_type == "str" and canonical_value is not None:
+        try:
+            decimal = Decimal(canonical_value)
+        except InvalidOperation:
+            return canonical_type, canonical_value
+        if not decimal.is_finite():
+            return "unsupported", None
+        return "number", _plain_decimal(decimal)
+    return canonical_type, canonical_value
 
 
 def _render_scalar(value) -> str:
