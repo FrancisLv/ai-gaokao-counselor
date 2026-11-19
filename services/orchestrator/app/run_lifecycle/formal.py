@@ -97,9 +97,18 @@ def canonical_source_package(package: EvidencePackage) -> EvidencePackage:
                     claim,
                     evidence_refs=tuple(
                         sorted(
-                            claim.evidence_refs,
+                            (
+                                _canonical_evidence_ref(ref)
+                                for ref in claim.evidence_refs
+                            ),
                             key=lambda ref: ref.evidence_id,
                         )
+                    ),
+                    normalized=replace(
+                        claim.normalized,
+                        sample_years=_canonical_sample_years(
+                            claim.normalized.sample_years
+                        ),
                     ),
                     rendered_bindings=tuple(
                         sorted(
@@ -118,7 +127,13 @@ def canonical_source_package(package: EvidencePackage) -> EvidencePackage:
         )
     )
     registry = tuple(
-        sorted(package.evidence_registry, key=lambda ref: ref.evidence_id)
+        sorted(
+            (
+                _canonical_evidence_ref(ref)
+                for ref in package.evidence_registry
+            ),
+            key=lambda ref: ref.evidence_id,
+        )
     )
     gate_context = package.gate_context
     if gate_context is not None:
@@ -129,7 +144,10 @@ def canonical_source_package(package: EvidencePackage) -> EvidencePackage:
                         notice,
                         evidence_refs=tuple(
                             sorted(
-                                notice.evidence_refs,
+                                (
+                                    _canonical_evidence_ref(ref)
+                                    for ref in notice.evidence_refs
+                                ),
                                 key=lambda ref: ref.evidence_id,
                             )
                         ),
@@ -180,6 +198,22 @@ def canonical_source_package(package: EvidencePackage) -> EvidencePackage:
         evidence_registry=registry,
         gate_context=gate_context,
     )
+
+
+def _canonical_evidence_ref(ref) -> Any:
+    if ref.derived is None:
+        return ref
+    return replace(
+        ref,
+        derived=replace(
+            ref.derived,
+            sample_years=_canonical_sample_years(ref.derived.sample_years),
+        ),
+    )
+
+
+def _canonical_sample_years(years: tuple[int, ...]) -> tuple[int, ...]:
+    return tuple(sorted(set(years)))
 
 
 def verification_summary(report: VerificationReport) -> dict[str, Any]:

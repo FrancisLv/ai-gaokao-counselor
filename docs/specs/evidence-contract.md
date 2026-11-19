@@ -278,7 +278,9 @@ ClaimVerification
 触发器拒绝 UPDATE/DELETE。`run_result_state_event` 追加 `ACTIVE / STALE` 状态，
 release 撤销只追加 `STALE / RELEASE_REVOKED`，不修改发布正文。同一
 `result_version` 的输入摘要冲突返回 `RESULT_VERSION_CONFLICT`，同摘要重试只重放
-原结果和原 RESULT 事件。
+原结果和原 RESULT 事件。计算输入摘要时，Claim 的规范化 `sample_years` 与
+`DERIVED` 证据内的 `sample_years` 都按与 Verifier 一致的去重升序集合处理；
+仅顺序变化的重试复用原结果，年份集合变化仍返回 `RESULT_VERSION_CONFLICT`。
 
 ## 9. 稳定错误
 

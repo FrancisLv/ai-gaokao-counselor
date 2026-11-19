@@ -134,21 +134,18 @@ CREATE OR REPLACE FUNCTION reject_run_result_mutation()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
-DECLARE
-    target_kind TEXT;
 BEGIN
     IF TG_OP = 'DELETE' THEN
-        target_kind := OLD.result_kind;
-    ELSE
-        target_kind := NEW.result_kind;
-    END IF;
-    IF target_kind <> 'V1_FORMAL' THEN
-        IF TG_OP = 'DELETE' THEN
-            RETURN OLD;
+        IF OLD.result_kind = 'V1_FORMAL' THEN
+            RAISE EXCEPTION 'run_result is immutable';
         END IF;
-        RETURN NEW;
+        RETURN OLD;
     END IF;
-    RAISE EXCEPTION 'run_result is immutable';
+    IF OLD.result_kind = 'V1_FORMAL'
+       OR NEW.result_kind = 'V1_FORMAL' THEN
+        RAISE EXCEPTION 'run_result is immutable';
+    END IF;
+    RETURN NEW;
 END;
 $$;
 

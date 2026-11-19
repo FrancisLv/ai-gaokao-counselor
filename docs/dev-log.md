@@ -1870,3 +1870,31 @@ LLM 规则生成。
 
 - LangGraph 图内 verify/report 节点、报告重写与回算上限仍由后续 M5/FR-18/FR-19
   工作接入；本票只闭合已生成证据包的正式发布边界。
+
+## 57. M4c-06 合并前 Review 修复：不可变结果反例与等价证据重放
+
+**日期与范围**：2026-11-20，对应 issue #30 独立审查 blocker。按严格 TDD 修复
+正式结果降级绕过、嵌套样本年份误判冲突，并删除无调用方的结果映射死代码。
+
+### 问题与实现
+
+- `run_result` 不可变触发器原先只检查 `NEW.result_kind`。已发布的 `V1_FORMAL`
+  可被联合同步改为 `POLICY_EVIDENCE`、清除确认 Profile 并改写 payload；现
+  UPDATE 同时检查 `OLD.result_kind` 与 `NEW.result_kind`，DELETE 继续检查旧行。
+- 正式输入摘要原先未规范化 Claim 与 `DERIVED` 证据中的嵌套 `sample_years`；
+  Verifier 已按去重升序集合比较，导致仅年份顺序不同的同一证据包重试误报
+  `RESULT_VERSION_CONFLICT`。现 canonicalization 在 Claim 规范化事实、Claim/Notice
+  引用和 evidence registry 中统一年份集合语义，年份集合实质变化仍冲突。
+- 删除 `RunLifecycle._formal_result_payload`；该静态映射无调用方。
+
+### 验证
+
+- 真实 PostgreSQL 先新增正式结果降级 UPDATE 反例，修复前未抛错，修复后拒绝且
+  原 `V1_FORMAL`、确认 Profile 与 payload 保持不变。
+- `PublishFormalResult` 公共行为测试先复现重排嵌套 `sample_years` 的重试冲突，
+  修复后同 `result_version`、证据包摘要与报告摘要均稳定重放。
+- `test_run_lifecycle_formal.py` 13 tests OK；`test_run_lifecycle_migration.py`
+  5 tests OK。
+- `make py-check py-test PY=/Users/francis/miniconda3/envs/ai-gaokao-counselor/bin/python3`
+  通过：284 tests OK，126 个依赖真实库/外部服务的用例按既有约定跳过。
+- `make build check test` 通过。
