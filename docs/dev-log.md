@@ -1665,3 +1665,70 @@ LLM 规则生成。
 
 - 本票未实现 `StructuredEvidence`、`DerivedEvidence`、`PASS/BLOCKED/PARTIAL`
   完整剥离状态机、资格/说明统一门禁或正式结果持久化。
+
+## 51. M4c-02：VerifyPackage 结构化事实闭环
+
+**日期与范围**：2026-11-19，对应 issue #26。通过同一个 `VerifyPackage`
+主 seam 增加 `StructuredEvidence` 校验；不实现派生算法重算、完整发布状态机或
+正式结果持久化。
+
+### 实现
+
+- `EvidenceRef` additive 支持类型化 `StructuredEvidence`，包含数据集、表、
+  主键、业务键、字段路径、规范值、单位、来源年份、精度、行/快照 hash 和
+  `release_id`。
+- `VerifyPackage` 通过注入的只读 `StructuredEvidenceAuthority` 重新解析同 release
+  权威行或快照，逐字段比较业务身份、值类型、值、单位、来源年份和精度；不使用
+  RAG 文本或自由 JSON 替代结构化来源。
+- NULL、缺失值语义和 0 保持区分。行/快照 hash、权威 release、业务键或字段身份
+  不一致时 fail-closed；缺少类型化 payload、权威来源或完整身份时返回
+  `UNVERIFIABLE`。
+- 结构化 Claim 的数字、单位和来源年份必须带渲染绑定，且绑定必须指向该 Claim 的
+  EvidenceRef。绑定缺失、改写或错指证据时返回 `CLAIM_RENDER_MISMATCH`。
+- 现有文档事实路径、失败即关闭语义与稳定排序保持不变。
+
+### 验证
+
+- `VerifyPackage` 行为测试新增同 release 正向、数值/类型/单位/来源年份/精度漂移、
+  错误业务键、NULL/0 区分、hash/跨 release、类型化 payload 缺失和渲染绑定错误。
+- `make py-check py-test` 通过：222 tests OK，112 个依赖真实库/外部服务的用例按
+  既有约定跳过。
+
+### 边界
+
+- 本票只定义结构化权威来源边界和注入式 adapter，不在 Verifier 内拼接任意数据表
+  SQL；生产查询 adapter 由后续集成与持久化票据接线。
+- `DerivedEvidence`、普通 `UNVERIFIABLE` 剥离、统一正式门禁和不可变结果仍由后续
+  M4c tickets 完成。
+
+## 52. M4c-03：VerifyPackage 派生事实闭环
+
+**日期与范围**：2026-11-19，对应 issue #27。通过同一个 `VerifyPackage`
+主 seam 增加 `DerivedEvidence` 校验；不新增算法、不实现完整撤销状态机或正式结果
+持久化。
+
+### 实现
+
+- `EvidenceRef` additive 支持类型化 `DerivedEvidence`，保存 operation、算法与版本、
+  配置 hash、输入快照 hash、Profile、release、样本年份、输出字段/值、单位、精度、
+  不可变产物 hash、假设和告警。
+- `VerifyPackage` 可注入版本化 `DerivedEvidenceRecomputer`。具备重算条件时以重算
+  产物为权威；否则比较已保存不可变算法产物。缺少重算或比对所需身份时 fail-closed。
+- 派生 Claim 精确比较规范输出值、单位、精度、样本年份、输出字段、Profile、
+  release 和算法身份；样本年份按去重后的升序规范集合比较。
+- 数字、单位和样本年份必须带指向本 Claim EvidenceRef 的渲染绑定；绑定缺失、改写或
+  错指证据时返回 `CLAIM_RENDER_MISMATCH`。
+- 近似概率、效用等派生 Claim 不得表达“保证录取”等超出算法能力的承诺。
+
+### 验证
+
+- `VerifyPackage` 行为测试覆盖不可变产物正向、确定性重算权威、算法/Profile
+  身份冲突、产物 hash、数字/单位/精度/样本年份漂移、身份字段缺失、样本年份规范化和
+  录取承诺越界。
+- 相关 `VerifyPackage` 行为测试通过。
+
+### 边界
+
+- 本票只定义派生事实校验与注入边界，不在 orchestrator 内重写算法。
+- 普通 `UNVERIFIABLE` 剥离、统一正式门禁、不可变证据包持久化和原子发布仍由后续
+  M4c tickets 完成。
