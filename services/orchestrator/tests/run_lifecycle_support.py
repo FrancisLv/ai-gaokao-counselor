@@ -159,6 +159,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
             await conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
             await self._apply_sql_file(conn, "migrations/00_schema.sql")
+            await self._apply_sql_file(conn, "migrations/07_policy_chunk_trgm.sql")
             await self._apply_sql_file(conn, "migrations/08_release_and_run_foundation.sql")
             await self._apply_sql_file(conn, "migrations/09_profile_run_lifecycle.sql")
             await self._apply_sql_file(conn, "migrations/10_run_leases.sql")
@@ -166,6 +167,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await self._apply_sql_file(conn, "migrations/12_run_view_fields.sql")
             await self._apply_sql_file(conn, "migrations/13_release_data_dimensions.sql")
             await self._apply_sql_file(conn, "migrations/14_default_release_scope.sql")
+            await self._apply_sql_file(conn, "migrations/15_policy_retrieval_release_scope.sql")
         finally:
             await conn.close()
 

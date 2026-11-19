@@ -50,9 +50,9 @@
 
 | FR | 现状 | 证据（文件:行） | 剩余工作 | 关联 | 里程碑 |
 | --- | --- | --- | --- | --- | --- |
-| FR-08 结构化/非结构化分流检索（P0） | 🟡 离线可用 | `rag/retrieve.py` `HybridRetriever` 向量(pgvector)+关键词(pg_trgm ILIKE/similarity)+RRF(k=60) 已实现且 SQL 全参数化；PRD v1.3 已对齐 ADR-0001；在线节点 `graph/nodes/retrieve.py:14` 仍返回空(TODO) | ①在线节点接线 ②无 cross-encoder rerank ③meta 硬过滤仅 `school_name/year`（`retrieve.py:24`），缺 province/category；关键词路已知局限由向量路兜底 | P1-04, P1-13, §9.2 | M1/M4 |
+| FR-08 结构化/非结构化分流检索（P0） | 🟡 在线关键词主路径 | 唯一主 seam `rag/policy_retrieval.py::RetrievePolicy` 已实现 release 可用性校验、`UNSUPPORTED_SCOPE`/`NO_EVIDENCE`、省份/科类/批次/学校/文档类型/有效区间 SQL 硬过滤、pg_trgm 关键词路、稳定排序和 `DocumentEvidence`/`EvidenceRef` 投影；`migrations/15_policy_retrieval_release_scope.sql` 补齐适用域、chunk set 身份与 `release_policy_doc` 映射；外部行为测试覆盖 `services/orchestrator/tests/test_policy_retrieval.py` | 图节点/API 接线；本片 `vector`/`hybrid` 显式 `MODE_UNSUPPORTED`，RRF、向量路与 rerank 留后续 ticket；golden set 未建 | P1-04, P1-13, §9.2 | M4 进行中 |
 | FR-09 非结构化知识问答（P1） | ⛔ | `build.py:46` `check_conditional → END`，无 POLICY_QA 子图 | 子图路由（POLICY_QA/GENERATE_PLAN/EXPLAIN_RESULT/REVISE_PLAN）；依赖 FR-08 在线化 | P2-02 | M6 |
-| FR-10 离线数据采集与索引管线（P0） | 🟡 | `rag/etl.py`(376 行) + `scripts/ingest_charters.py` 存在；`docs/charters/2025/` 有 5700+ 院校 txt/json 原料 | 按 FR-10 验收核实管线完整度；**表名收口**：`00_schema.sql` 建 `charter_doc/charter_chunk`，`07_policy_chunk_trgm.sql` 建 `policy_doc/policy_chunk`，`retrieve.py:160,201` 查 `policy_chunk`——两套并存未统一 | P2-03 | M4 |
+| FR-10 离线数据采集与索引管线（P0） | 🟡 | `rag/etl.py`(376 行) + `scripts/ingest_charters.py` 存在；`docs/charters/2025/` 有 5700+ 院校 txt/json 原料；`migrations/15_policy_retrieval_release_scope.sql` 已补齐 policy 文档类型、发布者、学校、抓取时间、原件来源、文档/chunk hash、字符定位、embedding/index 身份和 release→文档/chunk set 映射，并标注 `charter_*` 废弃 | ETL 尚未写新 metadata/release 映射，已有 policy 数据需离线修复后才会进入在线结果；四层质检与正式 release 发布流程仍待接入 | P2-03 | M4 进行中 |
 | FR-11 ETL 四层质检防线（P0） | 🟡 | `scripts/qa_check.py` 存在 | 按 FR-11 四层（结构/语义/交叉/抽样）逐层核实；`etl_run_id` 回溯链 | P1-01 | M4 |
 
 ### 1.3 算法与方案（FR-12 ~ FR-17）
@@ -199,7 +199,10 @@
 - `services/orchestrator/graph/state.py:12,29,66,83,90` — GLOBAL_REQUIRED / TypedDict / degraded / check_completeness / score_or_rank
 - `services/orchestrator/graph/nodes/{intake,profile_confirm,check_conditional,retrieve}.py` — 四节点 TODO 桩
 - `services/orchestrator/rag/retrieve.py:6,24,160,201` — trgm 替代 tsvector / meta 过滤字段 / policy_chunk 查询
+- `services/orchestrator/rag/policy_retrieval.py` — release-bound `RetrievePolicy` 唯一主 seam、硬过滤与文档证据投影
+- `services/orchestrator/tests/test_policy_retrieval.py` — release/scope/适用域/hash/locator/NO_EVIDENCE/确定性外部行为测试
 - `migrations/00_schema.sql:223,272,306,314,333,353,385,409` — control_score / charter_chunk / chat_session / status / plan_checkpoint / llm_call_log / eval_run / data_version
 - `migrations/07_policy_chunk_trgm.sql:19,30` — policy_doc / policy_chunk
+- `migrations/15_policy_retrieval_release_scope.sql` — policy 适用域、`policy_chunk_set`、`release_policy_doc` 与检索索引
 - `docs/prd.md` **v1.3**（24 条 FR + §5.2 端到端 15 步 + §8 服务/契约/表映射/证据/旁路 + §9 里程碑 + §10 风险 + §12 验收总则 + §13 20 验收场景）
 - `docs/agent-architecture-review.md`（**历史存档**，结论已吸收进 PRD v1.3；P1-01~P1-15 + P2-01~P2-04 + §6.3 + §9 + §10.1）

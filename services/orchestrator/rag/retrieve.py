@@ -63,12 +63,9 @@ def extract_terms(query: str, max_terms: int = 4) -> list[str]:
     """确定性切词：按空白/标点切 query，保留长度 >= 2 的 token。
 
     不做 NLP 分词（那是 zhparser 阶段的事）；「东莞理工学院 转专业政策」
-    → ["东莞理工学院", "转专业政策"]。无有效 token 时回退整句。
+    → ["东莞理工学院", "转专业政策"]。不足两个字符的 token 不进入检索。
     """
     tokens = [t for t in _TERM_SPLIT.split(query.strip()) if len(t) >= _MIN_TERM_LEN]
-    if not tokens:
-        stripped = query.strip()
-        return [stripped] if stripped else []
     # 去重保序，截断到 max_terms（防 ILIKE 条件爆炸）
     seen: set[str] = set()
     terms: list[str] = []
