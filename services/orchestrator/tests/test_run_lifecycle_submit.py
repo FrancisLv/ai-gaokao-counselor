@@ -157,6 +157,7 @@ class SubmitRunTests(RunLifecyclePostgresTest):
         )
 
         await self.seed_release(status="STAGING")
+        await self.revoke_release("rel_legacy_v1")
         lifecycle = RunLifecycle(self.dsn)
 
         with self.assertRaises(RunLifecycleError) as raised:

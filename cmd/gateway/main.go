@@ -33,9 +33,17 @@ func main() {
 	defer conn.Close()
 
 	hs := http.NewServer(http.Address(":8000"))
+	service := gateway.NewServiceForOrchestrator(
+		orchestratorv1.NewOrchestratorClient(conn),
+	)
 	gatewayv1.RegisterGatewayHTTPServer(
 		hs,
-		gateway.NewService(orchestratorv1.NewOrchestratorClient(conn)),
+		service,
+	)
+	gateway.RegisterRunEventStream(
+		hs,
+		service,
+		gateway.EventStreamOptions{},
 	)
 
 	app := kratos.New(

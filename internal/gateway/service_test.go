@@ -3,19 +3,31 @@ package gateway
 import (
 	"context"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	gatewayv1 "github.com/choucisan/ai-gaokao-counselor/api/gateway/v1"
 	orchestratorv1 "github.com/choucisan/ai-gaokao-counselor/api/orchestrator/v1"
 )
 
 type fakeRunClient struct {
-	submitReq  *orchestratorv1.SubmitRunRequest
-	resumeReq  *orchestratorv1.ResumeRunRequest
-	submitMeta metadata.MD
-	resumeMeta metadata.MD
+	submitReq   *orchestratorv1.SubmitRunRequest
+	resumeReq   *orchestratorv1.ResumeRunRequest
+	resumeKeys  []string
+	getReq      *orchestratorv1.GetRunRequest
+	cancelReq   *orchestratorv1.CancelRunRequest
+	watchReq    *orchestratorv1.WatchRunRequest
+	watchEvents []*orchestratorv1.RunEvent
+	watchDelay  time.Duration
+	cancelReply *orchestratorv1.RunReceiptReply
+	submitMeta  metadata.MD
+	resumeMeta  metadata.MD
+	getMeta     metadata.MD
+	cancelMeta  metadata.MD
+	watchMeta   metadata.MD
 }
 
 func (f *fakeRunClient) SubmitRun(
@@ -40,6 +52,7 @@ func (f *fakeRunClient) ResumeRun(
 	_ ...grpc.CallOption,
 ) (*orchestratorv1.RunReceiptReply, error) {
 	f.resumeReq = req
+	f.resumeKeys = append(f.resumeKeys, req.GetIdempotencyKey())
 	f.resumeMeta, _ = metadata.FromOutgoingContext(ctx)
 	return &orchestratorv1.RunReceiptReply{
 		Accepted:  true,
@@ -47,6 +60,65 @@ func (f *fakeRunClient) ResumeRun(
 		SessionId: "00000000-0000-0000-0000-000000000002",
 		State:     orchestratorv1.RunState_QUEUED,
 		Stage:     "PROFILE_CONFIRMED",
+	}, nil
+}
+
+func (f *fakeRunClient) GetRun(
+	ctx context.Context,
+	req *orchestratorv1.GetRunRequest,
+	_ ...grpc.CallOption,
+) (*orchestratorv1.RunViewReply, error) {
+	f.getReq = req
+	f.getMeta, _ = metadata.FromOutgoingContext(ctx)
+	return &orchestratorv1.RunViewReply{
+		RunId:        req.GetRunId(),
+		SessionId:    "00000000-0000-0000-0000-000000000002",
+		State:        orchestratorv1.RunState_WAITING_HITL,
+		Stage:        "PROFILE_CONFIRM",
+		StateVersion: 3,
+		ReleaseId:    "rel_legacy_v1",
+		CurrentInterrupt: &orchestratorv1.InterruptView{
+			InterruptId:    "00000000-0000-0000-0000-000000000003",
+			Kind:           "PROFILE_CONFIRM",
+			State:          "OPEN",
+			ProfileVersion: "00000000-0000-0000-0000-000000000004",
+		},
+		ResultPreview: &orchestratorv1.AlgorithmPreview{
+			ResultKind: "ALGORITHM_PREVIEW",
+		},
+		ExpiresAt: timestamppb.Now(),
+	}, nil
+}
+
+func (f *fakeRunClient) CancelRun(
+	ctx context.Context,
+	req *orchestratorv1.CancelRunRequest,
+	_ ...grpc.CallOption,
+) (*orchestratorv1.RunReceiptReply, error) {
+	f.cancelReq = req
+	f.cancelMeta, _ = metadata.FromOutgoingContext(ctx)
+	if f.cancelReply != nil {
+		return f.cancelReply, nil
+	}
+	return &orchestratorv1.RunReceiptReply{
+		Accepted:  true,
+		RunId:     req.GetRunId(),
+		SessionId: "00000000-0000-0000-0000-000000000002",
+		State:     orchestratorv1.RunState_CANCELLED,
+		Stage:     "CANCELLED",
+	}, nil
+}
+
+func (f *fakeRunClient) WatchRun(
+	ctx context.Context,
+	req *orchestratorv1.WatchRunRequest,
+	_ ...grpc.CallOption,
+) (runEventStream, error) {
+	f.watchReq = req
+	f.watchMeta, _ = metadata.FromOutgoingContext(ctx)
+	return &fakeRunEventStream{
+		events: f.watchEvents,
+		delay:  f.watchDelay,
 	}, nil
 }
 

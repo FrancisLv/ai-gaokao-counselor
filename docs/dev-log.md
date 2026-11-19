@@ -910,3 +910,27 @@ sqlc 的 `:many` 先收集类型化结果 slice，再映射领域对象，相较
 
 - release 数据维度迁移不重新发布业务数据；legacy 数据回填到 `rel_legacy_v1`，后续 ETL 仍需为正式 release 显式写版本。
 - 在线 RAG、完整资格规则、真实 LLM Gateway、Strategy/Critic 与正式报告继续保持 out of scope。
+
+## 28. M2/M3 前端验收前置：fresh release scope 与 gateway HTTP/SSE
+
+**日期与范围**：2026-11-19。补齐 M2/M3 自动化验收后续发现的两个前端验收缺口，不扩大到 M4 业务规则。
+
+### 实现要点
+
+- 新增 `14_default_release_scope.sql`，为 `rel_legacy_v1` 幂等补齐湖南、2025、本科批的物理类与历史类 scope；fresh schema 不再依赖测试夹具手工写 scope。
+- gateway additive 返回 `runId`，并新增 HTTP `GetRun`、`WatchRun`、`CancelRun` 契约。客户端仍只通过 gateway 访问，状态与终态继续由 orchestrator.RunLifecycle 裁决。
+- `/v1/runs/{run_id}/events` 输出标准 SSE：`id` 使用业务 `event_seq`，`event` 为 typed RunEvent 类型，`data` 为完整 typed payload；支持 `after_event_seq` 与 `Last-Event-ID`，query 游标优先。
+- SSE 15 秒 heartbeat 仅写注释帧，不占 `event_seq`，并设置禁用代理缓冲的响应头。
+- gateway gRPC client 通过内部 adapter 适配 server-streaming；HTTP 测试使用真实 Kratos handler 和可注入下游 client。
+
+### 测试
+
+- fresh schema 从 `00 → 14` 无需测试手工 seed 即可让物理类、历史类画像进入 `PROFILE_CONFIRM`；重复执行默认 scope 迁移保持幂等。
+- HTTP：CreatePlan/Confirm/Backfill 返回 `runId`；GetRun 返回当前 interrupt、preview 与 `expiresAt`；CancelRun 透传 `RUN_ALREADY_TERMINAL`。
+- SSE：Last-Event-ID 补发、query 游标优先、heartbeat 不占用事件序号；缺失可信 principal 返回未认证。
+- 双击确认通过 HTTP 保持同一幂等键，唯一推进仍由 RunLifecycle/interrupt receipt 保证。
+
+### 边界
+
+- 开发期仍可用 `x-principal-id` 注入 principal；公网部署必须替换为真实认证上下文。
+- 本次只提供前端验收所需传输契约，不实现 M4 检索、资格规则或正式报告。

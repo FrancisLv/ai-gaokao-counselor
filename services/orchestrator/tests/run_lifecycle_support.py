@@ -121,6 +121,11 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                     statement = statement.strip()
                     if statement:
                         await conn.execute(statement)
+            migration = ROOT / "migrations" / "14_default_release_scope.sql"
+            for statement in migration.read_text(encoding="utf-8").split(";"):
+                statement = statement.strip()
+                if statement:
+                    await conn.execute(statement)
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS release_component (
@@ -160,6 +165,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await self._apply_sql_file(conn, "migrations/11_algorithm_preview_results.sql")
             await self._apply_sql_file(conn, "migrations/12_run_view_fields.sql")
             await self._apply_sql_file(conn, "migrations/13_release_data_dimensions.sql")
+            await self._apply_sql_file(conn, "migrations/14_default_release_scope.sql")
         finally:
             await conn.close()
 

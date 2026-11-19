@@ -578,11 +578,11 @@ class PreviewGateLifecycleTests(RunLifecyclePostgresTest):
                 task_kind="GENERATE_PLAN",
                 input=StructuredProfileInput(
                     province="湖南",
-                    application_year=2025,
-                    category="历史类",
+                    application_year=2024,
+                    category="物理类",
                     batch="本科批",
                     score=600,
-                    subjects=("历史", "政治", "地理"),
+                    subjects=("物理", "化学", "生物"),
                 ),
                 idempotency_key="unsupported-scope-submit",
             )
