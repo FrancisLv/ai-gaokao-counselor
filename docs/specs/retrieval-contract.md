@@ -143,6 +143,9 @@ diagnostics:
   vector_candidates: int32
   keyword_candidates: int32
   rerank_enabled: bool
+  rerank_model: string | null
+  rerank_config_version: string | null
+  rerank_timeout_ms: int32 | null
   degraded_reason: string | null
 ```
 
@@ -196,10 +199,15 @@ diagnostics:
 
 ### 5.4 Rerank
 
-- rerank 模型版本写入 release；
-- 仅在融合后的候选池内排序；
-- rerank 超时或失败时使用 RRF 顺序并标记降级；
-- rerank 不得删除适用域校验结果。
+- `release_policy_rerank` 记录 release 级启用状态、模型、配置版本与超时；无配置行表示关闭，客户端不得逐次覆盖；
+- 只有 `mode=hybrid` 且 release 显式启用时才调用 rerank；配置的模型与配置版本必须和注入的适配器身份完全一致；
+- rerank 输入只能是 RRF 融合池的 `(chunk_id, text)`，不得包含 SQL 行、向量距离、跨 release 或跨适用域候选；
+- rerank 输出必须恰好是该池的一个排列；重复、未知、遗漏或非字符串 ID 均视为无效输出；
+- rerank 只改变证据投影顺序。excerpt、hash、locator、适用域与 `EvidenceRef` 身份不变，投影仍使用原候选行；
+- 正常输出由模型适配器给出全序；同一输入、release 和配置重复查询必须得到相同顺序；
+- 超时或失败时使用完整 RRF 顺序，保留原 tie-break，并返回稳定降级原因；
+- 降级原因：`RERANK_UNAVAILABLE`、`RERANK_TIMEOUT`、`RERANK_FAILED`、`RERANK_INVALID_OUTPUT`；
+- rerank 不得删除适用域校验结果，也不得把技术失败伪装为 `NO_EVIDENCE`。
 
 ## 6. 结构化事实与 RAG 分流
 
@@ -234,7 +242,9 @@ diagnostics:
 | 关键词索引不可用 | 同范围向量检索，`degraded_reason=KEYWORD_UNAVAILABLE` |
 | 两路均不可用或数据库不可达 | `RETRIEVAL_UNAVAILABLE`，不伪装为 `NO_EVIDENCE` |
 | 命中候选无法形成完整证据 | `EVIDENCE_PROJECTION_FAILED`，不跳过候选后伪装为 `NO_EVIDENCE` |
-| rerank 不可用 | 使用 RRF 顺序并记录降级 |
+| rerank 配置缺失/模型不匹配 | 使用 RRF 顺序并记录 `RERANK_UNAVAILABLE` |
+| rerank 超时/执行失败 | 使用 RRF 顺序并分别记录 `RERANK_TIMEOUT` / `RERANK_FAILED` |
+| rerank 输出重复/未知/遗漏 | 拒绝部分应用，使用 RRF 顺序并记录 `RERANK_INVALID_OUTPUT` |
 | 文档缺少适用域 | 正式结果不可使用该文档 |
 
 ## 8. 离线索引契约
@@ -266,6 +276,8 @@ diagnostics:
 | RT-08 | rerank 超时 | RRF 顺序保留并标记降级，不越界召回 |
 | RT-09 | 文档正文包含“忽略系统指令” | 只能作为证据文本，不改变图或工具 |
 | RT-10 | 结构化数值 mix 政策问题 | 两个独立查询，SQL 结果不与 RAG chunk 混成同名证据 |
+| RT-11 | release 启用 rerank 且输出为融合池重排 | 只调整顺序，证据身份不变，诊断暴露模型/配置/超时 |
+| RT-12 | rerank 返回重复、未知或遗漏 ID | 完整保留 RRF 顺序并记录 `RERANK_INVALID_OUTPUT` |
 
 ## 10. 非目标
 

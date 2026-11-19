@@ -1051,7 +1051,32 @@ sqlc 的 `:many` 先收集类型化结果 slice，再映射领域对象，相较
 - `strict_order` 高不匹配比场景的 HNSW 延迟风险继续存在；真实容量和超时仍需 golden set/压测量化。
 - 本文未接入 rerank、图节点/API 与 golden set；这些仍由后续 ticket 完成。
 
-## 34. M4a-06：检索 golden set 草稿与可复现评测
+## 34. M4a-04：融合池内可选 rerank 与故障回退
+
+**日期与范围**：2026-11-19。实现 issue #11 的 hybrid 可选 rerank；不训练、下载真实模型，也不改变适用域、release 或证据身份。
+
+### 实现
+
+- 新增 `migrations/17_policy_rerank_release_identity.sql`：`release_policy_rerank` 按 release 保存显式启用状态、模型、配置版本和超时；启用时三项配置必须完整，无配置行表示关闭。
+- `RetrievePolicy` 在释放状态校验后读取 release 级 rerank 配置；只有 `mode=hybrid` 且显式启用时才调用注入的 rerank 适配器。适配器身份与 release 的模型/配置版本不一致时返回 `RERANK_UNAVAILABLE`，不发起模型调用。
+- rerank 输入严格限制为 RRF 融合池的不可变 `(chunk_id, text)` 序列，不传 SQL 行、距离、适用域外候选或跨 release 数据。输出必须是该池的完整排列；重复、未知、遗漏或非字符串 ID 均拒绝整次重排。
+- 超时通过 release 配置的截止时间执行，返回 `RERANK_TIMEOUT`；异常返回 `RERANK_FAILED`；无效输出返回 `RERANK_INVALID_OUTPUT`。三类故障都完整保留原 RRF 顺序和 tie-break。
+- 成功重排只改变候选行顺序；证据投影仍从原始 RRF 行读取，因此 excerpt、hash、locator、适用域与 `EvidenceRef.evidence_id` 均不变。诊断新增 rerank 模型、配置版本和超时，不暴露适配器私有输出。
+- 空 RRF 池返回 `NO_EVIDENCE` 且不调用 rerank；hard filtering、单路降级和 `EVIDENCE_PROJECTION_FAILED` 语义保持前序实现不变。
+
+### 测试
+
+- `PolicyRetrievalTests` 从 `RetrievePolicy` 覆盖：默认/显式关闭不调用模型；正常重排与诊断身份；超时；适配器异常或缺失调用能力；重复、未知、遗漏输出；模型身份不匹配；空候选。
+- 重排成功与故障用例比对 RRF 基线证据 ID、excerpt、hash、locator 和适用域，确认只改变顺序，不改变证据身份。
+- `PolicyRetrievalPostgresTests` 在 `00`~`17` 的随机隔离 schema 中验证 release 配置读取、跨省候选不进入 rerank 输入、正常重排和重复查询稳定性。
+- `test_policy_retrieval.py` 共 47 项通过（29 项离线、18 项本机隔离 PostgreSQL）；项目 Python 全量离线发现 129 项通过，未设置测试库时 83 项按既有规则跳过。
+
+### 风险与边界
+
+- Python 同步适配器通过有界等待实现超时；若底层模型忽略取消并长期阻塞，工作线程可能继续存活。真实本地 rerank 模型仍需在接入层实现可取消调用或进程隔离。
+- rerank 成功会改变 top-k 选择，因此评测与缓存身份必须同时记录 release、模型和配置版本；本次只提供运行时诊断，不实现 golden set 基线与质量阈值。
+
+## 35. M4a-06：检索 golden set 草稿与可复现评测
 
 **日期与范围**：2026-11-19。实现 issue #13 的检索评测 harness、首批 30 条 Agent
 草稿和冻结 fixture baseline；不宣称 Francis 已完成 domain owner 定标，也不验收真实
@@ -1082,10 +1107,10 @@ rerank 模型质量。
 
 ### 测试与 baseline
 
-- 新增 10 项离线测试和 1 项 DSN gated 隔离 PostgreSQL 测试，覆盖 manifest hash、
+- 新增 11 项离线测试和 1 项 DSN gated 隔离 PostgreSQL 测试，覆盖 manifest hash、
   字段/scope/冲突校验、30 条草稿覆盖、recall/MRR 分母、`NO_EVIDENCE`、技术故障、
-  逐例 scope/must-exclude leak、first diff、真实 `RetrievePolicy` seam 与 baseline
-  身份复现。
+  rerank=false 与 release 配置不一致、逐例 scope/must-exclude leak、first diff、
+  真实 `RetrievePolicy` seam 与 baseline 身份复现。
 - 冻结 30 条 fixture 运行通过：recall@5=1.0、recall@20=1.0、MRR=1.0、
   scope leak=0、28 条有效检索 Case、2 条 `NO_EVIDENCE` 通过。上述数值仅为 harness
   冒烟，不代表真实 release 上的检索质量。

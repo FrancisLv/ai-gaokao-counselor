@@ -23,6 +23,7 @@ from rag.policy_retrieval import (
     DocumentEvidence,
     EvidenceRef,
     PolicyRetrievalError,
+    PolicyRetrievalDiagnostics,
     PolicyRetrievalResult,
     RetrievePolicy,
 )
@@ -452,6 +453,38 @@ class RetrievalDatasetTests(unittest.TestCase):
         )
         self.assertEqual(report.gate_status, "FAIL")
 
+    def test_rerank_off_baseline_rejects_a_rerank_enabled_release(self):
+        case = self.valid_case()
+        case.update(expected_chunk_ids=["chunk-1"], expected_doc_ids=["doc-1"])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_dataset(root, case)
+            dataset = load_retrieval_dataset(root)
+
+        retriever = DeterministicRetriever(
+            {
+                case["query"]: PolicyRetrievalResult(
+                    "FOUND",
+                    "rel-test",
+                    (evidence("chunk-1", "doc-1"),),
+                    PolicyRetrievalDiagnostics(rerank_enabled=True),
+                )
+            }
+        )
+
+        report = evaluate_retrieval(
+            dataset,
+            retriever,
+            mode="hybrid",
+            rerank_enabled=False,
+        )
+
+        self.assertEqual(report.gate_status, "FAIL")
+        self.assertEqual(
+            report.cases[0].first_diff["actual"]["reason"],
+            "RERANK_MODE_MISMATCH",
+        )
+
     def test_baseline_identity_and_required_run_fields_are_reproducible(self):
         case = self.valid_case()
         case.update(expected_chunk_ids=["chunk-1"], expected_doc_ids=["doc-1"])
@@ -543,6 +576,7 @@ class RetrievalEvaluationPostgresTests(unittest.TestCase):
             "migrations/08_release_and_run_foundation.sql",
             "migrations/15_policy_retrieval_release_scope.sql",
             "migrations/16_policy_vector_release_identity.sql",
+            "migrations/17_policy_rerank_release_identity.sql",
         ):
             self.apply_sql_file(migration)
         self.seed_release()

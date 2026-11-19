@@ -296,6 +296,17 @@ def evaluate_retrieval(
                 status=exc.reason,
                 release_id=release_id,
             )
+        diagnostics = getattr(result, "diagnostics", None)
+        if (
+            not rerank_enabled
+            and diagnostics is not None
+            and diagnostics.rerank_enabled
+        ):
+            retrieval_error_reason = "RERANK_MODE_MISMATCH"
+            result = PolicyRetrievalResult(
+                status="RERANK_MODE_MISMATCH",
+                release_id=release_id,
+            )
         expected_ids = set(case["expected_chunk_ids"]) | set(
             case["expected_doc_ids"]
         )
