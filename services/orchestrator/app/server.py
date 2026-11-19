@@ -37,16 +37,13 @@ from app.run_lifecycle.wire import (
     populate_interrupt_from_event,
     populate_progress,
 )
-from graph.build import build_graph
-from graph.state import new_state
 
 log = logging.getLogger(__name__)
 
 
 class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
-    def __init__(self, lifecycle: RunLifecycle | None = None, graph=None) -> None:
+    def __init__(self, lifecycle: RunLifecycle | None = None) -> None:
         self._lifecycle = lifecycle
-        self._graph = graph or build_graph()
 
     async def BuildRetrievalGraph(
         self,
@@ -54,8 +51,6 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
         principal_id: str,
         run_id: UUID,
         retrieve_policy,
-        school_ids: tuple[str, ...] = (),
-        document_types: tuple[str, ...] = (),
         mode: str = "hybrid",
         top_k: int = 5,
         pool_k: int = 20,
@@ -75,8 +70,6 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             principal_id=principal_id,
             run_id=run_id,
             retrieve_policy=retrieve_policy,
-            school_ids=school_ids,
-            document_types=document_types,
             mode=mode,
             top_k=top_k,
             pool_k=pool_k,
@@ -321,15 +314,6 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             await self._abort_lifecycle(context, exc)
         return self._receipt_reply(receipt)
 
-    async def _run(self, state) -> AsyncIterator["orchestrator_pb2.GraphEvent"]:
-        # TODO(M3): 识别 LangGraph 的 interrupt（HITL）→ type="interrupt" 推给 gateway。
-        async for chunk in self._graph.astream(state):
-            for node, payload in chunk.items():
-                yield orchestrator_pb2.GraphEvent(
-                    node=node, type="progress",
-                    payload_json=json.dumps(payload, ensure_ascii=False, default=str),
-                )
-
     async def _require_lifecycle(self, context) -> RunLifecycle:
         if self._lifecycle is None:
             await context.abort(grpc.StatusCode.UNAVAILABLE, "RUN_LIFECYCLE_UNAVAILABLE")
@@ -362,6 +346,8 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             "PROFILE_UNSUPPORTED_SCOPE": grpc.StatusCode.FAILED_PRECONDITION,
             "PROFILE_UNSUPPORTED_INPUT": grpc.StatusCode.INVALID_ARGUMENT,
             "PROFILE_NOT_CONFIRMED": grpc.StatusCode.FAILED_PRECONDITION,
+            "RETRIEVAL_SCOPE_REQUIRED": grpc.StatusCode.FAILED_PRECONDITION,
+            "RETRIEVAL_SCOPE_INVALID": grpc.StatusCode.INVALID_ARGUMENT,
             "VALIDATION_FAILED": grpc.StatusCode.FAILED_PRECONDITION,
             "NO_RELIABLE_DATA": grpc.StatusCode.FAILED_PRECONDITION,
             "DEPENDENCY_UNAVAILABLE": grpc.StatusCode.UNAVAILABLE,

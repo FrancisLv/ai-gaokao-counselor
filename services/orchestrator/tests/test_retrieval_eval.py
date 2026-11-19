@@ -32,6 +32,7 @@ from rag.policy_retrieval import (
 
 ROOT = Path(__file__).resolve().parents[3]
 TEST_DSN = os.getenv("ORCHESTRATOR_TEST_DSN")
+AS_OF = date(2025, 11, 19)
 
 
 def evidence(
@@ -253,6 +254,15 @@ class RetrievalDatasetTests(unittest.TestCase):
                         f"{case['case_id']} lacks {kind} interference",
                     )
 
+    def test_every_checked_in_golden_version_is_loadable(self):
+        for dataset_dir in (ROOT / "data" / "golden").iterdir():
+            if (
+                not dataset_dir.is_dir()
+                or not (dataset_dir / "manifest.json").exists()
+            ):
+                continue
+            load_retrieval_dataset(dataset_dir)
+
     def test_only_real_runs_with_a_signed_owner_are_authoritative(self):
         self.assertFalse(
             is_authoritative_quality(
@@ -282,7 +292,9 @@ class RetrievalDatasetTests(unittest.TestCase):
         )
         retriever = GoldenContractFixture(dataset.cases)
 
-        report = evaluate_retrieval(dataset, retriever, mode="hybrid")
+        report = evaluate_retrieval(
+            dataset, retriever, mode="hybrid", as_of=AS_OF
+        )
 
         self.assertEqual(retriever.calls, 30)
         self.assertEqual(report.eligible_case_count, 28)
@@ -421,7 +433,9 @@ class RetrievalDatasetTests(unittest.TestCase):
             )
             retriever = DeterministicRetriever(results)
 
-            report = evaluate_retrieval(dataset, retriever, mode="hybrid")
+            report = evaluate_retrieval(
+                dataset, retriever, mode="hybrid", as_of=AS_OF
+            )
 
             matching_case = next(
                 result
@@ -496,6 +510,7 @@ class RetrievalDatasetTests(unittest.TestCase):
         report = evaluate_retrieval(
             dataset,
             retriever,
+            as_of=AS_OF,
             mode="keyword",
             authoritative_quality=True,
         )
@@ -580,7 +595,9 @@ class RetrievalDatasetTests(unittest.TestCase):
             }
         )
 
-        report = evaluate_retrieval(dataset, retriever, mode="keyword")
+        report = evaluate_retrieval(
+            dataset, retriever, mode="keyword", as_of=AS_OF
+        )
 
         self.assertEqual(len(retriever.queries), 3)
         self.assertEqual(
@@ -672,7 +689,9 @@ class RetrievalDatasetTests(unittest.TestCase):
             ),
         )
 
-        report = evaluate_retrieval(dataset, retriever, mode="keyword")
+        report = evaluate_retrieval(
+            dataset, retriever, mode="keyword", as_of=AS_OF
+        )
 
         self.assertEqual(report.metrics.recall_at_5, 1.0)
         self.assertEqual(report.metrics.scope_leak_rate, 1.0)
@@ -713,11 +732,54 @@ class RetrievalDatasetTests(unittest.TestCase):
             }
         )
 
-        report = evaluate_retrieval(dataset, retriever, mode="keyword")
+        report = evaluate_retrieval(
+            dataset, retriever, mode="keyword", as_of=AS_OF
+        )
 
         self.assertEqual(report.gate_status, "FAIL")
         self.assertIn(
             "result_release",
+            {leak["kind"] for leak in report.cases[0].scope_leaks},
+        )
+
+    def test_scope_leak_uses_the_evaluation_date_not_only_the_year(self):
+        case = self.valid_case()
+        case.update(
+            expected_chunk_ids=["not-yet-valid"],
+            expected_doc_ids=["doc-not-yet-valid"],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_dataset(root, case)
+            dataset = load_retrieval_dataset(root)
+
+        retriever = DeterministicRetriever(
+            {
+                case["query"]: PolicyRetrievalResult(
+                    "FOUND",
+                    "rel-test",
+                    (
+                        evidence(
+                            "not-yet-valid",
+                            "doc-not-yet-valid",
+                            valid_from=date(2025, 12, 1),
+                            valid_to=date(2025, 12, 31),
+                        ),
+                    ),
+                )
+            }
+        )
+
+        report = evaluate_retrieval(
+            dataset,
+            retriever,
+            mode="keyword",
+            as_of=AS_OF,
+        )
+
+        self.assertEqual(report.gate_status, "FAIL")
+        self.assertIn(
+            "year",
             {leak["kind"] for leak in report.cases[0].scope_leaks},
         )
 
@@ -739,6 +801,7 @@ class RetrievalDatasetTests(unittest.TestCase):
             dataset,
             FailingRetriever(),
             mode="keyword",
+            as_of=AS_OF,
         )
 
         self.assertEqual(report.cases[0].status, "RETRIEVAL_UNAVAILABLE")
@@ -773,6 +836,7 @@ class RetrievalDatasetTests(unittest.TestCase):
             dataset,
             retriever,
             mode="hybrid",
+            as_of=AS_OF,
             rerank_enabled=False,
         )
 
@@ -799,7 +863,9 @@ class RetrievalDatasetTests(unittest.TestCase):
                 )
             }
         )
-        report = evaluate_retrieval(dataset, retriever, mode="hybrid")
+        report = evaluate_retrieval(
+            dataset, retriever, mode="hybrid", as_of=AS_OF
+        )
         identity = {
             "git_sha": "0123456789abcdef",
             "source_tree_sha256": "f" * 64,
@@ -1055,7 +1121,9 @@ class RetrievalEvaluationPostgresTests(unittest.TestCase):
             today=lambda: date(2025, 11, 19),
         )
 
-        report = evaluate_retrieval(dataset, retriever, mode="keyword")
+        report = evaluate_retrieval(
+            dataset, retriever, mode="keyword", as_of=AS_OF
+        )
 
         self.assertEqual(report.metrics.recall_at_5, 1.0)
         self.assertEqual(report.metrics.recall_at_20, 1.0)

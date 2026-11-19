@@ -263,16 +263,14 @@ class RunLifecycle:
         *,
         principal_id: str,
         run_id: UUID,
-        school_ids: tuple[str, ...] = (),
-        document_types: tuple[str, ...] = (),
         mode: str = "hybrid",
         top_k: int = 5,
         pool_k: int = 20,
     ):
         """从持久 run 的权威记录构造在线检索 binding。
 
-        scope、principal 与 release 不接受调用方覆盖；调用方只能提供检索
-        通道、top/pool 和可由上层任务决定的范围筛选。
+        scope、principal、release、学校与文档类型只读取持久 run/任务记录；
+        调用方只能提供检索通道和 top/pool。
         """
         from graph.nodes.retrieve import (
             ConfirmedProfileScope,
@@ -298,6 +296,8 @@ class RunLifecycle:
 
             confirmed_profile = None
             task_scope = None
+            school_ids: tuple[str, ...] = ()
+            document_types: tuple[str, ...] = ()
             if row["task_kind"] == "POLICY_QA":
                 task_input = dict(row["task_input"])
                 required = (
@@ -313,6 +313,14 @@ class RunLifecycle:
                     application_year=int(required[1]),
                     category=str(required[2]),
                     batch=str(required[3]),
+                )
+                school_ids = self._trusted_string_tuple(
+                    task_input.get("school_ids", ()),
+                    "school_ids",
+                )
+                document_types = self._trusted_string_tuple(
+                    task_input.get("document_types", ()),
+                    "document_types",
                 )
             else:
                 profile_version = row["confirmed_profile_version"]
@@ -354,14 +362,28 @@ class RunLifecycle:
                 task_kind=row["task_kind"],
                 confirmed_profile=confirmed_profile,
                 task_scope=task_scope,
-                school_ids=tuple(school_ids),
-                document_types=tuple(document_types),
+                school_ids=school_ids,
+                document_types=document_types,
                 mode=mode,
                 top_k=top_k,
                 pool_k=pool_k,
             )
         finally:
             await conn.close()
+
+    @staticmethod
+    def _trusted_string_tuple(value, field: str) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, (list, tuple)) or not all(
+            isinstance(item, str) and item
+            for item in value
+        ):
+            raise RunLifecycleError(
+                "RETRIEVAL_SCOPE_INVALID",
+                f"{field} must be a list of non-empty strings",
+            )
+        return tuple(value)
 
     async def _expire_due_hitl(self, *, principal_id: str, run_id: UUID) -> bool:
         conn = await self._connect()

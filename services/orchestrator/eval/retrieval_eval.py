@@ -137,24 +137,14 @@ def _validate_manifest(manifest: dict) -> None:
         raise ValueError("manifest.immutable must be true")
     if manifest["owner_status"] not in _OWNER_STATUSES:
         raise ValueError("manifest.owner_status is unsupported")
-    if (
-        not isinstance(manifest["retrieval_cases_sha256"], str)
-        or len(manifest["retrieval_cases_sha256"]) != 64
-        or any(
-            char not in "0123456789abcdef"
-            for char in manifest["retrieval_cases_sha256"]
-        )
-    ):
-        raise ValueError("manifest.retrieval_cases_sha256 is invalid")
-    if (
-        not isinstance(manifest["dataset_sha256"], str)
-        or len(manifest["dataset_sha256"]) != 64
-        or any(
-            char not in "0123456789abcdef"
-            for char in manifest["dataset_sha256"]
-        )
-    ):
-        raise ValueError("manifest.dataset_sha256 is invalid")
+    _validate_sha256(
+        manifest["retrieval_cases_sha256"],
+        "manifest.retrieval_cases_sha256",
+    )
+    _validate_sha256(
+        manifest["dataset_sha256"],
+        "manifest.dataset_sha256",
+    )
     try:
         datetime.fromisoformat(manifest["created_at"])
     except (TypeError, ValueError) as exc:
@@ -165,6 +155,15 @@ def _validate_manifest(manifest: dict) -> None:
         or manifest["case_count"] < 1
     ):
         raise ValueError("manifest.case_count is invalid")
+
+
+def _validate_sha256(value, field: str) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(char not in "0123456789abcdef" for char in value)
+    ):
+        raise ValueError(f"{field} is invalid")
 
 
 def _validate_case(case: dict) -> None:
@@ -334,6 +333,7 @@ def evaluate_retrieval(
     dataset: RetrievalDataset,
     retriever,
     *,
+    as_of: date,
     mode: str = "hybrid",
     rerank_enabled: bool = False,
     authoritative_quality: bool = False,
@@ -406,6 +406,7 @@ def evaluate_retrieval(
             result.evidence,
             expected_release_id=release_id,
             result_release_id=result.release_id,
+            as_of=as_of,
         )
         if result.evidence:
             cases_with_evidence += 1
@@ -553,6 +554,7 @@ def _scope_leaks(
     *,
     expected_release_id: str,
     result_release_id: str,
+    as_of: date,
 ) -> tuple[dict, ...]:
     scope = case["scope"]
     allowed_schools = set(case.get("school_ids", ()))
@@ -584,10 +586,10 @@ def _scope_leaks(
         ):
             leaks.append({"kind": "province", **common})
         if (
-            applicability.valid_from.year > scope["application_year"]
+            applicability.valid_from > as_of
             or (
                 applicability.valid_to is not None
-                and applicability.valid_to.year < scope["application_year"]
+                and as_of > applicability.valid_to
             )
         ):
             leaks.append({"kind": "year", **common})

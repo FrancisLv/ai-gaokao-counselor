@@ -67,8 +67,6 @@ async def build_run_bound_graph(
     principal_id: str,
     run_id,
     retrieve_policy: retrieve.RetrievePolicyPort,
-    school_ids: tuple[str, ...] = (),
-    document_types: tuple[str, ...] = (),
     mode: str = "hybrid",
     top_k: int = 5,
     pool_k: int = 20,
@@ -77,8 +75,6 @@ async def build_run_bound_graph(
     binding = await lifecycle.GetRetrievalRunBinding(
         principal_id=principal_id,
         run_id=run_id,
-        school_ids=school_ids,
-        document_types=document_types,
         mode=mode,
         top_k=top_k,
         pool_k=pool_k,

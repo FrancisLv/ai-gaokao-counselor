@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 import hashlib
 import json
+import math
 import re
 from zoneinfo import ZoneInfo
 
@@ -30,6 +31,7 @@ _SCOPE_SELECT_COLUMNS = """
     c.char_start,
     c.char_end,
     c.chunk_set_version,
+    cs.content_sha256 AS chunk_set_content_sha256,
     d.title,
     d.document_type,
     d.issuer,
@@ -113,6 +115,7 @@ _SCOPE_FROM_AND_FILTERS = """
       AND c.section_path IS NOT NULL
       AND c.chunk_set_version IS NOT NULL
       AND cs.index_version IS NOT NULL
+      AND cs.content_sha256 = d.content_sha256
       AND (c.char_start IS NULL) = (c.char_end IS NULL)
       AND (
           c.char_start IS NULL
@@ -394,19 +397,20 @@ class RetrievePolicy:
                 f"unsupported retrieval mode: {query.mode}",
             )
 
+        diagnostics = PolicyRetrievalDiagnostics(
+            vector_candidates=vector_count,
+            keyword_candidates=keyword_count,
+            rerank_enabled=rerank_enabled,
+            rerank_model=rerank_model,
+            rerank_config_version=rerank_config_version,
+            rerank_timeout_ms=rerank_timeout_ms,
+            degraded_reason=degraded_reason,
+        )
         if not rows:
             return PolicyRetrievalResult(
                 status="NO_EVIDENCE",
                 release_id=query.release_id,
-                diagnostics=PolicyRetrievalDiagnostics(
-                    vector_candidates=vector_count,
-                    keyword_candidates=keyword_count,
-                    rerank_enabled=rerank_enabled,
-                    rerank_model=rerank_model,
-                    rerank_config_version=rerank_config_version,
-                    rerank_timeout_ms=rerank_timeout_ms,
-                    degraded_reason=degraded_reason,
-                ),
+                diagnostics=diagnostics,
             )
 
         evidence = []
@@ -427,29 +431,13 @@ class RetrievePolicy:
             return PolicyRetrievalResult(
                 status="NO_EVIDENCE",
                 release_id=query.release_id,
-                diagnostics=PolicyRetrievalDiagnostics(
-                    vector_candidates=vector_count,
-                    keyword_candidates=keyword_count,
-                    rerank_enabled=rerank_enabled,
-                    rerank_model=rerank_model,
-                    rerank_config_version=rerank_config_version,
-                    rerank_timeout_ms=rerank_timeout_ms,
-                    degraded_reason=degraded_reason,
-                ),
+                diagnostics=diagnostics,
             )
         return PolicyRetrievalResult(
             status="FOUND",
             release_id=query.release_id,
             evidence=tuple(evidence),
-            diagnostics=PolicyRetrievalDiagnostics(
-                vector_candidates=vector_count,
-                keyword_candidates=keyword_count,
-                rerank_enabled=rerank_enabled,
-                rerank_model=rerank_model,
-                rerank_config_version=rerank_config_version,
-                rerank_timeout_ms=rerank_timeout_ms,
-                degraded_reason=degraded_reason,
-            ),
+            diagnostics=diagnostics,
         )
 
     @staticmethod
@@ -635,7 +623,24 @@ class RetrievePolicy:
                 "VECTOR_UNAVAILABLE",
                 "query embedding could not be generated",
             ) from exc
-        vector = "[" + ",".join(f"{value:.6f}" for value in query_embedding) + "]"
+        try:
+            embedding_values = tuple(float(value) for value in query_embedding)
+        except (TypeError, ValueError) as exc:
+            raise PolicyRetrievalError(
+                "INDEX_MODEL_MISMATCH",
+                "query embedding output has an invalid type",
+            ) from exc
+        if (
+            len(embedding_values) != identity["embedding_dim"]
+            or not all(math.isfinite(value) for value in embedding_values)
+        ):
+            raise PolicyRetrievalError(
+                "INDEX_MODEL_MISMATCH",
+                "query embedding output does not match the bound index identity",
+            )
+        vector = "[" + ",".join(
+            f"{value:.6f}" for value in embedding_values
+        ) + "]"
         sql, params = self._vector_query(
             query,
             vector,
@@ -769,6 +774,7 @@ class RetrievePolicy:
         raw_storage_uri = row.get("raw_storage_uri")
         fetched_at = row.get("fetched_at")
         document_sha256 = row.get("content_sha256")
+        chunk_set_content_sha256 = row.get("chunk_set_content_sha256")
         chunk_set_version = row.get("chunk_set_version")
 
         if not all(
@@ -800,6 +806,10 @@ class RetrievePolicy:
             or hashlib.sha256(text.encode("utf-8")).hexdigest() != text_sha256
             or not isinstance(document_sha256, str)
             or not _SHA256.fullmatch(document_sha256)
+            or (
+                chunk_set_content_sha256 is not None
+                and chunk_set_content_sha256 != document_sha256
+            )
         ):
             return None
         if not isinstance(fetched_at, datetime) or fetched_at.tzinfo is None:

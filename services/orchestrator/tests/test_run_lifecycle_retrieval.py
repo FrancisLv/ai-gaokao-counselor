@@ -72,8 +72,6 @@ class RunLifecycleRetrievalBindingTests(RunLifecyclePostgresTest):
             principal_id="principal-a",
             run_id=receipt.run_id,
             retrieve_policy=policy,
-            school_ids=("1001",),
-            document_types=("charter",),
             mode="hybrid",
         )
         updated = await graph.ainvoke(
@@ -99,8 +97,8 @@ class RunLifecycleRetrievalBindingTests(RunLifecyclePostgresTest):
         self.assertEqual(query.scope.application_year, 2025)
         self.assertEqual(query.scope.category, "物理类")
         self.assertEqual(query.scope.batch, "本科批")
-        self.assertEqual(query.school_ids, ("1001",))
-        self.assertEqual(query.document_types, ("charter",))
+        self.assertEqual(query.school_ids, ())
+        self.assertEqual(query.document_types, ())
         self.assertEqual(updated["retrieval_status"], "NO_EVIDENCE")
 
     async def test_policy_qa_binding_uses_trusted_task_scope(self):
@@ -124,6 +122,8 @@ class RunLifecycleRetrievalBindingTests(RunLifecyclePostgresTest):
                     application_year=2025,
                     category="不限",
                     batch="不限",
+                    school_ids=("2002",),
+                    document_types=("policy",),
                 ),
                 idempotency_key="policy-qa-submit",
             )
@@ -132,7 +132,6 @@ class RunLifecycleRetrievalBindingTests(RunLifecyclePostgresTest):
         binding = await lifecycle.GetRetrievalRunBinding(
             principal_id="principal-policy",
             run_id=receipt.run_id,
-            document_types=("policy",),
             mode="keyword",
         )
 
@@ -144,6 +143,8 @@ class RunLifecycleRetrievalBindingTests(RunLifecyclePostgresTest):
         self.assertEqual(binding.task_scope.application_year, 2025)
         self.assertEqual(binding.task_scope.category, "不限")
         self.assertEqual(binding.task_scope.batch, "不限")
+        self.assertEqual(binding.school_ids, ("2002",))
+        self.assertEqual(binding.document_types, ("policy",))
 
         with self.assertRaises(RunLifecycleError) as raised:
             await lifecycle.GetRetrievalRunBinding(

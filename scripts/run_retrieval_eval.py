@@ -208,6 +208,7 @@ def parse_args():
 def main():
     args = parse_args()
     dataset = load_retrieval_dataset(args.dataset)
+    as_of = date.fromisoformat(args.as_of)
     if args.release_id:
         dataset = replace(
             dataset,
@@ -236,7 +237,6 @@ def main():
             from rag.embedder import Embedder
 
             embedder = Embedder(model_name=args.embedding_model)
-        as_of = date.fromisoformat(args.as_of)
         conn = psycopg.connect(args.dsn)
         release_config = conn.execute(
             """
@@ -267,6 +267,7 @@ def main():
         report = evaluate_retrieval(
             dataset,
             retriever,
+            as_of=as_of,
             mode=args.mode,
             rerank_enabled=args.rerank_enabled,
             authoritative_quality=authoritative_quality,

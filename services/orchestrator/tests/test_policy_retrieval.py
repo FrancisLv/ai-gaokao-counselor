@@ -1476,6 +1476,36 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
                     (release_id,),
                 )
 
+    def test_chunk_set_hash_must_match_the_document_content(self):
+        release_id = self._seed_release("rel-chunk-content-hash-test")
+        self._seed_policy_document(release_id, "doc-hash-mismatch")
+        self.conn.execute(
+            """
+            UPDATE policy_chunk_set
+            SET content_sha256 = %s
+            WHERE doc_id = 'doc-hash-mismatch'
+            """,
+            ("f" * 64,),
+        )
+
+        result = RetrievePolicy(
+            self.conn,
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(
+            PolicyRetrievalQuery(
+                principal_id="principal-test",
+                query_text="转专业",
+                scope=ApplicabilityScope(
+                    "湖南", 2025, "物理类", "本科批"
+                ),
+                release_id=release_id,
+                mode="keyword",
+            )
+        )
+
+        self.assertEqual(result.status, "NO_EVIDENCE")
+        self.assertEqual(result.evidence, ())
+
     def test_release_retrieval_config_rejects_a_non_contract_rrf_k(self):
         release_id = self._seed_release("rel-invalid-rrf-identity")
 
@@ -1523,6 +1553,38 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
         self.assertEqual(
             [item.document.doc_id for item in result.evidence],
             ["doc-match"],
+        )
+
+    def test_school_filter_keeps_national_and_provincial_policies(self):
+        release_id = self._seed_release("rel-national-school-filter-test")
+        self._seed_policy_document(
+            release_id,
+            "doc-national-policy",
+            document_type="policy",
+            issuer_type="national",
+            regions=("全国",),
+            school_id=None,
+        )
+
+        result = RetrievePolicy(
+            self.conn,
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(
+            PolicyRetrievalQuery(
+                principal_id="principal-test",
+                query_text="转专业",
+                scope=ApplicabilityScope("湖南", 2025, "物理类", "本科批"),
+                release_id=release_id,
+                mode="keyword",
+                school_ids=("1001",),
+                document_types=("policy",),
+            )
+        )
+
+        self.assertEqual(result.status, "FOUND")
+        self.assertEqual(
+            [item.document.doc_id for item in result.evidence],
+            ["doc-national-policy"],
         )
 
     def test_vector_mode_hard_filters_before_ranking_high_similarity_decoys(self):
@@ -1924,6 +1986,37 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.reason, "INDEX_MODEL_MISMATCH")
+
+    def test_vector_mode_rejects_the_embedder_actual_output_dimension(self):
+        release_id = self._seed_release("rel-vector-output-dimension-test")
+        self._seed_policy_document(release_id, "doc-output-dimension")
+
+        for mode in ("vector", "hybrid"):
+            with self.subTest(mode=mode):
+                with self.assertRaises(PolicyRetrievalError) as raised:
+                    RetrievePolicy(
+                        self.conn,
+                        embedder=DeterministicEmbedder(
+                            dim=1024,
+                            vector=[1.0, 0.0, 0.0],
+                        ),
+                        today=lambda: date(2025, 11, 19),
+                    ).retrieve(
+                        PolicyRetrievalQuery(
+                            principal_id="principal-test",
+                            query_text="转专业",
+                            scope=ApplicabilityScope(
+                                "湖南", 2025, "物理类", "本科批"
+                            ),
+                            release_id=release_id,
+                            mode=mode,
+                        )
+                    )
+
+                self.assertEqual(
+                    raised.exception.reason,
+                    "INDEX_MODEL_MISMATCH",
+                )
 
     def test_vector_mode_returns_repeatable_evidence_with_stable_tiebreak(self):
         release_id = self._seed_release("rel-vector-deterministic-test")

@@ -118,6 +118,8 @@ class StructuredProfileInput:
     score: int | None = None
     subjects: tuple[str, ...] = ()
     rank: int | None = None
+    school_ids: tuple[str, ...] = ()
+    document_types: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

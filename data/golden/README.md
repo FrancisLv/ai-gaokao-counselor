@@ -10,11 +10,13 @@ retrieval-hunan-2025-v0.2.0-draft/
   manifest.json
 ```
 
-每个版本目录至少包含：
+检索专用版本目录必须包含：
 
 - `qa.jsonl`：检索用例，至少包含 `case_id / query / scope / expected_chunk_ids / expected_doc_ids / must_exclude_sources / tags / criticality / interference`
-- `cases.jsonl`：端到端用例，至少包含 `case_id / input_profile / scripted_model_responses / expected / tags / criticality`
 - `manifest.json`：记录 `dataset_version`、dataset/Case 文件 SHA256、case count、release、标注人、owner 状态和创建时间
+
+只有包含端到端评测的版本才额外要求 `cases.jsonl`，至少包含
+`case_id / input_profile / scripted_model_responses / expected / tags / criticality`。
 
 当前检索草稿的 `owner_status` 为 `PENDING_SIGNOFF`。在 Francis 完成定标前，只能用于
 harness 冒烟、diff 和待审阅基线，不能宣称正式检索质量门禁。全国/省级长期政策用例

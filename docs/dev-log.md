@@ -1176,7 +1176,7 @@ rerank 模型质量。
   图工厂，启动在线图的独立 run API 仍待后续接线。
 - golden set 新增不可变 `v0.2.0-draft`，30 条 Case 均带 `interference`；跨省/跨年/
   跨科类/错误学校标签有结构化冲突值，scope leak 额外检查 release、文档类型、学校
-  筛选和缺失校级身份。旧 v0.1 保持原样。
+  筛选和缺失校级身份。第二轮 review 删除未发布且不可加载的 v0.1 草稿。
 - EvalRun/baseline 记录 dataset SHA、model route、price table、verifier、算法配置、
   environment、hardware profile 与 baseline identity。recall@5 继续作质量门禁；
   MRR 只在真实且 `SIGNED_OFF` 的权威运行中参与门禁。安全泄漏、Case 技术错误和
@@ -1200,3 +1200,42 @@ rerank 模型质量。
   contract 并以新迁移放宽 CHECK，不能逐请求覆盖。
 - 生产启动在线检索图的 API/子图仍需在后续编排票接线；本轮已移除“只能由测试构造
   binding”的阻塞，但未把完整的 planner 流程接到 worker。
+
+## 38. M4a 第二轮 code review 修复
+
+**日期与范围**：2026-11-19。修复第二轮双轴审查发现的 evaluator、可信 binding、
+内容身份和 golden set 结构问题；不扩展资格规则、最终报告或 LLM Gateway。
+
+### 修复
+
+- `GetRetrievalRunBinding` 不再接受调用方传入 `school_ids/document_types`；
+  POLICY_QA 只从持久化 task input 读取，GENERATE_PLAN 从已确认 Profile 构造 scope，
+  school/document 筛选默认为空。`BuildRetrievalGraph` 与 `build_run_bound_graph`
+  同步移除覆盖参数。
+- servicer 不再在初始化时编译未绑定的默认图，也不保留未使用的 `_graph.astream`
+  旁路；在线检索只能通过显式 run-bound graph factory 进入。
+- 查询 embedding 生成后立即检查实际长度和有限数值。声明维度与实际返回维度不一致
+  时稳定返回 `INDEX_MODEL_MISMATCH`，hybrid 不得降级为关键词路掩盖身份错误。
+- 候选 SQL 强制 `policy_chunk_set.content_sha256 = policy_doc.content_sha256`，
+  证据投影再做防御性一致性检查；hash 不匹配时返回 `NO_EVIDENCE`。
+- 评测接口显式接收 `as_of`，scope leak 使用完整有效区间判断，不再只比较年份。
+- 删除未发布且 loader 无法读取的 v0.1 golden 草稿及旧 baseline；保留有效 v0.2。
+  `data/golden/README.md` 明确 retrieval-only 版本只要求 `qa.jsonl + manifest.json`，
+  端到端版本才要求 `cases.jsonl`。
+- 统一结果诊断对象和 manifest SHA256 格式校验，删除重复分支。
+
+### 测试
+
+- 新增/加强真实库测试：POLICY_QA task input 的学校与文档范围进入 binding、调用方不能
+  覆盖、全国政策在学校筛选下保留、chunk-set hash 不匹配、实际 embedding 维度错误。
+- `test_retrieval_eval.py` 新增 `as_of` 日期边界泄漏用例，并遍历所有已提交 golden
+  版本执行 loader。
+- 离线 `make py-check py-test`：166 tests 通过（92 skipped）。
+- 真实 DSN `make py-test`：166 tests 通过（1 个外部 algo 测试跳过）。
+- fixture CLI 以 `--as-of 2025-11-19` 重跑成功，仍保持 `quality_gate_applied=false`。
+
+### 风险与边界
+
+- golden set v0.2 仍为 `PENDING_SIGNOFF`，fixture baseline 不是正式质量结论。
+- 公共 POLICY_QA Submit API 仍需后续编排票提供 query text 和结构化筛选字段；当前
+  binding 已保证即使内部 task input 存在筛选值，也不会由调用方直接覆盖。
