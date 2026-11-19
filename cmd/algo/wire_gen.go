@@ -25,14 +25,16 @@ func wireApp(bc *conf.Bootstrap) (*kratos.App, func(), error) {
 	}
 	rankRepo := data.NewRankRepo(dataData)
 	admissionRepo := data.NewAdmissionRepo(dataData)
+	eligibilityRepo := data.NewEligibilityRepo(dataData)
 
 	// —— biz 层 ——
 	rankUsecase := biz.NewRankUsecase(rankRepo)
 	recommendUsecase := biz.NewRecommendUsecase(admissionRepo, rankUsecase, bc)
 	optimizeUsecase := biz.NewOptimizeUsecase(bc)
+	eligibilityUsecase := biz.NewEligibilityUsecase(eligibilityRepo)
 
 	// —— service 层 ——
-	svc := service.NewAlgo(rankUsecase, recommendUsecase, optimizeUsecase)
+	svc := service.NewAlgo(rankUsecase, recommendUsecase, optimizeUsecase, eligibilityUsecase)
 
 	// —— app（kratos 启动 glue）——
 	logger := newLogger()

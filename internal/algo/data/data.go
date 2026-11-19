@@ -16,7 +16,7 @@ import (
 )
 
 // ProviderSet 是 data 层的 wire provider 集。
-var ProviderSet = wire.NewSet(NewData, NewAdmissionRepo, NewRankRepo)
+var ProviderSet = wire.NewSet(NewData, NewAdmissionRepo, NewRankRepo, NewEligibilityRepo)
 
 // Data 提供绑定到 pgx 连接池的类型化查询；连接池由 cleanup 统一关闭。
 type Data struct {

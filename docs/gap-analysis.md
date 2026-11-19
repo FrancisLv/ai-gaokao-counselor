@@ -23,7 +23,7 @@
 
 四服务一句话快照：
 
-- **svc-algo（Go）**：✅ 四 RPC 全部实现（`RankConvert / EstimateProb / CheckConstraints / OptimizeWishlist`），薄 service + biz usecase 分层，是当前**唯一成体系的已实现能力**。
+- **svc-algo（Go）**：既有四 RPC 全部实现（`RankConvert / EstimateProb / CheckConstraints / OptimizeWishlist`）；M4b-01 新增 release-bound `EvaluateEligibility` 最小选科闭环与规则/覆盖持久化。薄 service + biz usecase 分层，仍是当前最成体系的已实现能力。
 - **svc-orchestrator（Python/LangGraph）**：🟡 RunLifecycle 已提供持久 run/interrupt/租约与受控算法预览，`RetrievePolicy` 与在线检索节点已接线；自然语言画像、完整 POLICY_QA 子图、Strategy/Critic/report 等业务节点仍待实现，未调用 llmgw。
 - **svc-gateway（Go）**：⛔ 三个入口方法（`CreatePlan / ConfirmProfile / BackfillProfile`）全部 `return errors.New("TODO")`。
 - **svc-llm-gateway（Go）**：⛔ `Chat / StreamChat` 全部 TODO；仅有 `llm_call_log` 记账表 schema，无路由 / 缓存 / 预占结算。
@@ -60,7 +60,7 @@
 | FR | 现状 | 证据（文件:行） | 剩余工作 | 关联 | 里程碑 |
 | --- | --- | --- | --- | --- | --- |
 | FR-12 冲/稳/保方案生成（P0） | 🟡 受控预览已接线 | `internal/algo/service/algo.go:54` `EstimateProb` 从分数生成整池；RunLifecycle 在确认画像后调用四 RPC，并将候选、概率与 `AuditBasis` 原样发布为 `ALGORITHM_PREVIEW` | 正式推荐仍需当年计划/规则/证据/报告门禁；Strategy 仍不可替换候选身份或概率 | P1-14 | M3 已接，M4/M5 继续 |
-| FR-13 硬约束校验（P0） | 🟡 仅选科 | `algo.go:76` `CheckConstraints` 已实现；`algo.proto:140` `RejectedCandidate.rule` 枚举列了 subject_req/single_score/physical/gender/batch，但**实现只做选科** | 单科/体检/性别/学费需「条款→规则→审核→生效→执行」发布链路（P1-01）；补 `PASS/FAIL/UNKNOWN` 三态；未完成前不声称这些维度透出率=0 | P1-01, P1-15 | M3/M4 |
+| FR-13 硬约束校验（P0） | 🟡 规则最小闭环 | `EvaluateEligibility` 已提供 release-bound 规则快照、FULL 覆盖、专业三态和证据引用；迁移 21 建立 `rule_version / rule_coverage`。旧 `CheckConstraints` 保留兼容，实际仅选科 | 继续实现 M4b-02~07：完整生命周期、PARTIAL/NONE、受限 AST、条件字段、五态汇总与 RunLifecycle 接线；未完成前不声称完整资格已核验 | P1-01, P1-15 | M4b |
 | FR-14 位次换算（P0） | ✅ 正向 | `algo.go:36` `RankConvert` score→rank；RunLifecycle 传入 run 绑定 `release_id` 并校验 reply rank 与 EstimateProb `AuditBasis` 一致 | 仅正向（符合 R7，rank-only 不反推）；**`RankConvertReply` 无控制线**，而 `score_rank_map.control_score` 在库（`00_schema.sql:223`）——可补透出 | §2(控制线未透出) | M3 已接 |
 | FR-15 录取概率估计（P0） | ✅ 受控预览 | `algo.proto:84` `ProbEstimate` method=`weighted_hit`、clamp `[0.01,0.99]`；RunLifecycle 校验概率范围、候选身份、重复/漂移与执行时限，再发布非空预览 | 置信区间仍为 P2；预览明确标注非录取保证，正式报告门禁未完成 | P1-05, P1-15 | M3 已接 |
 | FR-16 方案自我挑战 Critic（P1） | 🟡 有偏差 | `build.py:17-19` `MAX_ASK_ROUNDS=6` ✅、`MAX_VERIFY_RETRIES=2` ✅、`MAX_CRITIC_LOOPS=2` 已与 PRD v1.3 对齐；Critic 节点仍未实现 | 实现已优化方案上的结构化审查、无进展检测与 P1 发布门禁；硬错误不得由 Critic 豁免 | P1-02, P1-03 | M2/M6 |

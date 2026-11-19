@@ -1347,3 +1347,33 @@ rerank 模型质量。
 - v0.4 真实 vector 诊断：25 条 ACTIVE 全部进入分母，recall@5/MRR 为 1.0、
   scope leak 为 0，precision@5 为 0.149，另有 6 条已知缺口显式跳过。由于
   `quality_gate_applied=false` 且 owner 未签字，这不是正式质量通过结论。
+
+## 42. M4b-01：EvaluateEligibility 最小纵向闭环
+
+**日期与范围**：2026-11-19，对应 issue #16。建立结构化资格规则的第一条
+release-bound 路径；不实现完整规则生命周期、PARTIAL/NONE 覆盖、条件字段与
+RunLifecycle 接线。
+
+### 实现
+
+- proto additive 新增 `EvaluateEligibility`，请求携带 CONFIRMED 画像版本及不可变
+  事实快照、run 绑定的 `release_id`、适用域和院校专业组候选；响应包含专业
+  PASS/FAIL/UNKNOWN、覆盖、规则/来源证据、稳定原因和诊断计数。
+- 迁移 21 新增 `rule_version` 与 `rule_coverage`；规则内容、来源证据、release
+  与审查状态有数据库约束，FULL 覆盖必须声明来源和说明。
+- `svc-algo` 从 release 读取 PUBLISHED 且有效的规则快照，只有 FULL 选科覆盖允许
+  PASS；release 缺失/撤销返回 BLOCKED。规则选择、求值和汇总隐藏在唯一 seam 内。
+- 旧 `CheckConstraints` 保持原行为和协议；新路径不改候选身份、概率、分档或优化顺序。
+
+### 验证
+
+- 业务表驱动测试覆盖选科 PASS/FAIL、撤销 release、DRAFT 画像拒绝与缺失覆盖 UNKNOWN。
+- service DTO 测试与 bufconn 生成客户端测试覆盖新 RPC。
+- 真实 PostgreSQL 集成测试验证 release/rule/coverage 插入 → EvaluateEligibility →
+  PASS/FAIL/证据 → release 撤销 BLOCKED。
+- fresh-schema migration 测试通过；全量 Go 单测与 Python 离线测试通过。
+
+### 边界
+
+- 当前只验证 `SUBJECT_REQUIREMENT` 与 FULL 覆盖；完整 AST、PARTIAL/NONE、更多
+  条件字段、专业五态组汇总和正式 run 接线仍由 M4b-02~07 完成。

@@ -20,6 +20,7 @@ MIGRATIONS = (
     "migrations/18_policy_retrieval_config_identity.sql",
     "migrations/19_policy_evidence_results.sql",
     "migrations/20_policy_relevance_policy.sql",
+    "migrations/21_eligibility_rules.sql",
 )
 
 

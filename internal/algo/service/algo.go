@@ -19,17 +19,18 @@ import (
 // ProviderSet 是 service 层的 wire provider 集。
 var ProviderSet = wire.NewSet(NewAlgo)
 
-// Service 实现 algov1.AlgoServer（4 个 RPC）。
+// Service 实现 algov1.AlgoServer（既有四 RPC + 结构化资格 EvaluateEligibility）。
 type Service struct {
 	algov1.UnimplementedAlgoServer
-	rank      *biz.RankUsecase
-	recommend *biz.RecommendUsecase
-	optimize  *biz.OptimizeUsecase
+	rank        *biz.RankUsecase
+	recommend   *biz.RecommendUsecase
+	optimize    *biz.OptimizeUsecase
+	eligibility *biz.EligibilityUsecase
 }
 
-// NewAlgo 构造 Service（wire 注入三个 usecase）。
-func NewAlgo(rank *biz.RankUsecase, recommend *biz.RecommendUsecase, optimize *biz.OptimizeUsecase) *Service {
-	return &Service{rank: rank, recommend: recommend, optimize: optimize}
+// NewAlgo 构造 Service（wire 注入 usecase）。
+func NewAlgo(rank *biz.RankUsecase, recommend *biz.RecommendUsecase, optimize *biz.OptimizeUsecase, eligibility *biz.EligibilityUsecase) *Service {
+	return &Service{rank: rank, recommend: recommend, optimize: optimize, eligibility: eligibility}
 }
 
 // RankConvert 分数 → 位次（year=报考年，见 §3.0）。
@@ -88,6 +89,15 @@ func (s *Service) CheckConstraints(ctx context.Context, req *algov1.CheckConstra
 		return nil, toKratosErr(err)
 	}
 	return toPbCheckConstraintsReply(kept, rejected), nil
+}
+
+// EvaluateEligibility 是结构化资格唯一主入口；service 只做类型映射。
+func (s *Service) EvaluateEligibility(ctx context.Context, req *algov1.EvaluateEligibilityRequest) (*algov1.EvaluateEligibilityReply, error) {
+	result, err := s.eligibility.EvaluateEligibility(ctx, fromPbEligibilityRequest(req))
+	if err != nil {
+		return nil, toKratosErr(err)
+	}
+	return toPbEligibilityReply(result), nil
 }
 
 // OptimizeWishlist 志愿表排序与配比（service 薄：pb→biz 映射候选/profile → usecase 编排 → biz→pb 映射，§4.2④）。
