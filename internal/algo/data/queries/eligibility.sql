@@ -34,3 +34,10 @@ SELECT
 FROM rule_coverage
 WHERE release_id = @release_id::text
 ORDER BY rule_type, scope::text, status;
+
+-- name: ListRevokedEligibilityRules :many
+SELECT rule_key, rule_type, scope
+FROM rule_version
+WHERE release_id = @release_id::text
+  AND review_status = 'REVOKED'
+ORDER BY rule_key, rule_type, scope::text;

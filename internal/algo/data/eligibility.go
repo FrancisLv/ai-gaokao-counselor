@@ -89,9 +89,40 @@ func (r *eligibilityRepo) LoadEligibilityRuleSet(ctx context.Context, releaseID 
 			Notes:              row.Notes,
 		})
 	}
+	revokedRows, err := r.d.queries.ListRevokedEligibilityRules(ctx, releaseID)
+	if err != nil {
+		return biz.EligibilityRuleSet{}, err
+	}
+	revokedRules := make([]biz.RevokedRuleVersion, 0, len(revokedRows))
+	for _, row := range revokedRows {
+		var scope biz.RuleScope
+		if err := json.Unmarshal(row.Scope, &scope); err != nil {
+			return biz.EligibilityRuleSet{}, err
+		}
+		if hasPublishedReplacement(row.RuleKey, scope, rules) {
+			continue
+		}
+		revokedRules = append(revokedRules, biz.RevokedRuleVersion{
+			RuleKey:  row.RuleKey,
+			RuleType: row.RuleType,
+			Scope:    scope,
+		})
+	}
 	return biz.EligibilityRuleSet{
 		ReleaseStatus: status,
 		Rules:         rules,
 		Coverage:      coverage,
+		RevokedRules:  revokedRules,
 	}, nil
+}
+
+func hasPublishedReplacement(ruleKey string, scope biz.RuleScope, rules []biz.RuleVersion) bool {
+	for _, rule := range rules {
+		if rule.RuleKey == ruleKey &&
+			rule.ReviewState == biz.ReviewStatePublished &&
+			rule.Scope.Covers(scope) {
+			return true
+		}
+	}
+	return false
 }

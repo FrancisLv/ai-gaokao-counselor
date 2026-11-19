@@ -7,6 +7,8 @@ package dbgen
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const getEligibilityRelease = `-- name: GetEligibilityRelease :one
@@ -101,7 +103,7 @@ type ListPublishedEligibilityRulesRow struct {
 	OutcomeWhenTrue       string
 	ReasonCode            string
 	ReviewStatus          string
-	ReleaseID             string
+	ReleaseID             pgtype.Text
 	SourceEvidence        []byte
 }
 
@@ -128,6 +130,40 @@ func (q *Queries) ListPublishedEligibilityRules(ctx context.Context, releaseID s
 			&i.ReleaseID,
 			&i.SourceEvidence,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRevokedEligibilityRules = `-- name: ListRevokedEligibilityRules :many
+SELECT rule_key, rule_type, scope
+FROM rule_version
+WHERE release_id = $1::text
+  AND review_status = 'REVOKED'
+ORDER BY rule_key, rule_type, scope::text
+`
+
+type ListRevokedEligibilityRulesRow struct {
+	RuleKey  string
+	RuleType string
+	Scope    []byte
+}
+
+func (q *Queries) ListRevokedEligibilityRules(ctx context.Context, releaseID string) ([]ListRevokedEligibilityRulesRow, error) {
+	rows, err := q.db.Query(ctx, listRevokedEligibilityRules, releaseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRevokedEligibilityRulesRow
+	for rows.Next() {
+		var i ListRevokedEligibilityRulesRow
+		if err := rows.Scan(&i.RuleKey, &i.RuleType, &i.Scope); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

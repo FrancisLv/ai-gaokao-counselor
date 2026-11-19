@@ -34,6 +34,9 @@ var (
 	ErrInvalidConfig         = errors.New("invalid algorithm config")
 	ErrMissingEnrollmentPlan = errors.New("missing enrollment plan")
 	ErrProfileNotConfirmed   = errors.New("profile not confirmed")
+	ErrRuleStateConflict     = errors.New("rule lifecycle state conflict")
+	ErrRulePublishConflict   = errors.New("rule publication conflict")
+	ErrRulePublishIncomplete = errors.New("rule publication prerequisites missing")
 
 	// ErrNotImplemented 占位（骨架期）。
 	ErrNotImplemented = errors.New("not implemented")

@@ -60,7 +60,7 @@
 | FR | 现状 | 证据（文件:行） | 剩余工作 | 关联 | 里程碑 |
 | --- | --- | --- | --- | --- | --- |
 | FR-12 冲/稳/保方案生成（P0） | 🟡 受控预览已接线 | `internal/algo/service/algo.go:54` `EstimateProb` 从分数生成整池；RunLifecycle 在确认画像后调用四 RPC，并将候选、概率与 `AuditBasis` 原样发布为 `ALGORITHM_PREVIEW` | 正式推荐仍需当年计划/规则/证据/报告门禁；Strategy 仍不可替换候选身份或概率 | P1-14 | M3 已接，M4/M5 继续 |
-| FR-13 硬约束校验（P0） | 🟡 规则最小闭环 | `EvaluateEligibility` 已提供 release-bound 规则快照、FULL 覆盖、专业三态和证据引用；迁移 21 建立 `rule_version / rule_coverage`。旧 `CheckConstraints` 保留兼容，实际仅选科 | 继续实现 M4b-02~07：完整生命周期、PARTIAL/NONE、受限 AST、条件字段、五态汇总与 RunLifecycle 接线；未完成前不声称完整资格已核验 | P1-01, P1-15 | M4b |
+| FR-13 硬约束校验（P0） | 🟡 生命周期与冲突门禁已接 | `EvaluateEligibility` 已提供 release-bound 规则快照、FULL 覆盖、专业三态和证据引用；迁移 21 建立 `rule_version / rule_coverage`，迁移 22 增加 DRAFT→REVIEWED→PUBLISHED→REVOKED、内容不可变、状态审计、发布覆盖/重叠冲突门禁，以及撤销规则类型的覆盖失效。旧 `CheckConstraints` 保留兼容，实际仅选科 | 继续实现 M4b-03~07：PARTIAL/NONE、受限 AST、条件字段、五态汇总与 RunLifecycle 接线；未完成前不声称完整资格已核验 | P1-01, P1-15 | M4b |
 | FR-14 位次换算（P0） | ✅ 正向 | `algo.go:36` `RankConvert` score→rank；RunLifecycle 传入 run 绑定 `release_id` 并校验 reply rank 与 EstimateProb `AuditBasis` 一致 | 仅正向（符合 R7，rank-only 不反推）；**`RankConvertReply` 无控制线**，而 `score_rank_map.control_score` 在库（`00_schema.sql:223`）——可补透出 | §2(控制线未透出) | M3 已接 |
 | FR-15 录取概率估计（P0） | ✅ 受控预览 | `algo.proto:84` `ProbEstimate` method=`weighted_hit`、clamp `[0.01,0.99]`；RunLifecycle 校验概率范围、候选身份、重复/漂移与执行时限，再发布非空预览 | 置信区间仍为 P2；预览明确标注非录取保证，正式报告门禁未完成 | P1-05, P1-15 | M3 已接 |
 | FR-16 方案自我挑战 Critic（P1） | 🟡 有偏差 | `build.py:17-19` `MAX_ASK_ROUNDS=6` ✅、`MAX_VERIFY_RETRIES=2` ✅、`MAX_CRITIC_LOOPS=2` 已与 PRD v1.3 对齐；Critic 节点仍未实现 | 实现已优化方案上的结构化审查、无进展检测与 P1 发布门禁；硬错误不得由 Critic 豁免 | P1-02, P1-03 | M2/M6 |

@@ -1377,3 +1377,37 @@ RunLifecycle 接线。
 
 - 当前只验证 `SUBJECT_REQUIREMENT` 与 FULL 覆盖；完整 AST、PARTIAL/NONE、更多
   条件字段、专业五态组汇总和正式 run 接线仍由 M4b-02~07 完成。
+
+## 43. M4b-02：RuleVersion 生命周期与发布生效门禁
+
+**日期与范围**：2026-11-19，对应 issue #17。实现规则版本生命周期、内容不可变、
+发布审计与冲突门禁；不扩展 PARTIAL/NONE 覆盖匹配、完整受限 AST、条件字段接入、
+组内五态汇总或 RunLifecycle 接线。
+
+### 实现
+
+- 迁移 22 为 `rule_version` 增加创建/发布操作者与时间字段、已发布元数据约束和
+  精确 scope 唯一索引；新增 `rule_lifecycle_event` 追加式审计。
+- 数据库触发器只允许 `DRAFT -> REVIEWED -> PUBLISHED -> REVOKED`，禁止直接插入
+  PUBLISHED、跳级、回退、从 REVOKED 恢复以及修改已完成版本的内容字段。
+- 发布要求对应规则类型存在覆盖整个规则 scope 的 FULL/PARTIAL 声明，并拒绝同一
+  release、同一 `rule_key` 的 overlap PUBLISHED 版本。内部 `RuleLifecycleRepo`
+  负责事务化转换，不新增在线业务 seam。
+- `EvaluateEligibility` 防御残留重叠生效规则并返回 `BLOCKED / RULE_CONFLICT`；
+  REVOKED 规则不参与评估、不回退旧版本，并使对应规则类型的既有覆盖失效为 UNKNOWN。
+- fresh-schema 迁移链更新到 22；现有 M4b service 集成夹具改为 DRAFT → REVIEWED →
+  PUBLISHED 的合法路径。
+
+### 验证
+
+- 真实 PostgreSQL 生命周期测试覆盖审计、非法转换、内容不可变、发布冲突、缺覆盖、
+  撤销原因和撤销后 UNKNOWN。
+- Eligibility 行为测试覆盖 DRAFT/REVIEWED 不改变已发布结果、重叠 scope 阻断和
+  非重叠同 key 共存。
+- RunLifecycle fresh-schema 迁移测试通过。
+
+### 边界
+
+- 撤销规则不自动发布替代规则或新 release；恢复完整覆盖必须发布新规则版本和
+  release。
+- 本票不从文本或 LLM 生成规则，也不提供审核 UI。

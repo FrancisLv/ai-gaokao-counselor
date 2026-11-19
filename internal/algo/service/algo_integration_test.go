@@ -297,6 +297,7 @@ func TestIntegration_EvaluateEligibility_SubjectRule(t *testing.T) {
 	t.Cleanup(pool.Close)
 
 	releaseID := fmt.Sprintf("rel_m4b_test_%d", time.Now().UnixNano())
+	ruleID := "rule-subject-test-" + releaseID
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO release (release_id, status, manifest, manifest_sha256, published_at)
 		 VALUES ($1, 'PUBLISHED', '{}'::jsonb, 'sha256:m4b', NOW())`, releaseID); err != nil {
@@ -305,24 +306,28 @@ func TestIntegration_EvaluateEligibility_SubjectRule(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
 	})
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM rule_version WHERE rule_id = $1`, ruleID)
+	})
 
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO rule_version (
 			rule_id, version, rule_key, rule_type, scope, required_profile_fields,
 			expression, outcome_when_true, reason_code, review_status,
-			valid_from, release_id, source_evidence
+			valid_from, source_evidence, created_by
 		) VALUES (
-			'rule-subject-test', 1, 'subject-requirement', 'SUBJECT_REQUIREMENT',
+			$2, 1, 'subject-requirement', 'SUBJECT_REQUIREMENT',
 			'{}'::jsonb, '["subjects","category"]'::jsonb,
 			'{"op":"NOT","child":{"op":"SUBJECT_MATCH"}}'::jsonb, 'FAIL',
-			'SUBJECT_NOT_MATCHED', 'PUBLISHED', NOW(), $1,
+			'SUBJECT_NOT_MATCHED', 'DRAFT', NOW(),
 			jsonb_build_array(jsonb_build_object(
 				'evidence_id', 'ev-subject',
 				'evidence_type', 'DOCUMENT',
 				'release_id', $1::text,
 				'content_sha256', 'sha256:subject'
-			))
-		)`, releaseID); err != nil {
+			)),
+			'test-suite'
+		)`, releaseID, ruleID); err != nil {
 		t.Fatalf("insert rule_version: %v", err)
 	}
 	if _, err := pool.Exec(context.Background(),
@@ -333,6 +338,27 @@ func TestIntegration_EvaluateEligibility_SubjectRule(t *testing.T) {
 			'["major_admission"]'::jsonb, 'test fixture'
 		)`, releaseID); err != nil {
 		t.Fatalf("insert rule_coverage: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE rule_version
+		 SET review_status = 'REVIEWED',
+		     reviewed_by = 'test-suite',
+		     reviewed_at = clock_timestamp()
+		 WHERE rule_id = $1 AND version = 1`,
+		ruleID,
+	); err != nil {
+		t.Fatalf("review rule_version: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE rule_version
+		 SET review_status = 'PUBLISHED',
+		     release_id = $1,
+		     published_by = 'test-suite',
+		     published_at = clock_timestamp()
+		 WHERE rule_id = $2 AND version = 1`,
+		releaseID, ruleID,
+	); err != nil {
+		t.Fatalf("publish rule_version: %v", err)
 	}
 
 	t.Setenv("ALGO_DATA_DSN", dsn)

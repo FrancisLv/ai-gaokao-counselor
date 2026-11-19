@@ -19,6 +19,13 @@ type EligibilityRuleSet struct {
 	ReleaseStatus string
 	Rules         []RuleVersion
 	Coverage      []RuleCoverage
+	RevokedRules  []RevokedRuleVersion
+}
+
+type RevokedRuleVersion struct {
+	RuleKey  string
+	RuleType string
+	Scope    RuleScope
 }
 
 type EligibilityScope struct {
@@ -165,7 +172,10 @@ const (
 	OperatorNot                = "NOT"
 	OutcomeFail                = "FAIL"
 
+	ReviewStateDraft     = "DRAFT"
+	ReviewStateReviewed  = "REVIEWED"
 	ReviewStatePublished = "PUBLISHED"
+	ReviewStateRevoked   = "REVOKED"
 	CoverageFull         = "FULL"
 	CoveragePartial      = "PARTIAL"
 	CoverageNone         = "NONE"
@@ -185,6 +195,7 @@ const (
 	ReasonRuleCoverageMissing = "RULE_COVERAGE_MISSING"
 	ReasonProfileFactMissing  = "PROFILE_FACT_MISSING"
 	ReasonRuleExpression      = "RULE_EXPRESSION_INVALID"
+	ReasonRuleConflict        = "RULE_CONFLICT"
 	ReasonReleaseRevoked      = "RELEASE_REVOKED"
 	ReasonReleaseUnavailable  = "RELEASE_UNAVAILABLE"
 )
@@ -234,8 +245,15 @@ func (u *EligibilityUsecase) EvaluateEligibility(ctx context.Context, req Eligib
 	facts := profileFactIndex(req.ProfileFacts)
 	rules := sortedRules(set.Rules)
 	result.Diagnostics.EvaluatedRuleCount = len(rules)
+	conflicts := conflictingRuleKeys(rules)
+	result.Diagnostics.ConflictCount = len(conflicts)
+	if len(conflicts) > 0 {
+		result.Status = EligibilityBlocked
+		result.Groups = blockedGroups(req.CandidateGroups, ReasonRuleConflict)
+		return result, nil
+	}
 	for _, group := range req.CandidateGroups {
-		ground := evaluateGroup(req.Scope, group, rules, set.Coverage, facts)
+		ground := evaluateGroup(req.Scope, group, rules, set.Coverage, set.RevokedRules, facts)
 		result.Groups = append(result.Groups, ground)
 	}
 	sort.Slice(result.Groups, func(i, j int) bool { return result.Groups[i].GroupKey < result.Groups[j].GroupKey })
@@ -252,14 +270,21 @@ func (u *EligibilityUsecase) EvaluateEligibility(ctx context.Context, req Eligib
 	return result, nil
 }
 
-func evaluateGroup(scope EligibilityScope, group CandidateGroup, rules []RuleVersion, coverage []RuleCoverage, facts map[string]ProfileFact) GroupEligibility {
+func evaluateGroup(
+	scope EligibilityScope,
+	group CandidateGroup,
+	rules []RuleVersion,
+	coverage []RuleCoverage,
+	revokedRules []RevokedRuleVersion,
+	facts map[string]ProfileFact,
+) GroupEligibility {
 	out := GroupEligibility{
 		GroupKey: eligibilityGroupKey(scope, group),
 	}
 	majors := append([]CandidateMajor(nil), group.Majors...)
 	sort.Slice(majors, func(i, j int) bool { return majors[i].MajorCode < majors[j].MajorCode })
 	for _, major := range majors {
-		evaluated := evaluateMajor(scope, group, major, rules, coverage, facts)
+		evaluated := evaluateMajor(scope, group, major, rules, coverage, revokedRules, facts)
 		out.Majors = append(out.Majors, evaluated)
 		out.EvidenceRefs = appendUniqueEvidence(out.EvidenceRefs, evaluated.EvidenceRefs...)
 	}
@@ -287,7 +312,15 @@ func evaluateGroup(scope EligibilityScope, group CandidateGroup, rules []RuleVer
 	return out
 }
 
-func evaluateMajor(scope EligibilityScope, group CandidateGroup, major CandidateMajor, rules []RuleVersion, coverage []RuleCoverage, facts map[string]ProfileFact) MajorEligibility {
+func evaluateMajor(
+	scope EligibilityScope,
+	group CandidateGroup,
+	major CandidateMajor,
+	rules []RuleVersion,
+	coverage []RuleCoverage,
+	revokedRules []RevokedRuleVersion,
+	facts map[string]ProfileFact,
+) MajorEligibility {
 	out := MajorEligibility{MajorCode: major.MajorCode}
 	if !major.InCurrentPlan {
 		out.Status = MajorNotApplicable
@@ -329,12 +362,13 @@ func evaluateMajor(scope EligibilityScope, group CandidateGroup, major Candidate
 		return out
 	}
 
-	required := []string{RuleTypeSubjectRequirement}
+	invalidatedRuleTypes := invalidatedRuleTypesFor(revokedRules, scope, group, major)
+	required := append([]string{RuleTypeSubjectRequirement}, invalidatedRuleTypes...)
 	for _, rule := range applicable {
 		required = append(required, rule.RuleType)
 	}
 	for _, ruleType := range stableStrings(required) {
-		if !hasFullCoverage(coverage, ruleType) {
+		if containsString(invalidatedRuleTypes, ruleType) || !hasFullCoverage(coverage, ruleType) {
 			out.Status = MajorUnknown
 			out.UnknownReasons = append(out.UnknownReasons, ReasonRuleCoverageMissing)
 		}
@@ -396,6 +430,61 @@ func (s RuleScope) Applies(scope EligibilityScope, group CandidateGroup, major C
 		(s.MajorCode == "" || s.MajorCode == major.MajorCode)
 }
 
+func (s RuleScope) Overlaps(other RuleScope) bool {
+	return scopesOverlap(s.Province, other.Province) &&
+		scopesOverlapInt(s.ApplicationYear, other.ApplicationYear) &&
+		scopesOverlap(s.Category, other.Category) &&
+		scopesOverlap(s.Batch, other.Batch) &&
+		scopesOverlapInt(s.UniversityID, other.UniversityID) &&
+		scopesOverlap(s.MajorGroup, other.MajorGroup) &&
+		scopesOverlap(s.MajorCode, other.MajorCode)
+}
+
+func (s RuleScope) Covers(other RuleScope) bool {
+	return scopeCovers(s.Province, other.Province) &&
+		scopeCoversInt(s.ApplicationYear, other.ApplicationYear) &&
+		scopeCovers(s.Category, other.Category) &&
+		scopeCovers(s.Batch, other.Batch) &&
+		scopeCoversInt(s.UniversityID, other.UniversityID) &&
+		scopeCovers(s.MajorGroup, other.MajorGroup) &&
+		scopeCovers(s.MajorCode, other.MajorCode)
+}
+
+func scopesOverlap(left, right string) bool {
+	return left == "" || right == "" || left == right
+}
+
+func scopesOverlapInt(left, right int) bool {
+	return left == 0 || right == 0 || left == right
+}
+
+func scopeCovers(container, target string) bool {
+	return container == "" || container == target
+}
+
+func scopeCoversInt(container, target int) bool {
+	return container == 0 || container == target
+}
+
+func conflictingRuleKeys(rules []RuleVersion) []string {
+	var conflicts []string
+	for i := 0; i < len(rules); i++ {
+		if rules[i].ReviewState != ReviewStatePublished {
+			continue
+		}
+		for j := i + 1; j < len(rules); j++ {
+			if rules[j].ReviewState != ReviewStatePublished ||
+				rules[i].RuleKey != rules[j].RuleKey ||
+				!rules[i].Scope.Overlaps(rules[j].Scope) {
+				continue
+			}
+			conflicts = append(conflicts, rules[i].RuleKey)
+			break
+		}
+	}
+	return stableStrings(conflicts)
+}
+
 func hasFullCoverage(coverage []RuleCoverage, ruleType string) bool {
 	for _, item := range coverage {
 		if item.RuleType == ruleType && item.Status == CoverageFull {
@@ -453,6 +542,30 @@ func stableStrings(values []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func invalidatedRuleTypesFor(
+	revoked []RevokedRuleVersion,
+	scope EligibilityScope,
+	group CandidateGroup,
+	major CandidateMajor,
+) []string {
+	var ruleTypes []string
+	for _, item := range revoked {
+		if item.Scope.Applies(scope, group, major) {
+			ruleTypes = append(ruleTypes, item.RuleType)
+		}
+	}
+	return stableStrings(ruleTypes)
 }
 
 func sortedRules(rules []RuleVersion) []RuleVersion {
