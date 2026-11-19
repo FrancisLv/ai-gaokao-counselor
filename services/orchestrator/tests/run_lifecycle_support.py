@@ -168,6 +168,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await self._apply_sql_file(conn, "migrations/13_release_data_dimensions.sql")
             await self._apply_sql_file(conn, "migrations/14_default_release_scope.sql")
             await self._apply_sql_file(conn, "migrations/15_policy_retrieval_release_scope.sql")
+            await self._apply_sql_file(conn, "migrations/16_policy_vector_release_identity.sql")
         finally:
             await conn.close()
 

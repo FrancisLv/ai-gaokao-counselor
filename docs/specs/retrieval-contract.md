@@ -168,9 +168,12 @@ diagnostics:
 ### 5.1 向量路
 
 - 使用 `pgvector` 余弦距离；
-- 查询向量由 release 记录的 embedding 模型生成；
+- `release_policy_index` 记录 release 的 embedding 模型、向量维度和 index version；查询 embedding 必须由该模型生成；
+- release 映射的 `policy_chunk_set` 及其 chunk 身份必须与该 release 声明完全一致；
 - 模型或维度不匹配时返回 `INDEX_MODEL_MISMATCH`，不得降级混读；
-- 向量路失败时可使用同范围关键词路并标记 `degraded_reason`。
+- `mode=vector` 时模型不可用或查询执行失败返回 `VECTOR_UNAVAILABLE`，不能返回 `NO_EVIDENCE`；
+- `mode=vector` 在身份校验与查询均成功后零候选，返回 `NO_EVIDENCE`；
+- `mode=hybrid` 的向量路失败可使用同范围关键词路并标记 `degraded_reason`。
 
 ### 5.2 关键词路
 
@@ -221,7 +224,9 @@ diagnostics:
 | release 不存在/撤销 | `RELEASE_UNAVAILABLE`，不查询 |
 | 省年科批不在支持范围 | `UNSUPPORTED_SCOPE`，不放宽 |
 | 硬过滤后为空 | `NO_EVIDENCE`，不扩大范围 |
-| 向量模型不可用 | 同范围关键词检索，`degraded_reason=VECTOR_UNAVAILABLE` |
+| release 声明的模型/维度或 chunk/chunk set 索引身份不一致 | `INDEX_MODEL_MISMATCH`，零混读 |
+| vector-only 的模型不可用、查询执行失败 | `VECTOR_UNAVAILABLE`，不伪装为 `NO_EVIDENCE` |
+| hybrid 的向量模型不可用 | 同范围关键词检索，`degraded_reason=VECTOR_UNAVAILABLE` |
 | 关键词索引不可用 | 同范围向量检索，`degraded_reason=KEYWORD_UNAVAILABLE` |
 | 两路均不可用 | 返回明确失败，不生成政策答案 |
 | rerank 不可用 | 使用 RRF 顺序并记录降级 |

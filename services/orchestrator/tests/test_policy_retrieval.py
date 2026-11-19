@@ -39,6 +39,8 @@ class FakeCursor:
         self.sql = (*self.sql, sql)
         self.params = (*self.params, params)
         self._current = next(self._responses)
+        if isinstance(self._current, BaseException):
+            raise self._current
 
     def fetchone(self):
         return self._current if isinstance(self._current, Mapping) else None
@@ -53,6 +55,24 @@ class FakeConnection:
 
     def cursor(self, row_factory=None):
         return self.cursor_obj
+
+
+class DeterministicEmbedder:
+    def __init__(self, model_name="deterministic-test", dim=1024, vector=None):
+        self.model_name = model_name
+        self.dim = dim
+        self.vector = list(vector or [0.0] * dim)
+        self.calls = 0
+
+    def encode_single(self, text):
+        self.calls += 1
+        return list(self.vector)
+
+
+class FailingEmbedder(DeterministicEmbedder):
+    def encode_single(self, text):
+        self.calls += 1
+        raise RuntimeError("deterministic embedding outage")
 
 
 class PolicyRetrievalTests(unittest.TestCase):
@@ -97,15 +117,161 @@ class PolicyRetrievalTests(unittest.TestCase):
                 self.assertEqual(result.status, "UNSUPPORTED_SCOPE")
                 self.assertEqual(result.evidence, ())
 
-    def test_modes_not_implemented_in_this_slice_fail_explicitly(self):
-        published = {"status": "PUBLISHED", "revoked_at": None}
-        for mode in ("vector", "hybrid"):
-            with self.subTest(mode=mode):
+    def test_vector_mode_returns_the_same_stable_document_evidence(self):
+        row = {
+            "chunk_id": "chunk-a",
+            "doc_id": "doc-a",
+            "section_path": "第二章 > 转专业",
+            "text": "第一条 学生可以申请转专业。",
+            "text_sha256": "74c7043699be90ad02a14a796532109e54f9d3eb936dde9a24e41cea6acc1eea",
+            "char_start": 100,
+            "char_end": 114,
+            "chunk_set_version": "chunkset-a",
+            "title": "湖南测试大学2025年招生章程",
+            "document_type": "charter",
+            "issuer": "湖南测试大学",
+            "issuer_type": "university",
+            "issuer_id": "school-1001",
+            "school_id": "1001",
+            "source_uri": "https://example.invalid/charter",
+            "raw_storage_uri": "s3://bucket/charter.txt",
+            "fetched_at": datetime(2025, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+            "content_sha256": "a" * 64,
+            "regions": ["湖南"],
+            "categories": ["物理类"],
+            "batches": ["本科批"],
+            "valid_from": date(2025, 1, 1),
+            "valid_to": date(2025, 12, 31),
+            "vector_distance": 0.1,
+            "candidate_count": 1,
+        }
+        result = RetrievePolicy(
+            FakeConnection(
+                {"status": "PUBLISHED", "revoked_at": None},
+                {
+                    "embedding_model": "deterministic-test",
+                    "embedding_dim": 1024,
+                    "index_version": "idx-v1",
+                },
+                [],
+                [row],
+            ),
+            embedder=DeterministicEmbedder(),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(self.query(mode="vector"))
+
+        self.assertEqual(result.status, "FOUND")
+        self.assertEqual(result.release_id, "rel-test")
+        self.assertEqual(
+            [item.evidence_id for item in result.evidence],
+            [
+                "evidence_1cdc6455cab9c62515557ed6763c1607fa27c79b4fbb2ec7a6c8eaf41c21da37"
+            ],
+        )
+        self.assertEqual(result.evidence[0].document.excerpt, row["text"])
+        self.assertEqual(result.diagnostics.vector_candidates, 1)
+        self.assertEqual(result.diagnostics.keyword_candidates, 0)
+
+    def test_vector_mode_rejects_a_chunk_set_outside_the_release_index_identity(self):
+        embedder = DeterministicEmbedder()
+        with self.assertRaises(PolicyRetrievalError) as raised:
+            RetrievePolicy(
+                FakeConnection(
+                    {"status": "PUBLISHED", "revoked_at": None},
+                    {
+                        "embedding_model": "deterministic-test",
+                        "embedding_dim": 1024,
+                        "index_version": "idx-v1",
+                    },
+                    [
+                        {
+                            "chunk_set_version": "chunkset-a",
+                            "embedding_model": "deterministic-test",
+                            "embedding_dim": 1024,
+                            "index_version": "idx-v2",
+                        }
+                    ],
+                ),
+                embedder=embedder,
+            ).retrieve(self.query(mode="vector"))
+
+        self.assertEqual(raised.exception.reason, "INDEX_MODEL_MISMATCH")
+        self.assertEqual(embedder.calls, 0)
+
+    def test_vector_model_failure_is_a_technical_fault_not_no_evidence(self):
+        with self.assertRaises(PolicyRetrievalError) as raised:
+            RetrievePolicy(
+                FakeConnection(
+                    {"status": "PUBLISHED", "revoked_at": None},
+                    {
+                        "embedding_model": "deterministic-test",
+                        "embedding_dim": 1024,
+                        "index_version": "idx-v1",
+                    },
+                    [],
+                ),
+                embedder=FailingEmbedder(),
+            ).retrieve(self.query(mode="vector"))
+
+        self.assertEqual(raised.exception.reason, "VECTOR_UNAVAILABLE")
+
+    def test_vector_query_failure_is_a_technical_fault_not_no_evidence(self):
+        with self.assertRaises(PolicyRetrievalError) as raised:
+            RetrievePolicy(
+                FakeConnection(
+                    {"status": "PUBLISHED", "revoked_at": None},
+                    {
+                        "embedding_model": "deterministic-test",
+                        "embedding_dim": 1024,
+                        "index_version": "idx-v1",
+                    },
+                    [],
+                    psycopg.OperationalError("deterministic vector query outage"),
+                ),
+                embedder=DeterministicEmbedder(),
+            ).retrieve(self.query(mode="vector"))
+
+        self.assertEqual(raised.exception.reason, "VECTOR_UNAVAILABLE")
+
+    def test_vector_without_an_embedder_is_unavailable_not_a_model_mismatch(self):
+        with self.assertRaises(PolicyRetrievalError) as raised:
+            RetrievePolicy(
+                FakeConnection(
+                    {"status": "PUBLISHED", "revoked_at": None},
+                    {
+                        "embedding_model": "deterministic-test",
+                        "embedding_dim": 1024,
+                        "index_version": "idx-v1",
+                    },
+                )
+            ).retrieve(self.query(mode="vector"))
+
+        self.assertEqual(raised.exception.reason, "VECTOR_UNAVAILABLE")
+
+    def test_vector_rejects_a_query_model_or_dimension_that_differs_from_release(self):
+        for embedder in (
+            DeterministicEmbedder(model_name="other-model"),
+            DeterministicEmbedder(dim=3, vector=[1.0, 0.0, 0.0]),
+        ):
+            with self.subTest(embedder=embedder):
                 with self.assertRaises(PolicyRetrievalError) as raised:
-                    RetrievePolicy(FakeConnection(published)).retrieve(
-                        self.query(mode=mode)
-                    )
-                self.assertEqual(raised.exception.reason, "MODE_UNSUPPORTED")
+                    RetrievePolicy(
+                        FakeConnection(
+                            {"status": "PUBLISHED", "revoked_at": None},
+                            {
+                                "embedding_model": "deterministic-test",
+                                "embedding_dim": 1024,
+                                "index_version": "idx-v1",
+                            },
+                        ),
+                        embedder=embedder,
+                    ).retrieve(self.query(mode="vector"))
+
+                self.assertEqual(
+                    raised.exception.reason,
+                    "INDEX_MODEL_MISMATCH",
+                )
+                self.assertEqual(embedder.calls, 0)
 
     def test_no_keyword_candidate_is_no_evidence(self):
         result = RetrievePolicy(
@@ -197,6 +363,7 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             "migrations/07_policy_chunk_trgm.sql",
             "migrations/08_release_and_run_foundation.sql",
             "migrations/15_policy_retrieval_release_scope.sql",
+            "migrations/16_policy_vector_release_identity.sql",
         ):
             self._apply_sql_file(migration)
 
@@ -288,6 +455,7 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             """,
             (release_id,),
         )
+        self._seed_release_policy_index(release_id)
         return release_id
 
     def _seed_release(self, release_id="rel-filter-test"):
@@ -298,7 +466,32 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             """,
             (release_id, "2" * 64),
         )
+        self._seed_release_policy_index(release_id)
         return release_id
+
+    def _seed_release_policy_index(
+        self,
+        release_id,
+        *,
+        embedding_model="deterministic-test",
+        embedding_dim=1024,
+        index_version="idx-v1",
+    ):
+        self.conn.execute(
+            """
+            INSERT INTO release_policy_index (
+                release_id, embedding_model, embedding_dim, index_version
+            )
+            VALUES (%s, %s, %s, %s)
+            """,
+            (release_id, embedding_model, embedding_dim, index_version),
+        )
+
+    @staticmethod
+    def _vector_literal(axis=0, dim=1024):
+        values = ["0"] * dim
+        values[axis] = "1"
+        return "[" + ",".join(values) + "]"
 
     def _seed_policy_document(
         self,
@@ -315,6 +508,7 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
         valid_from="2025-01-01",
         valid_to="2025-12-31",
         with_applicability=True,
+        embedding_axis=0,
     ):
         content_sha256 = hashlib.sha256(doc_id.encode("utf-8")).hexdigest()
         chunk_set_version = f"{doc_id}-chunks"
@@ -356,11 +550,12 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             """
             INSERT INTO policy_chunk (
                 id, doc_id, chunk_set_version, section_path, text, text_sha256,
-                char_start, char_end, embedding_model, embedding_dim, index_version
+                char_start, char_end, embedding, embedding_model, embedding_dim,
+                index_version
             )
             VALUES (
                 %s, %s, %s, '第二章 > 转专业', %s, %s,
-                0, %s, 'deterministic-test', 1024, 'idx-v1'
+                0, %s, %s::vector, 'deterministic-test', 1024, 'idx-v1'
             )
             """,
             (
@@ -370,6 +565,7 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
                 text,
                 hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 len(text),
+                self._vector_literal(embedding_axis),
             ),
         )
         if with_applicability:
@@ -467,6 +663,179 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
         self.assertEqual(
             [item.document.doc_id for item in result.evidence],
             ["doc-match"],
+        )
+
+    def test_vector_mode_hard_filters_before_ranking_high_similarity_decoys(self):
+        release_id = self._seed_release("rel-vector-scope-test")
+        for doc_id, changes in (
+            ("doc-match", {"embedding_axis": 1}),
+            ("doc-wrong-province", {"regions": ("湖北",)}),
+            ("doc-wrong-category", {"categories": ("历史类",)}),
+            ("doc-wrong-batch", {"batches": ("专科批",)}),
+            ("doc-wrong-school", {"school_id": "2002"}),
+            ("doc-wrong-type", {"document_type": "policy"}),
+            (
+                "doc-expired",
+                {"valid_from": "2024-01-01", "valid_to": "2024-12-31"},
+            ),
+        ):
+            self._seed_policy_document(release_id, doc_id, **changes)
+
+        result = RetrievePolicy(
+            self.conn,
+            embedder=DeterministicEmbedder(vector=[1.0] + [0.0] * 1023),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(
+            PolicyRetrievalQuery(
+                principal_id="principal-test",
+                query_text="转专业",
+                scope=ApplicabilityScope("湖南", 2025, "物理类", "本科批"),
+                release_id=release_id,
+                mode="vector",
+                school_ids=("1001",),
+                document_types=("charter",),
+            )
+        )
+
+        self.assertEqual(result.status, "FOUND")
+        self.assertEqual(
+            [item.document.doc_id for item in result.evidence],
+            ["doc-match"],
+        )
+        self.assertEqual(result.diagnostics.vector_candidates, 1)
+
+    def test_vector_mode_rejects_a_chunk_with_a_different_index_identity(self):
+        release_id = self._seed_release("rel-vector-chunk-mismatch-test")
+        self._seed_policy_document(release_id, "doc-mismatch")
+        self.conn.execute(
+            """
+            UPDATE policy_chunk
+            SET embedding_model = 'other-model'
+            WHERE id = 'doc-mismatch-chunk'
+            """
+        )
+
+        with self.assertRaises(PolicyRetrievalError) as raised:
+            RetrievePolicy(
+                self.conn,
+                embedder=DeterministicEmbedder(vector=[1.0] + [0.0] * 1023),
+                today=lambda: date(2025, 11, 19),
+            ).retrieve(
+                PolicyRetrievalQuery(
+                    principal_id="principal-test",
+                    query_text="转专业",
+                    scope=ApplicabilityScope(
+                        "湖南", 2025, "物理类", "本科批"
+                    ),
+                    release_id=release_id,
+                    mode="vector",
+                )
+            )
+
+        self.assertEqual(raised.exception.reason, "INDEX_MODEL_MISMATCH")
+
+    def test_vector_mode_returns_repeatable_evidence_with_stable_tiebreak(self):
+        release_id = self._seed_release("rel-vector-deterministic-test")
+        for doc_id in ("doc-b", "doc-a"):
+            self._seed_policy_document(
+                release_id,
+                doc_id,
+                text="学生可以申请转专业。",
+                embedding_axis=0,
+            )
+        query = PolicyRetrievalQuery(
+            principal_id="principal-test",
+            query_text="转专业",
+            scope=ApplicabilityScope("湖南", 2025, "物理类", "本科批"),
+            release_id=release_id,
+            mode="vector",
+        )
+        service = RetrievePolicy(
+            self.conn,
+            embedder=DeterministicEmbedder(vector=[1.0] + [0.0] * 1023),
+            today=lambda: date(2025, 11, 19),
+        )
+
+        first = service.retrieve(query)
+        second = service.retrieve(query)
+
+        self.assertEqual(first.status, "FOUND")
+        self.assertEqual(
+            [item.document.chunk_id for item in first.evidence],
+            ["doc-a-chunk", "doc-b-chunk"],
+        )
+        self.assertEqual(
+            [item.evidence_id for item in first.evidence],
+            [item.evidence_id for item in second.evidence],
+        )
+        self.assertEqual(first.evidence[0].release_id, release_id)
+        self.assertEqual(first.evidence[0].document.release_id, release_id)
+        self.assertEqual(
+            first.evidence[0].content_sha256,
+            first.evidence[0].document.excerpt_sha256,
+        )
+
+    def test_vector_mode_returns_no_evidence_after_a_successful_empty_search(self):
+        release_id = self._seed_release("rel-vector-empty-test")
+
+        result = RetrievePolicy(
+            self.conn,
+            embedder=DeterministicEmbedder(vector=[1.0] + [0.0] * 1023),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(
+            PolicyRetrievalQuery(
+                principal_id="principal-test",
+                query_text="转专业",
+                scope=ApplicabilityScope("湖南", 2025, "物理类", "本科批"),
+                release_id=release_id,
+                mode="vector",
+            )
+        )
+
+        self.assertEqual(result.status, "NO_EVIDENCE")
+        self.assertEqual(result.evidence, ())
+        self.assertEqual(result.diagnostics.vector_candidates, 0)
+
+    def test_vector_candidate_pool_excludes_unprojectable_chunks_before_ranking(self):
+        release_id = self._seed_release("rel-vector-invalid-candidate-test")
+        self._seed_policy_document(
+            release_id,
+            "doc-invalid",
+            embedding_axis=0,
+        )
+        self._seed_policy_document(
+            release_id,
+            "doc-valid",
+            embedding_axis=1,
+        )
+        self.conn.execute(
+            """
+            UPDATE policy_doc
+            SET source_uri = NULL
+            WHERE id = 'doc-invalid'
+            """
+        )
+
+        result = RetrievePolicy(
+            self.conn,
+            embedder=DeterministicEmbedder(vector=[1.0] + [0.0] * 1023),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(
+            PolicyRetrievalQuery(
+                principal_id="principal-test",
+                query_text="转专业",
+                scope=ApplicabilityScope("湖南", 2025, "物理类", "本科批"),
+                release_id=release_id,
+                mode="vector",
+                top_k=1,
+                pool_k=1,
+            )
+        )
+
+        self.assertEqual(result.status, "FOUND")
+        self.assertEqual(
+            [item.document.doc_id for item in result.evidence],
+            ["doc-valid"],
         )
 
     def test_national_and_long_term_policies_match_without_equal_year_filter(self):

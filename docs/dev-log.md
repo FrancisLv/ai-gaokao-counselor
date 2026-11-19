@@ -979,3 +979,21 @@ sqlc 的 `:many` 先收集类型化结果 slice，再映射领域对象，相较
 - 离线行为测试覆盖 release 状态、scope、`NO_EVIDENCE`、模式未支持、稳定证据映射。
 - PostgreSQL 隔离 schema 测试从 `00` 应用到 `15`，覆盖 chunk set 隔离、省份/科类/批次/学校/年份/文档类型硬过滤、全国与长期有效政策、通配符转义、不可证据化候选和重复查询确定性。
 - `ORCHESTRATOR_TEST_DSN` 缺省时数据库用例跳过；显式连接测试库时使用随机 schema，不读取生产数据或下载模型。
+
+## 31. M4a-02：pgvector 向量召回与 release 索引身份
+
+**日期与范围**：2026-11-19。实现 issue #9 的 `mode=vector` 主路径；RRF、hybrid 与 rerank 不在本票范围。
+
+### 实现要点
+
+- 新增 `migrations/16_policy_vector_release_identity.sql` 的 `release_policy_index`，声明每个 release 唯一的 embedding 模型、向量维度与 index version。
+- `RetrievePolicy` 在生成查询向量前校验 release 身份、`policy_chunk_set` 与 chunk 身份；任一不一致返回 `INDEX_MODEL_MISMATCH`，不混读不同模型、维度或索引版本。
+- 向量候选与关键词候选复用同一 release、文档类型、学校、地区、科类、批次、有效区间与证据完整性硬过滤；过滤完成后才按 `embedding <=> query` 余弦距离排序，并以 `chunk_id` 升序稳定 tie-break、截取候选池。
+- `mode=vector` 的成功零候选返回 `NO_EVIDENCE`；未配置模型、embedding 失败或向量查询技术失败返回 `VECTOR_UNAVAILABLE`，不伪装为无资料。
+- 向量结果沿用关键词路的 `DocumentEvidence`/`EvidenceRef` 投影，`release_id`、excerpt hash、locator 与 `evidence_id` 语义保持不变。
+
+### 测试
+
+- `PolicyRetrievalTests` 使用确定性 embedder 和数据库边界替身覆盖 vector 证据映射、模型/维度与 chunk set 身份不匹配、模型不可用、查询失败及错误分类。
+- `PolicyRetrievalPostgresTests` 在随机隔离 schema 中从 `00` 应用至 `16`，覆盖高相似度跨省/跨科类/错误学校/过期干扰排除、chunk 身份混读、稳定顺序、重复证据 ID、成功零候选和不可证据化候选池过滤。
+- 上述数据库用例显式设置 `ORCHESTRATOR_TEST_DSN`；常规 `make py-test` 不下载真实模型、不访问生产数据。

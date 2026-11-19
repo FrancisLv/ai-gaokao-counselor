@@ -8,6 +8,7 @@ import json
 import re
 from zoneinfo import ZoneInfo
 
+import psycopg
 from psycopg.rows import dict_row
 
 from rag.retrieve import extract_terms
@@ -116,8 +117,9 @@ class RetrievePolicy:
     _SUPPORTED_CATEGORIES = frozenset({"物理类", "历史类", "不限"})
     _SUPPORTED_BATCHES = frozenset({"本科批", "不限"})
 
-    def __init__(self, conn, today=None) -> None:
+    def __init__(self, conn, embedder=None, today=None) -> None:
         self._conn = conn
+        self._embedder = embedder
         self._today = today or (
             lambda: datetime.now(ZoneInfo("Asia/Shanghai")).date()
         )
@@ -153,19 +155,33 @@ class RetrievePolicy:
                 release_id=query.release_id,
             )
 
-        if query.mode != "keyword":
+        if query.mode == "keyword":
+            rows, candidate_count = self._keyword_candidates(query)
+        elif query.mode == "vector":
+            try:
+                rows, candidate_count = self._vector_candidates(query)
+            except psycopg.Error as exc:
+                raise PolicyRetrievalError(
+                    "VECTOR_UNAVAILABLE",
+                    "vector retrieval is temporarily unavailable",
+                ) from exc
+        else:
             raise PolicyRetrievalError(
                 "MODE_UNSUPPORTED",
                 f"retrieval mode is not implemented in this slice: {query.mode}",
             )
 
-        rows, candidate_count = self._keyword_candidates(query)
         if not rows:
             return PolicyRetrievalResult(
                 status="NO_EVIDENCE",
                 release_id=query.release_id,
                 diagnostics=PolicyRetrievalDiagnostics(
-                    keyword_candidates=candidate_count,
+                    vector_candidates=candidate_count
+                    if query.mode == "vector"
+                    else 0,
+                    keyword_candidates=candidate_count
+                    if query.mode == "keyword"
+                    else 0,
                 ),
             )
 
@@ -181,7 +197,12 @@ class RetrievePolicy:
                 status="NO_EVIDENCE",
                 release_id=query.release_id,
                 diagnostics=PolicyRetrievalDiagnostics(
-                    keyword_candidates=candidate_count,
+                    vector_candidates=candidate_count
+                    if query.mode == "vector"
+                    else 0,
+                    keyword_candidates=candidate_count
+                    if query.mode == "keyword"
+                    else 0,
                 ),
             )
         return PolicyRetrievalResult(
@@ -189,9 +210,218 @@ class RetrievePolicy:
             release_id=query.release_id,
             evidence=tuple(evidence),
             diagnostics=PolicyRetrievalDiagnostics(
-                keyword_candidates=candidate_count,
+                vector_candidates=candidate_count
+                if query.mode == "vector"
+                else 0,
+                keyword_candidates=candidate_count
+                if query.mode == "keyword"
+                else 0,
             ),
         )
+
+    def _vector_candidates(
+        self,
+        query: PolicyRetrievalQuery,
+    ) -> tuple[list[dict], int]:
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT embedding_model, embedding_dim, index_version
+                FROM release_policy_index
+                WHERE release_id = %s
+                """,
+                (query.release_id,),
+            )
+            identity = cur.fetchone()
+
+        if identity is None:
+            raise PolicyRetrievalError(
+                "INDEX_MODEL_MISMATCH",
+                "the bound release has no complete policy index identity",
+            )
+        if self._embedder is None:
+            raise PolicyRetrievalError(
+                "VECTOR_UNAVAILABLE",
+                "no query embedding model is configured",
+            )
+        if (
+            identity["embedding_model"] != self._embedder.model_name
+            or identity["embedding_dim"] != self._embedder.dim
+        ):
+            raise PolicyRetrievalError(
+                "INDEX_MODEL_MISMATCH",
+                "query embedding identity does not match the bound release",
+            )
+
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT embedding_model, embedding_dim, index_version
+                FROM (
+                    SELECT
+                        cs.embedding_model,
+                        cs.embedding_dim,
+                        cs.index_version
+                    FROM release_policy_doc m
+                    JOIN policy_chunk_set cs
+                      ON cs.chunk_set_version = m.chunk_set_version
+                     AND cs.doc_id = m.doc_id
+                    WHERE m.release_id = %s
+
+                    UNION ALL
+
+                    SELECT
+                        c.embedding_model,
+                        c.embedding_dim,
+                        c.index_version
+                    FROM release_policy_doc m
+                    JOIN policy_chunk c
+                      ON c.doc_id = m.doc_id
+                     AND c.chunk_set_version = m.chunk_set_version
+                    WHERE m.release_id = %s
+                ) chunk_identities
+                ORDER BY embedding_model, embedding_dim, index_version
+                """,
+                (query.release_id, query.release_id),
+            )
+            chunk_identities = cur.fetchall()
+        for chunk_identity in chunk_identities:
+            if (
+                chunk_identity["embedding_model"] != identity["embedding_model"]
+                or chunk_identity["embedding_dim"] != identity["embedding_dim"]
+                or chunk_identity["index_version"] != identity["index_version"]
+            ):
+                raise PolicyRetrievalError(
+                    "INDEX_MODEL_MISMATCH",
+                    "a release chunk set does not match the bound index identity",
+                )
+
+        try:
+            query_embedding = self._embedder.encode_single(query.query_text)
+        except Exception as exc:
+            raise PolicyRetrievalError(
+                "VECTOR_UNAVAILABLE",
+                "query embedding could not be generated",
+            ) from exc
+        vector = "[" + ",".join(f"{value:.6f}" for value in query_embedding) + "]"
+        params = {
+            "release_id": query.release_id,
+            "query_embedding": vector,
+            "pool_k": max(query.pool_k, query.top_k),
+            "embedding_model": identity["embedding_model"],
+            "embedding_dim": identity["embedding_dim"],
+            "index_version": identity["index_version"],
+            "province": query.scope.province,
+            "category": query.scope.category,
+            "batch": query.scope.batch,
+            "today": self._today(),
+            "school_ids": list(query.school_ids),
+            "document_types": list(query.document_types),
+        }
+        sql = """
+            WITH scope_candidates AS MATERIALIZED (
+                SELECT
+                    c.id AS chunk_id,
+                    c.doc_id,
+                    c.section_path,
+                    c.text,
+                    c.text_sha256,
+                    c.char_start,
+                    c.char_end,
+                    c.chunk_set_version,
+                    c.embedding,
+                    d.title,
+                    d.document_type,
+                    d.issuer,
+                    d.issuer_type,
+                    d.issuer_id,
+                    d.school_id,
+                    d.source_uri,
+                    d.raw_storage_uri,
+                    d.fetched_at,
+                    d.content_sha256,
+                    a.regions,
+                    a.categories,
+                    a.batches,
+                    a.valid_from,
+                    a.valid_to
+                FROM release_policy_doc m
+                JOIN policy_chunk_set cs
+                  ON cs.chunk_set_version = m.chunk_set_version
+                 AND cs.doc_id = m.doc_id
+                JOIN policy_doc d
+                  ON d.id = m.doc_id
+                JOIN policy_chunk c
+                  ON c.doc_id = m.doc_id
+                 AND c.chunk_set_version = m.chunk_set_version
+                JOIN LATERAL (
+                    SELECT
+                        pa.regions,
+                        pa.categories,
+                        pa.batches,
+                        pa.valid_from,
+                        pa.valid_to
+                    FROM policy_applicability pa
+                    WHERE pa.doc_id = d.id
+                      AND (
+                          '全国' = ANY(pa.regions)
+                          OR %(province)s = ANY(pa.regions)
+                      )
+                      AND (
+                          %(category)s = '不限'
+                          OR '不限' = ANY(pa.categories)
+                          OR %(category)s = ANY(pa.categories)
+                      )
+                      AND (
+                          %(batch)s = '不限'
+                          OR '不限' = ANY(pa.batches)
+                          OR %(batch)s = ANY(pa.batches)
+                      )
+                      AND pa.valid_from <= %(today)s
+                      AND (pa.valid_to IS NULL OR %(today)s <= pa.valid_to)
+                    ORDER BY pa.valid_from DESC, pa.valid_to DESC NULLS LAST, pa.id
+                    LIMIT 1
+                ) a ON TRUE
+                WHERE m.release_id = %(release_id)s
+                  AND cs.embedding_model = %(embedding_model)s
+                  AND cs.embedding_dim = %(embedding_dim)s
+                  AND cs.index_version = %(index_version)s
+                  AND d.title IS NOT NULL
+                  AND d.document_type IS NOT NULL
+                  AND d.issuer IS NOT NULL
+                  AND d.issuer_type IS NOT NULL
+                  AND d.issuer_id IS NOT NULL
+                  AND d.source_uri IS NOT NULL
+                  AND d.raw_storage_uri IS NOT NULL
+                  AND d.fetched_at IS NOT NULL
+                  AND d.content_sha256 IS NOT NULL
+                  AND c.text IS NOT NULL
+                  AND c.text_sha256 IS NOT NULL
+                  AND c.section_path IS NOT NULL
+                  AND c.chunk_set_version IS NOT NULL
+                  AND (
+                      cardinality(%(school_ids)s::text[]) = 0
+                      OR d.school_id = ANY(%(school_ids)s::text[])
+                  )
+                  AND (
+                      cardinality(%(document_types)s::text[]) = 0
+                      OR d.document_type = ANY(%(document_types)s::text[])
+                  )
+                  AND c.embedding IS NOT NULL
+            )
+            SELECT
+                scope_candidates.*,
+                embedding <=> %(query_embedding)s::vector AS vector_distance,
+                COUNT(*) OVER () AS candidate_count
+            FROM scope_candidates
+            ORDER BY vector_distance, chunk_id ASC
+            LIMIT %(pool_k)s
+        """
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, params)
+            rows = [dict(row) for row in cur.fetchall()]
+        count = int(rows[0]["candidate_count"]) if rows else 0
+        return rows, count
 
     def _keyword_candidates(
         self,
