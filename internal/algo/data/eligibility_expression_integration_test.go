@@ -4,12 +4,14 @@ package data
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -34,28 +36,66 @@ func TestIntegration_RuleExpressionStorageContract(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM release WHERE release_id = $1`, releaseID)
 	})
 
+	var hasCreatedBy bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = 'rule_version'
+			  AND column_name = 'created_by'
+		)`).Scan(&hasCreatedBy); err != nil {
+		t.Fatalf("inspect rule_version lifecycle columns: %v", err)
+	}
 	insert := func(ruleID string, expression string, expressionVersion int) error {
-		_, err := pool.Exec(context.Background(),
-			`INSERT INTO rule_version (
+		query := `INSERT INTO rule_version (
 				rule_id, version, rule_key, rule_type, scope, required_profile_fields,
 				expression, expression_version, outcome_when_true, reason_code,
 				review_status, valid_from, release_id, source_evidence
 			) VALUES (
 				$1, 1, $1, 'OTHER_HARD', '{}'::jsonb, '["category"]'::jsonb,
-				$2::jsonb, $3, 'FAIL', 'RULE_FIXTURE', 'PUBLISHED', NOW(), $4,
-				'[{"evidence_id":"ev","evidence_type":"DOCUMENT"}]'::jsonb
-			)`, ruleID, expression, expressionVersion, releaseID)
+				$2::jsonb, $3, 'FAIL', 'RULE_FIXTURE', 'DRAFT', NOW(), $4,
+				jsonb_build_array(jsonb_build_object(
+					'evidence_id', 'ev',
+					'evidence_type', 'DOCUMENT',
+					'release_id', $4::text
+				))
+			)`
+		if hasCreatedBy {
+			query = `INSERT INTO rule_version (
+					rule_id, version, rule_key, rule_type, scope, required_profile_fields,
+					expression, expression_version, outcome_when_true, reason_code,
+					review_status, valid_from, release_id, source_evidence, created_by
+				) VALUES (
+					$1, 1, $1, 'OTHER_HARD', '{}'::jsonb, '["category"]'::jsonb,
+					$2::jsonb, $3, 'FAIL', 'RULE_FIXTURE', 'DRAFT', NOW(), $4,
+					jsonb_build_array(jsonb_build_object(
+						'evidence_id', 'ev',
+						'evidence_type', 'DOCUMENT',
+						'release_id', $4::text
+					)),
+					'fixture-author'
+				)`
+		}
+		_, err := pool.Exec(context.Background(), query, ruleID, expression, expressionVersion, releaseID)
 		return err
 	}
 
-	if err := insert("wrong-version", `{"op":"PRESENT","field":"category"}`, 2); err == nil {
-		t.Fatal("expression_version=2 应被 schema 拒绝")
+	if err := insert("wrong-version", `{"op":"PRESENT","field":"category"}`, 2); !isCheckViolation(err, "rule_version_expression_version_check") {
+		t.Fatalf("expression_version=2 应由 CHECK 约束拒绝，got %v", err)
 	}
 	oversized := fmt.Sprintf(
 		`{"op":"EQ","field":"category","value":%q}`,
 		strings.Repeat("x", 33*1024),
 	)
-	if err := insert("oversized", oversized, 1); err == nil {
-		t.Fatal("超过 32KiB 的表达式应被 schema 拒绝")
+	if err := insert("oversized", oversized, 1); !isCheckViolation(err, "rule_version_expression_size_check") {
+		t.Fatalf("超过 32KiB 的表达式应由 CHECK 约束拒绝，got %v", err)
 	}
+}
+
+func isCheckViolation(err error, constraint string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == "23514" &&
+		pgErr.ConstraintName == constraint
 }
