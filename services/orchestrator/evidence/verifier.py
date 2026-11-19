@@ -73,6 +73,56 @@ class EvidenceRef:
 
 
 @dataclass(frozen=True, slots=True)
+class QualificationMajor:
+    major_code: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class QualificationGroup:
+    group_key: str
+    status: str
+    majors: tuple[QualificationMajor, ...]
+    restrictions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class QualificationCoverage:
+    rule_type: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class QualificationSummary:
+    status: str
+    coverage: tuple[QualificationCoverage, ...]
+    groups: tuple[QualificationGroup, ...]
+    conflict_count: int
+    unknown_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class RequiredNotice:
+    notice_type: str
+    normalized_text: str
+    content_sha256: str
+    evidence_refs: tuple[EvidenceRef, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FormalGateContext:
+    context_version: str
+    release_id: str
+    profile_version: str
+    result_version: str
+    algorithm_config_version: str
+    algorithm_config_sha256: str
+    verifier_version: str
+    qualification: QualificationSummary
+    required_notices: tuple[RequiredNotice, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class NormalizedFact:
     subject: str
     predicate: str
@@ -119,6 +169,7 @@ class EvidencePackage:
     scope: VerificationScope
     claims: tuple[Claim, ...]
     evidence_registry: tuple[EvidenceRef, ...]
+    gate_context: FormalGateContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +247,7 @@ def VerifyPackage(
     stripped_claim_ids: list[str] = []
     if package_reason is not None:
         blocking_reasons.add(package_reason)
+    blocking_reasons.update(_gate_preflight_reasons(package))
     if duplicate_evidence_ids:
         blocking_reasons.add("CLAIM_UNSUPPORTED")
 
@@ -227,6 +279,16 @@ def VerifyPackage(
             decision, reason, deterministic = (
                 "UNVERIFIABLE",
                 "CLAIM_UNSUPPORTED",
+                True,
+            )
+            blocking_reasons.add(reason)
+        elif (
+            claim.claim_type != "DERIVED_FACT"
+            and _claim_exceeds_admission_boundary(claim)
+        ):
+            decision, reason, deterministic = (
+                "CONTRADICTED",
+                "ADMISSION_GUARANTEE_FORBIDDEN",
                 True,
             )
             blocking_reasons.add(reason)
@@ -607,6 +669,251 @@ def _package_preflight(package: EvidencePackage) -> str | None:
     return None
 
 
+def _gate_preflight_reasons(
+    package: EvidencePackage,
+) -> set[str]:
+    context = package.gate_context
+    if context is None:
+        return {"FORMAL_GATE_CONTEXT_MISSING"}
+    if context.context_version != "formal-gate-v1":
+        return {"FORMAL_GATE_CONTEXT_VERSION_UNSUPPORTED"}
+    reasons: set[str] = set()
+    if context.release_id != package.release_id:
+        reasons.add("RELEASE_MISMATCH")
+    if context.profile_version != package.profile_version:
+        reasons.add("PROFILE_VERSION_MISMATCH")
+    if context.result_version != package.result_version:
+        reasons.add("RESULT_VERSION_MISMATCH")
+    if (
+        not context.algorithm_config_version
+        or not _is_sha256(context.algorithm_config_sha256)
+    ):
+        reasons.add("ALGORITHM_CONFIG_MISMATCH")
+    if context.verifier_version != package.verifier_version:
+        reasons.add("VERIFIER_VERSION_MISMATCH")
+    package_refs = (
+        *package.evidence_registry,
+        *(
+            ref
+            for claim in package.claims
+            for ref in claim.evidence_refs
+        ),
+    )
+    if any(
+        ref.derived is not None
+        and ref.derived.config_sha256
+        != context.algorithm_config_sha256
+        for ref in package_refs
+    ):
+        reasons.add("ALGORITHM_CONFIG_MISMATCH")
+    reasons.update(_qualification_gate_reasons(context.qualification))
+    reasons.update(_required_notice_gate_reasons(context))
+    if (
+        any(
+            group.status == "PASS_PARTIAL"
+            for group in context.qualification.groups
+        )
+        and _package_overstates_pass_partial(package)
+    ):
+        reasons.add("PASS_PARTIAL_GROUP_OVERSTATED")
+    return reasons
+
+
+def _required_notice_gate_reasons(
+    context: FormalGateContext,
+) -> set[str]:
+    reasons: set[str] = set()
+    required_types = {
+        "DISCLAIMER",
+        "RISK_NOTICE",
+        "NO_ADMISSION_GUARANTEE",
+    }
+    notices_by_type: dict[str, list[RequiredNotice]] = {}
+    for notice in context.required_notices:
+        notices_by_type.setdefault(notice.notice_type, []).append(notice)
+    if any(
+        not notices_by_type.get(notice_type)
+        for notice_type in required_types
+    ):
+        reasons.add("REQUIRED_NOTICE_MISSING")
+    for notice_type, notices in notices_by_type.items():
+        if notice_type in required_types and len(notices) != 1:
+            reasons.add("REQUIRED_NOTICE_MISSING")
+    for notice in context.required_notices:
+        if not notice.normalized_text.strip():
+            reasons.add("REQUIRED_NOTICE_MISSING")
+            continue
+        if not _notice_text_satisfies_type(notice):
+            reasons.add("REQUIRED_NOTICE_MISSING")
+        if _text_exceeds_admission_boundary(notice.normalized_text):
+            reasons.add("ADMISSION_GUARANTEE_FORBIDDEN")
+        if (
+            not _is_sha256(notice.content_sha256)
+            or _sha256(notice.normalized_text) != notice.content_sha256
+        ):
+            reasons.add("REQUIRED_NOTICE_MISMATCH")
+        if not notice.evidence_refs:
+            reasons.add("REQUIRED_NOTICE_MISSING")
+            continue
+        for ref in notice.evidence_refs:
+            if (
+                not _valid_evidence_ref(ref)
+                or not _evidence_payload_release_matches(
+                    ref,
+                    context.release_id,
+                )
+            ):
+                reasons.add("REQUIRED_NOTICE_MISSING")
+                continue
+            document = ref.document
+            if document is None:
+                continue
+            if (
+                document.release_id != context.release_id
+                or not _valid_document_identity(document)
+                or _sha256(document.excerpt) != document.excerpt_sha256
+                or ref.content_sha256 != document.excerpt_sha256
+                or notice.normalized_text not in document.excerpt
+            ):
+                reasons.add("REQUIRED_NOTICE_MISMATCH")
+    return reasons
+
+
+def _notice_text_satisfies_type(notice: RequiredNotice) -> bool:
+    text = notice.normalized_text
+    if notice.notice_type == "DISCLAIMER":
+        return any(
+            phrase in text
+            for phrase in ("免责", "仅供参考", "不构成")
+        )
+    if notice.notice_type == "RISK_NOTICE":
+        return "风险" in text
+    if notice.notice_type == "NO_ADMISSION_GUARANTEE":
+        return any(
+            phrase in text
+            for phrase in (
+                "不保证录取",
+                "不能保证录取",
+                "无法保证录取",
+                "不确保录取",
+                "不构成录取保证",
+                "不构成录取承诺",
+                "不承诺录取",
+            )
+        )
+    return True
+
+
+def _qualification_gate_reasons(
+    qualification: QualificationSummary,
+) -> set[str]:
+    reasons: set[str] = set()
+    if qualification.status != "COMPLETE":
+        reasons.add("ELIGIBILITY_NOT_COMPLETE")
+    if not qualification.coverage:
+        reasons.add("ELIGIBILITY_COVERAGE_MISSING")
+    elif any(
+        coverage.status != "FULL"
+        for coverage in qualification.coverage
+    ):
+        reasons.add("ELIGIBILITY_COVERAGE_INCOMPLETE")
+    if qualification.conflict_count != 0:
+        reasons.add("ELIGIBILITY_RULE_CONFLICT")
+    if qualification.unknown_count != 0:
+        reasons.add("ELIGIBILITY_UNKNOWN")
+    for group in qualification.groups:
+        if group.status == "UNKNOWN":
+            reasons.add("ELIGIBILITY_GROUP_UNKNOWN")
+        elif group.status == "FAIL":
+            reasons.add("ELIGIBILITY_GROUP_FAIL")
+        elif group.status not in {"PASS", "PASS_PARTIAL"}:
+            reasons.add("ELIGIBILITY_GROUP_STATUS_INVALID")
+        if not group.group_key or not group.majors:
+            reasons.add("ELIGIBILITY_GROUP_STATUS_INVALID")
+        major_statuses = tuple(
+            major.status
+            for major in group.majors
+        )
+        if (
+            group.status == "PASS"
+            and any(status != "PASS" for status in major_statuses)
+        ):
+            reasons.add("ELIGIBILITY_GROUP_STATUS_INVALID")
+        if (
+            group.status == "PASS_PARTIAL"
+            and "PASS" not in major_statuses
+        ):
+            reasons.add("ELIGIBILITY_GROUP_STATUS_INVALID")
+        if (
+            group.status == "PASS_PARTIAL"
+            and (
+                not group.restrictions
+                or any(
+                    not restriction.strip()
+                    for restriction in group.restrictions
+                )
+            )
+        ):
+            reasons.add("ELIGIBILITY_RESTRICTED_MAJORS_MISSING")
+        if group.status == "PASS_PARTIAL":
+            restricted_major_codes = {
+                major.major_code
+                for major in group.majors
+                if major.status in {"FAIL", "NOT_APPLICABLE"}
+            }
+            if any(
+                not any(
+                    major_code in restriction
+                    for restriction in group.restrictions
+                )
+                for major_code in restricted_major_codes
+            ):
+                reasons.add("ELIGIBILITY_RESTRICTED_MAJORS_MISSING")
+        for major in group.majors:
+            if major.status == "MISSING_REQUIRED_FACT":
+                reasons.add("ELIGIBILITY_MISSING_REQUIRED_FACT")
+            elif major.status == "UNKNOWN":
+                reasons.add("ELIGIBILITY_GROUP_UNKNOWN")
+            elif major.status not in {
+                "PASS",
+                "FAIL",
+                "NOT_APPLICABLE",
+            }:
+                reasons.add("ELIGIBILITY_MAJOR_STATUS_INVALID")
+    return reasons
+
+
+def _package_overstates_pass_partial(package: EvidencePackage) -> bool:
+    forbidden = (
+        "全组可报",
+        "整组可报",
+        "全组专业均可报",
+        "全组专业都可报",
+        "整组专业均可报",
+        "整组专业都可报",
+        "组内专业均可报",
+        "组内专业都可报",
+        "所有专业均可报",
+        "所有专业都可报",
+    )
+    for claim in package.claims:
+        text = re.sub(
+            r"[\s，。！？、,.!?：:；;（）()]+",
+            "",
+            " ".join(
+                (
+                    claim.normalized.subject,
+                    claim.normalized.predicate,
+                    str(claim.normalized.object or ""),
+                    claim.rendered_text,
+                )
+            ),
+        )
+        if any(phrase in text for phrase in forbidden):
+            return True
+    return False
+
+
 def _claim_preflight_reason(claim: Claim) -> str | None:
     if not claim.claim_id or not claim.rendered_text:
         return "CLAIM_UNSUPPORTED"
@@ -681,6 +988,18 @@ def _valid_evidence_ref(ref: EvidenceRef) -> bool:
     )
 
 
+def _evidence_payload_release_matches(
+    ref: EvidenceRef,
+    release_id: str,
+) -> bool:
+    if ref.release_id != release_id:
+        return False
+    return all(
+        payload is None or payload.release_id == release_id
+        for payload in (ref.document, ref.structured, ref.derived)
+    )
+
+
 def _valid_derived_identity(evidence: DerivedEvidence) -> bool:
     required = (
         evidence.operation_id,
@@ -735,6 +1054,10 @@ def _valid_derived_claim_identity(claim: Claim) -> bool:
 
 
 def _derived_claim_exceeds_boundary(claim: Claim) -> bool:
+    return _claim_exceeds_admission_boundary(claim)
+
+
+def _claim_exceeds_admission_boundary(claim: Claim) -> bool:
     text = " ".join(
         (
             claim.normalized.subject,
@@ -743,6 +1066,10 @@ def _derived_claim_exceeds_boundary(claim: Claim) -> bool:
             claim.rendered_text,
         )
     )
+    return _text_exceeds_admission_boundary(text)
+
+
+def _text_exceeds_admission_boundary(text: str) -> bool:
     compact = re.sub(r"[\s，。！？、,.!?：:；;（）()]+", "", text)
     allowed_negations = (
         "不保证录取",

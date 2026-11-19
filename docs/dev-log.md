@@ -1771,3 +1771,38 @@ LLM 规则生成。
   因此覆盖率为 `0.0`。
 - 资格 `COMPLETE / PASS_PARTIAL` 门禁、必需说明校验、不可变证据包持久化和原子
   发布仍由后续 M4c tickets 完成。
+
+## 54. M4c-05：资格、版本与必需说明的 V1_FORMAL 统一门禁
+
+**日期与范围**：2026-11-19，对应 issue #29。通过唯一的 `VerifyPackage` seam
+接入版本化正式门禁上下文；只消费既有资格结论，不新增资格规则，也不实现证据包
+持久化、原子发布或 RunLifecycle 接线。
+
+### 实现
+
+- `EvidencePackage` additive 增加可选 `gate_context`，兼容既有构造方式；缺失时
+  fail closed 为 `BLOCKED / FORMAL_GATE_CONTEXT_MISSING`。
+- `formal-gate-v1` 上下文绑定 release、确认 Profile、result version、算法配置
+  版本/hash、Verifier 版本、资格摘要和三类必需说明。版本或身份冲突均稳定阻断，
+  `DERIVED` 证据的配置 hash 也必须与上下文一致。
+- 资格只接受整体 `COMPLETE`，覆盖必须存在且全部为 `FULL`，冲突/未知计数必须为
+  零。组只接受 `PASS` 或没有 `UNKNOWN` 的 `PASS_PARTIAL`；组/专业
+  `UNKNOWN / FAIL / MISSING_REQUIRED_FACT` 全部阻断。合法 `PASS_PARTIAL` 必须
+  保留受限专业说明，并拒绝“全组可报”等整组过度表述。
+- `DISCLAIMER`、`RISK_NOTICE`、`NO_ADMISSION_GUARANTEE` 必须同时满足类型语义、
+  规范化文本 hash 和同 release 证据绑定；缺失或改写阻断。
+- 文档、结构化、派生 Claim 均禁止“保证录取”“包录取”“100%录取”等等价承诺；
+  合法“不保证录取”仍可通过。全局门禁失败时不会降级为可发布 `PARTIAL`。
+
+### 验证
+
+- `VerifyPackage` 行为测试新增 gate context 缺失、版本/身份冲突、算法配置漂移、
+  资格整体与覆盖、组/专业状态、合法与非法 `PASS_PARTIAL`、必需说明语义/hash/
+  release 绑定、跨 Claim 类型录取承诺和全局阻断优先于普通剥离。
+- `make py-check py-test PY=/Users/francis/miniconda3/envs/ai-gaokao-counselor/bin/python3`
+  通过：266 tests OK，112 个依赖真实库/外部服务的用例按既有约定跳过。
+
+### 边界
+
+- 本票不创建 `V1_FORMAL` 结果，不持久化证据包/验证报告，不修改 RunLifecycle
+  发布事务；这些仍由后续 M4c tickets 完成。
