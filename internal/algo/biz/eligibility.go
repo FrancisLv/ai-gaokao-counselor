@@ -260,13 +260,20 @@ const (
 )
 
 const (
-	ReasonRuleCoverageMissing = "RULE_COVERAGE_MISSING"
-	ReasonProfileFactMissing  = "PROFILE_FACT_MISSING"
-	ReasonRuleExpression      = "RULE_EXPRESSION_INVALID"
-	ReasonRuleConflict        = "RULE_CONFLICT"
-	ReasonRuleUnknownField    = "RULE_UNKNOWN_FIELD"
-	ReasonReleaseRevoked      = "RELEASE_REVOKED"
-	ReasonReleaseUnavailable  = "RELEASE_UNAVAILABLE"
+	ReasonRuleCoverageMissing     = "RULE_COVERAGE_MISSING"
+	ReasonProfileFactMissing      = "PROFILE_FACT_MISSING"
+	ReasonRuleExpression          = "RULE_EXPRESSION_INVALID"
+	ReasonRuleConflict            = "RULE_CONFLICT"
+	ReasonRuleUnknownField        = "RULE_UNKNOWN_FIELD"
+	ReasonReleaseRevoked          = "RELEASE_REVOKED"
+	ReasonReleaseUnavailable      = "RELEASE_UNAVAILABLE"
+	ReasonCandidateGroupEmpty     = "CANDIDATE_GROUP_EMPTY"
+	ReasonCandidateGroupDuplicate = "CANDIDATE_GROUP_DUPLICATE"
+	ReasonCandidateGroupInvalid   = "CANDIDATE_GROUP_INVALID"
+	ReasonCandidateMajorDuplicate = "CANDIDATE_MAJOR_DUPLICATE"
+	ReasonCandidateMajorInvalid   = "CANDIDATE_MAJOR_INVALID"
+	ReasonCandidateNotInPlan      = "CANDIDATE_NOT_IN_PLAN"
+	ReasonEligibilityScopeInvalid = "ELIGIBILITY_SCOPE_INVALID"
 )
 
 type EligibilityUsecase struct {
@@ -289,6 +296,17 @@ func (u *EligibilityUsecase) EvaluateEligibility(ctx context.Context, req Eligib
 	if req.ProfileLifecycle != ProfileLifecycleConfirmed || strings.TrimSpace(req.ConfirmedProfileVersion) == "" {
 		return EligibilityResult{}, errs.ErrProfileNotConfirmed
 	}
+	if !validEligibilityScope(req.Scope) {
+		result := EligibilityResult{
+			Status:           EligibilityBlocked,
+			Groups:           blockedGroups(req.CandidateGroups, ReasonEligibilityScopeInvalid),
+			EvidenceBundleID: "eligibility:" + req.ReleaseID + ":" + req.ConfirmedProfileVersion,
+			Diagnostics: EligibilityDiagnostics{
+				UnknownCount: maxInt(1, candidateMajorCount(req.CandidateGroups)),
+			},
+		}
+		return result, nil
+	}
 	set, err := u.repo.LoadEligibilityRuleSet(ctx, req.ReleaseID)
 	if err != nil {
 		return EligibilityResult{}, err
@@ -308,6 +326,40 @@ func (u *EligibilityUsecase) EvaluateEligibility(ctx context.Context, req Eligib
 		result.Status = EligibilityBlocked
 		result.Diagnostics.UnknownCount = 1
 		result.Groups = blockedGroups(req.CandidateGroups, ReasonReleaseRevoked)
+		return result, nil
+	}
+	for _, group := range req.CandidateGroups {
+		if len(group.Majors) == 0 {
+			result.Status = EligibilityBlocked
+			result.Diagnostics.UnknownCount = 1
+			result.Groups = blockedGroups(req.CandidateGroups, ReasonCandidateGroupEmpty)
+			return result, nil
+		}
+		if hasDuplicateMajorCodes(group.Majors) {
+			result.Status = EligibilityBlocked
+			result.Diagnostics.UnknownCount = candidateMajorCount(req.CandidateGroups)
+			result.Groups = blockedGroups(req.CandidateGroups, ReasonCandidateMajorDuplicate)
+			return result, nil
+		}
+		for _, major := range group.Majors {
+			if strings.TrimSpace(major.MajorCode) == "" {
+				result.Status = EligibilityBlocked
+				result.Diagnostics.UnknownCount = candidateMajorCount(req.CandidateGroups)
+				result.Groups = blockedGroups(req.CandidateGroups, ReasonCandidateMajorInvalid)
+				return result, nil
+			}
+		}
+		if !validCandidateGroupIdentity(group) {
+			result.Status = EligibilityBlocked
+			result.Diagnostics.UnknownCount = candidateMajorCount(req.CandidateGroups)
+			result.Groups = blockedGroups(req.CandidateGroups, ReasonCandidateGroupInvalid)
+			return result, nil
+		}
+	}
+	if hasDuplicateGroupKeys(req.Scope, req.CandidateGroups) {
+		result.Status = EligibilityBlocked
+		result.Diagnostics.UnknownCount = candidateMajorCount(req.CandidateGroups)
+		result.Groups = blockedGroups(req.CandidateGroups, ReasonCandidateGroupDuplicate)
 		return result, nil
 	}
 
@@ -409,7 +461,7 @@ func evaluateMajor(
 	out := MajorEligibility{MajorCode: major.MajorCode}
 	if !major.InCurrentPlan {
 		out.Status = MajorNotApplicable
-		out.UnknownReasons = []string{"CANDIDATE_NOT_IN_PLAN"}
+		out.UnknownReasons = []string{ReasonCandidateNotInPlan}
 		return out
 	}
 
@@ -794,4 +846,47 @@ func candidateMajorCount(groups []CandidateGroup) int {
 		count += len(group.Majors)
 	}
 	return count
+}
+
+func validEligibilityScope(scope EligibilityScope) bool {
+	return strings.TrimSpace(scope.Province) != "" &&
+		scope.ApplicationYear > 0 &&
+		strings.TrimSpace(scope.Category) != "" &&
+		strings.TrimSpace(scope.Batch) != ""
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
+}
+
+func hasDuplicateMajorCodes(majors []CandidateMajor) bool {
+	seen := make(map[string]struct{}, len(majors))
+	for _, major := range majors {
+		if _, ok := seen[major.MajorCode]; ok {
+			return true
+		}
+		seen[major.MajorCode] = struct{}{}
+	}
+	return false
+}
+
+func hasDuplicateGroupKeys(scope EligibilityScope, groups []CandidateGroup) bool {
+	seen := make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		key := eligibilityGroupKey(scope, group)
+		if _, ok := seen[key]; ok {
+			return true
+		}
+		seen[key] = struct{}{}
+	}
+	return false
+}
+
+func validCandidateGroupIdentity(group CandidateGroup) bool {
+	return group.UniversityID > 0 &&
+		strings.TrimSpace(group.UniversityCode) != "" &&
+		strings.TrimSpace(group.MajorGroup) != ""
 }

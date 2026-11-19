@@ -247,6 +247,21 @@
 整体结果阻断。FULL 才允许专业 PASS，PARTIAL、NONE 或没有声明都保持 UNKNOWN。
 覆盖在 release 发布后冻结，因此同一 run 不会因后续配置修改得到另一套结果。
 
+专业级结果为 `PASS / FAIL / UNKNOWN / NOT_APPLICABLE / MISSING_REQUIRED_FACT`：
+明确限报优先为 FAIL；当前计划外专业为 NOT_APPLICABLE；规则所需画像事实缺失为
+MISSING_REQUIRED_FACT；其他无法裁决情况为 UNKNOWN。组级只汇总为
+`PASS / PASS_PARTIAL / FAIL / UNKNOWN`：全部专业 PASS 才是 PASS；至少一个专业
+PASS 且其余仅为 FAIL/NOT_APPLICABLE 时为 PASS_PARTIAL；没有专业 PASS 时为 FAIL；
+任一专业 UNKNOWN 或 MISSING_REQUIRED_FACT 时整组 UNKNOWN，不能被其他 PASS 掩盖。
+PASS_PARTIAL 必须保留受限专业明细，不得宣称整组可报。
+
+候选身份也属于资格输入完整性的一部分。空专业组、组主键重复、专业代码为空或同一
+组内专业代码重复时，`EvaluateEligibility` 返回 BLOCKED，并使用
+`CANDIDATE_GROUP_EMPTY`、`CANDIDATE_GROUP_DUPLICATE`、`CANDIDATE_GROUP_INVALID`
+或 `CANDIDATE_MAJOR_INVALID / CANDIDATE_MAJOR_DUPLICATE` 等稳定原因。请求缺少省、
+报考年、科类或批次时返回 `ELIGIBILITY_SCOPE_INVALID` 并阻断，不得形成 PASS。
+组、专业和规则最终均按稳定键排序，保证同输入重复评估逐项一致。
+
 ---
 
 ## 11. 与代码的对应关系
