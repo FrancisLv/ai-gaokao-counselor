@@ -75,7 +75,7 @@
 | FR-20 LLM 治理与成本闸门（P0） | ⛔ 仅记账表 | `internal/llmgw/service.go:24,35` `Chat/StreamChat` TODO；`00_schema.sql:353` `llm_call_log` 有 trace/role/model/prompt_hash/token/cost/latency，但**无原子预占+结算、无 logical_call_id/attempt_id**；`:409` `data_version` 为可变 int（非不可变 release_id） | role→model 路由；prompt_hash 缓存（key 携 `release_id`）；Budget Guard 原子预占+结算+账本；早期 Python 直连标注「无完整治理实验链路」 | P1-11, P1-12 | M4/M5 |
 | FR-21 限流与并发保护（P0） | ⛔ | `internal/gateway/service.go:16` 注释「限流器」为 TODO(M2) | 令牌桶限流 + 并发闸门（超限排队非 500）；公网发布前置 | P1-08 | M2/M4 |
 | FR-22 降级与故障处理（P0） | 🟡 | `state.py:66` 有 `degraded` 字段；PRD §7.4 隐私条款已按 R9 回填；但无实际降级路径逻辑（节点全 TODO） | 六类故障降级路径实现；体检/健康最小化+同意+限期+脱敏落地 | P1-03, P1-04, P1-06 | M5 |
-| FR-23 评测与发布门禁（P0） | 🟡 | `00_schema.sql:385` `eval_run` 表存在（git_sha/data_version/metrics/passed）；`scripts/qa_check.py`、`scripts/retrieve_test.py` 存在；但 `data/golden/` 仅 README，**golden set 未建** | 建 golden set（检索+端到端）进 CI；四层测试 L1~L4；recall 不降/幻觉率不升/P99 不超 | P2-04 | M4 |
+| FR-23 评测与发布门禁（P0） | 🟡 检索 harness 已建，待签字与真实基线 | `data/golden/retrieval-hunan-2025-v0.1.0-draft/` 有 30 条检索 Agent 草稿与 hash manifest，`owner_status=PENDING_SIGNOFF`；`services/orchestrator/eval/retrieval_eval.py` 只经 `RetrievePolicy` runner 计算 recall@5/20、MRR、逐例 scope leak 与 first diff；`scripts/run_retrieval_eval.py` 支持确定性 fixture 和可复现 baseline | Francis 定标 30 条草稿；绑定全国/省级政策 release；跑真实政策索引 baseline；补首批 10 条端到端集、四层测试与发布门禁阈值 | P2-04 | M4 进行中 |
 | FR-24 可观测（P1） | 🟡 | `common.v1.Trace` 贯穿各 proto 请求；`llm_call_log` 有 trace_id/latency/cost | OTel trace_id 贯通 Go↔Python；面板指标（QPS/P50P99/节点耗时/错误率/缓存命中/循环分布/幻觉率） | P1-08 | M6 |
 
 ---
@@ -201,6 +201,10 @@
 - `services/orchestrator/rag/retrieve.py:6,24,160,201` — trgm 替代 tsvector / meta 过滤字段 / policy_chunk 查询
 - `services/orchestrator/rag/policy_retrieval.py` — release-bound `RetrievePolicy` 唯一主 seam、硬过滤与文档证据投影
 - `services/orchestrator/tests/test_policy_retrieval.py` — release/scope/适用域/hash/locator/NO_EVIDENCE、关键词与 pgvector、索引身份故障和确定性外部行为测试
+- `data/golden/retrieval-hunan-2025-v0.1.0-draft/` — 30 条检索 Agent 草稿、版本 manifest 与 case hash
+- `services/orchestrator/eval/retrieval_eval.py` — golden set loader、`RetrievePolicy` 评测 runner、recall/MRR/scope leak/first diff/baseline
+- `services/orchestrator/tests/test_retrieval_eval.py` — hash/schema、指标分母、安全泄漏与 baseline 复现测试
+- `scripts/run_retrieval_eval.py` — 实际 `RetrievePolicy` 与确定性 fixture 的 baseline 入口
 - `migrations/00_schema.sql:223,272,306,314,333,353,385,409` — control_score / charter_chunk / chat_session / status / plan_checkpoint / llm_call_log / eval_run / data_version
 - `migrations/07_policy_chunk_trgm.sql:19,30` — policy_doc / policy_chunk
 - `migrations/15_policy_retrieval_release_scope.sql` — policy 适用域、`policy_chunk_set`、`release_policy_doc` 与检索索引

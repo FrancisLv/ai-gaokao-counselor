@@ -2,13 +2,54 @@
 
 完整契约见 [Evaluation and SLO Contract](../../docs/specs/evaluation-slo-contract.md)。
 
-放两类文件：
+评测集按不可变版本目录存放。当前检索集版本：
+
+```text
+retrieval-hunan-2025-v0.1.0-draft/
+  qa.jsonl
+  manifest.json
+```
+
+每个版本目录至少包含：
 
 - `qa.jsonl`：检索用例，至少包含 `case_id / query / scope / expected_chunk_ids / expected_doc_ids / must_exclude_sources / tags / criticality`
 - `cases.jsonl`：端到端用例，至少包含 `case_id / input_profile / scripted_model_responses / expected / tags / criticality`
-- `manifest.json`：记录 `dataset_version`、两个 JSONL 的 SHA256、标注人和创建时间
+- `manifest.json`：记录 `dataset_version`、Case 文件 SHA256、case count、release、标注人、owner 状态和创建时间
 
-首批规模为检索集 30 条、端到端集 10 条；后续检索集扩展目标为 100–200 条。修改任何用例都必须创建新的 `dataset_version`，不能覆盖旧版本。
+当前检索草稿的 `owner_status` 为 `PENDING_SIGNOFF`。在 Francis 完成定标前，只能用于
+harness 冒烟、diff 和待审阅基线，不能宣称正式检索质量门禁。全国/省级长期政策用例
+还明确标记为 `PENDING_RELEASE_BINDING`，须绑定正式 release 后才能运行真实 baseline。
+
+首批规模为检索集 30 条、端到端集 10 条；本版本先交付检索集。后续检索集扩展目标
+为 100–200 条。修改任何用例都必须复制到新的版本目录并生成新 hash 与新
+`dataset_version`，不能覆盖旧版本；loader 会拒绝 manifest hash 与 `qa.jsonl`
+不一致的数据。
+
+## 运行
+
+常规 CI / 本地 harness 冒烟使用确定性边界替身，不连数据库、不下载模型：
+
+```bash
+PYTHONPATH=services/orchestrator:services/orchestrator/pb \
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+/Users/francis/miniconda3/envs/ai-gaokao-counselor/bin/python3 \
+scripts/run_retrieval_eval.py --fixture --mode hybrid --as-of 2025-11-19
+```
+
+真实检索必须显式绑定已发布 release、隔离测试库和匹配的 embedding/index 身份：
+
+```bash
+scripts/run_retrieval_eval.py \
+  --dsn "$ORCHESTRATOR_TEST_DSN" \
+  --release-id "$RETRIEVAL_RELEASE_ID" \
+  --mode hybrid \
+  --embedding-model BAAI/bge-large-zh-v1.5 \
+  --index-version "$POLICY_INDEX_VERSION"
+```
+
+真实基线与 fixture 基线必须分开保存。fixture 输出中的
+`retrieval.authoritative_quality=false` 表示它只验证执行器、指标、scope leak 和
+报告格式，不代表真实数据上的 recall 或 MRR。
 
 用途（见架构文档第 11 章）：
 - 检索质量：recall@k、MRR、citation accuracy
