@@ -87,6 +87,11 @@ _REQUIRED_CASE_FIELDS = (
 )
 
 
+def is_authoritative_quality(manifest: dict, *, fixture: bool) -> bool:
+    """只有真实 RetrievePolicy 且 owner 已签字时才是质量结论。"""
+    return not fixture and manifest["owner_status"] == "SIGNED_OFF"
+
+
 def load_retrieval_dataset(dataset_dir: str | Path) -> RetrievalDataset:
     root = Path(dataset_dir)
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))

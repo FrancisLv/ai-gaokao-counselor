@@ -265,4 +265,5 @@
 
 `rerank_enabled=false` 是当前可执行基线。rerank 字段保留在报告中，但真实 rerank
 模型质量不在本阶段验收范围。确定性 fixture 基线只验证评测链路，其
-`authoritative_quality=false`，不得作为检索质量结论。
+`authoritative_quality=false`，不得作为检索质量结论；真实检索也只有在
+`owner_status=SIGNED_OFF` 时才标记为权威质量结果。

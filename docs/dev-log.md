@@ -1125,4 +1125,6 @@ rerank 模型质量。
   baseline 仍需显式 DSN、release 和 index version。
 - `rerank_enabled=false` 基线可运行；rerank 打开的真实模型质量留待后续 ticket。
 - Francis 的 `PENDING_SIGNOFF` 必须保留。签字前不得把 fixture PASS、草稿标注或
-  baseline 当作正式质量门禁。
+  baseline 当作正式质量门禁。合并审查补充：真实 `RetrievePolicy` 运行的
+  `authoritative_quality` 也只在 `owner_status=SIGNED_OFF` 时为 true，避免未签字
+  草稿借由真实库执行被误当作权威质量结论。

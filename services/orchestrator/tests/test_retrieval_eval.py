@@ -14,6 +14,7 @@ from eval.retrieval_eval import (
     RetrievalDataset,
     build_baseline,
     evaluate_retrieval,
+    is_authoritative_quality,
     load_retrieval_dataset,
 )
 import psycopg
@@ -222,6 +223,26 @@ class RetrievalDatasetTests(unittest.TestCase):
                 not case["expected_chunk_ids"]
                 and not case["expected_doc_ids"]
                 for case in no_evidence
+            )
+        )
+
+    def test_only_real_runs_with_a_signed_owner_are_authoritative(self):
+        self.assertFalse(
+            is_authoritative_quality(
+                {"owner_status": "PENDING_SIGNOFF"},
+                fixture=False,
+            )
+        )
+        self.assertFalse(
+            is_authoritative_quality(
+                {"owner_status": "SIGNED_OFF"},
+                fixture=True,
+            )
+        )
+        self.assertTrue(
+            is_authoritative_quality(
+                {"owner_status": "SIGNED_OFF"},
+                fixture=False,
             )
         )
 

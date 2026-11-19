@@ -19,6 +19,7 @@ sys.path.insert(0, str(ORCHESTRATOR))
 from eval.retrieval_eval import (  # noqa: E402
     build_baseline,
     evaluate_retrieval,
+    is_authoritative_quality,
     load_retrieval_dataset,
 )
 from rag.policy_retrieval import (  # noqa: E402
@@ -257,7 +258,10 @@ def main():
         "top_k": 20,
         "pool_k": 20,
         "execution": execution,
-        "authoritative_quality": False if args.fixture else True,
+        "authoritative_quality": is_authoritative_quality(
+            dataset.manifest,
+            fixture=args.fixture,
+        ),
     }
     baseline = build_baseline(
         report,
