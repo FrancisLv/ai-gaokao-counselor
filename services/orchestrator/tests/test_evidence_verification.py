@@ -281,6 +281,35 @@ class VerifyPackageDocumentTests(unittest.TestCase):
                 self.assertEqual(report.status, "BLOCKED")
                 self.assertEqual(report.claims[0].reason, reason)
 
+    def test_unreferenced_registry_evidence_cannot_mix_releases(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        other_document = document_evidence(release_id="rel-other")
+        other_ref = document_ref(
+            other_document,
+            evidence_id="ev-unreferenced-other-release",
+        )
+
+        report = VerifyPackage(
+            document_package(
+                document,
+                ref,
+                registry=(ref, other_ref),
+            ),
+            today=date(2025, 6, 1),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.claims[0].status, "UNVERIFIABLE")
+        self.assertEqual(
+            report.claims[0].reason,
+            "EVIDENCE_RELEASE_MISMATCH",
+        )
+        self.assertIn(
+            "EVIDENCE_RELEASE_MISMATCH",
+            report.blocking_reasons,
+        )
+
     def test_missing_verifier_identity_fails_closed(self):
         document = document_evidence()
         ref = document_ref(document)
@@ -393,4 +422,3 @@ class VerifyPackageDocumentTests(unittest.TestCase):
         self.assertTrue(
             all(item.status != "VERIFIED" for item in report.claims)
         )
-

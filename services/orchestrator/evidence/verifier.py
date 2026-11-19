@@ -270,6 +270,20 @@ def _package_preflight(package: EvidencePackage) -> str | None:
         or not package.scope.batch
     ):
         return "EVIDENCE_SCOPE_MISMATCH"
+    registry_refs = package.evidence_registry
+    claim_refs = tuple(
+        ref
+        for claim in package.claims
+        for ref in claim.evidence_refs
+    )
+    for ref in (*registry_refs, *claim_refs):
+        if ref.release_id != package.release_id:
+            return "EVIDENCE_RELEASE_MISMATCH"
+        if (
+            ref.document is not None
+            and ref.document.release_id != package.release_id
+        ):
+            return "EVIDENCE_RELEASE_MISMATCH"
     return None
 
 
