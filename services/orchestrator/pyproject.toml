@@ -29,5 +29,5 @@ package-dir = {api = "pb/api"}
 
 [tool.setuptools.packages.find]
 where = [".", "pb"]
-include = ["app*", "graph*", "rag*", "eval*", "api*"]
+include = ["app*", "evidence*", "graph*", "rag*", "eval*", "api*"]
 namespaces = true

@@ -1,0 +1,30 @@
+"""三类证据校验的唯一公开 seam。"""
+
+from evidence.verifier import (
+    Claim,
+    ClaimVerification,
+    EntailmentVerifier,
+    EvidencePackage,
+    EvidenceRef,
+    NormalizedFact,
+    RenderedBinding,
+    VerificationReport,
+    VerificationScope,
+    VerifyPackage,
+)
+from rag.policy_retrieval import DocumentApplicability, DocumentEvidence
+
+__all__ = [
+    "Claim",
+    "ClaimVerification",
+    "DocumentApplicability",
+    "DocumentEvidence",
+    "EvidencePackage",
+    "EvidenceRef",
+    "EntailmentVerifier",
+    "NormalizedFact",
+    "RenderedBinding",
+    "VerificationReport",
+    "VerificationScope",
+    "VerifyPackage",
+]
