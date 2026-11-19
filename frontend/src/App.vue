@@ -2,17 +2,40 @@
   <main class="shell">
     <header class="hero">
       <div>
-        <p class="eyebrow">M2 / M3 内部验收</p>
+        <p class="eyebrow">M2 / M3 / M4a 内部验收</p>
         <h1>Run 验收控制台</h1>
         <p class="lead">
           通过 gateway 验证结构化画像、HITL 恢复、SSE 事件与
-          ALGORITHM_PREVIEW。
+          ALGORITHM_PREVIEW，以及 POLICY_QA 的文档证据检索。
         </p>
       </div>
       <span class="principal">principal: {{ lifecycle.principalId }}</span>
     </header>
 
-    <form class="panel form-grid" @submit.prevent="lifecycle.submit">
+    <div class="mode-switch" role="tablist" aria-label="验收任务类型">
+      <button
+        :class="{ active: lifecycle.taskMode.value === 'plan' }"
+        data-testid="mode-plan"
+        type="button"
+        @click="lifecycle.taskMode.value = 'plan'"
+      >
+        志愿方案预览
+      </button>
+      <button
+        :class="{ active: lifecycle.taskMode.value === 'policy' }"
+        data-testid="mode-policy"
+        type="button"
+        @click="lifecycle.taskMode.value = 'policy'"
+      >
+        政策证据检索
+      </button>
+    </div>
+
+    <form
+      v-if="lifecycle.taskMode.value === 'plan'"
+      class="panel form-grid"
+      @submit.prevent="lifecycle.submit"
+    >
       <label>
         省份
         <select v-model="lifecycle.profile.province" data-testid="province">
@@ -66,6 +89,77 @@
       </button>
     </form>
 
+    <form
+      v-else
+      class="panel form-grid policy-form"
+      data-testid="policy-form"
+      @submit.prevent="lifecycle.submitPolicy"
+    >
+      <label class="wide-field">
+        政策问题
+        <textarea
+          v-model="lifecycle.policy.queryText"
+          data-testid="policy-query"
+          rows="3"
+        />
+      </label>
+      <label>
+        省份
+        <select v-model="lifecycle.policy.province" data-testid="policy-province">
+          <option value="湖南">湖南</option>
+        </select>
+      </label>
+      <label>
+        报考年
+        <input
+          v-model.number="lifecycle.policy.applicationYear"
+          data-testid="policy-application-year"
+          min="2020"
+          type="number"
+        />
+      </label>
+      <label>
+        科类
+        <select v-model="lifecycle.policy.category" data-testid="policy-category">
+          <option value="物理类">物理类</option>
+          <option value="历史类">历史类</option>
+          <option value="不限">不限</option>
+        </select>
+      </label>
+      <label>
+        批次
+        <select v-model="lifecycle.policy.batch" data-testid="policy-batch">
+          <option value="本科批">本科批</option>
+          <option value="不限">不限</option>
+        </select>
+      </label>
+      <label>
+        学校 ID（可选，逗号分隔）
+        <input v-model="lifecycle.policy.schoolIds" data-testid="policy-schools" />
+      </label>
+      <label>
+        文档类型（可选，逗号分隔）
+        <input
+          v-model="lifecycle.policy.documentTypes"
+          data-testid="policy-document-types"
+        />
+      </label>
+      <label>
+        检索模式
+        <select v-model="lifecycle.policy.mode" data-testid="policy-mode">
+          <option value="hybrid">hybrid</option>
+          <option value="vector">vector</option>
+          <option value="keyword">keyword</option>
+        </select>
+      </label>
+      <button
+        data-testid="submit-policy"
+        :disabled="lifecycle.submitting.value"
+      >
+        {{ lifecycle.submitting.value ? "检索中…" : "检索政策证据" }}
+      </button>
+    </form>
+
     <p v-if="lifecycle.error.value" class="error" role="alert">
       {{ lifecycle.error.value }}
     </p>
@@ -96,6 +190,13 @@
         <strong data-testid="terminal-reason">
           {{ lifecycle.run.value.terminalReason }}
         </strong>
+      </p>
+      <p
+        v-if="lifecycle.run.value.state === 'FAILED'"
+        class="error"
+        data-testid="policy-failure"
+      >
+        {{ failureMessage(lifecycle.run.value.terminalReason) }}
       </p>
       <div class="actions">
         <button
@@ -218,6 +319,10 @@
       v-if="lifecycle.run.value?.resultPreview"
       :preview="lifecycle.run.value.resultPreview"
     />
+    <PolicyEvidence
+      v-if="lifecycle.run.value?.policyEvidence"
+      :result="lifecycle.run.value.policyEvidence"
+    />
   </main>
 </template>
 
@@ -225,6 +330,7 @@
 import { onMounted } from "vue";
 
 import AlgorithmPreview from "./components/AlgorithmPreview.vue";
+import PolicyEvidence from "./components/PolicyEvidence.vue";
 import { useRunLifecycle } from "./composables/useRunLifecycle";
 import type { ProfileFieldView } from "./api/types";
 
@@ -267,5 +373,29 @@ function fieldValue(field: ProfileFieldView): string {
 
 function stringify(value: unknown): string {
   return JSON.stringify(value, null, 2);
+}
+
+function failureMessage(reason?: string): string {
+  switch (reason) {
+    case "UNSUPPORTED_SCOPE":
+      return "当前适用范围不受支持，请修正省份、报考年、科类或批次。";
+    case "RELEASE_UNAVAILABLE":
+    case "RELEASE_REVOKED":
+      return "当前发布版本不可用，请稍后重试或联系管理员。";
+    case "RETRIEVAL_UNAVAILABLE":
+      return "检索服务暂不可用，本次没有生成可靠证据。";
+    case "VECTOR_UNAVAILABLE":
+      return "向量检索不可用，请切换为 hybrid 或 keyword 后重试。";
+    case "KEYWORD_UNAVAILABLE":
+      return "关键词检索不可用，请切换为 hybrid 或 vector 后重试。";
+    case "INDEX_MODEL_MISMATCH":
+      return "检索索引与查询模型版本不一致，当前不能返回证据。";
+    case "RETRIEVAL_QUERY_REQUIRED":
+      return "请输入需要检索的政策问题。";
+    case "RETRIEVAL_SCOPE_REQUIRED":
+      return "请补充完整的省份、报考年、科类和批次。";
+    default:
+      return reason ? `任务失败：${reason}` : "任务失败。";
+  }
 }
 </script>

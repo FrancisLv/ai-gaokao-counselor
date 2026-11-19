@@ -28,7 +28,7 @@ SQLC_VERSION := v1.30.0
 SQLC := $(CURDIR)/bin/tools/sqlc-$(SQLC_VERSION)/sqlc
 
 .PHONY: help api api-go api-py conf tidy build build-gateway build-llm-gateway build-algo \
-        test py-check up down logs run-gateway run-llm-gateway run-algo run-orchestrator
+        test py-check m4a-acceptance-seed up down logs run-gateway run-llm-gateway run-algo run-orchestrator
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -122,6 +122,10 @@ py-check: api-py ## 语法与模块导入检查
 
 py-test: api-py ## Python 离线逻辑与导入测试，不下载模型、不入库
 	HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 $(PY) -m unittest discover -s $(PY_SVC)/tests -p 'test_*.py' -v
+
+m4a-acceptance-seed: ## 为 M4a 前端验收 seed policy release；需 DSN
+	@test -n "$(DSN)" || (echo '需设置 DSN'; exit 1)
+	$(PY) scripts/seed_m4a_frontend_acceptance.py --dsn "$(DSN)" $(if $(RESET_SCHEMA),--reset-schema,)
 
 ## ---- 运行 ----
 run-gateway: ## 本地直跑 svc-gateway

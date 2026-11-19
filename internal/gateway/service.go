@@ -147,6 +147,49 @@ func (s *Service) CreatePlan(ctx context.Context, req *gatewayv1.CreatePlanReque
 	}, nil
 }
 
+func (s *Service) CreatePolicyQuery(
+	ctx context.Context,
+	req *gatewayv1.CreatePolicyQueryRequest,
+) (*gatewayv1.CreatePolicyQueryReply, error) {
+	principal, err := requirePrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.GetQueryText()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "RETRIEVAL_QUERY_REQUIRED")
+	}
+	if strings.TrimSpace(req.GetIdempotencyKey()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "IDEMPOTENCY_KEY_REQUIRED")
+	}
+	reply, err := s.client.SubmitRun(
+		outgoingPrincipal(ctx, principal),
+		&orchestratorv1.SubmitRunRequest{
+			Trace:     &commonv1.Trace{SessionId: req.GetSessionId()},
+			SessionId: req.GetSessionId(),
+			TaskKind:  orchestratorv1.TaskKind_POLICY_QA,
+			PolicyInput: &orchestratorv1.PolicyQaInput{
+				QueryText:       req.GetQueryText(),
+				Province:        req.GetProvince(),
+				ApplicationYear: req.GetApplicationYear(),
+				Category:        req.GetCategory(),
+				Batch:           req.GetBatch(),
+				SchoolIds:       req.GetSchoolIds(),
+				DocumentTypes:   req.GetDocumentTypes(),
+				Mode:            req.GetMode(),
+			},
+			IdempotencyKey: req.GetIdempotencyKey(),
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &gatewayv1.CreatePolicyQueryReply{
+		SessionId: reply.GetSessionId(),
+		Status:    receiptStatus(reply),
+		RunId:     reply.GetRunId(),
+	}, nil
+}
+
 func (s *Service) ConfirmProfile(ctx context.Context, req *gatewayv1.ConfirmProfileRequest) (*gatewayv1.ConfirmProfileReply, error) {
 	principal, err := requirePrincipal(ctx)
 	if err != nil {

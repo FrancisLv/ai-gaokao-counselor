@@ -13,6 +13,16 @@ from run_lifecycle_support import RunLifecyclePostgresTest
 from test_run_lifecycle_algorithm_preview import FakeAlgoClient
 
 
+class NoEvidencePolicyRetriever:
+    async def retrieve(self, query):
+        from rag.policy_retrieval import PolicyRetrievalResult
+
+        return PolicyRetrievalResult(
+            status="NO_EVIDENCE",
+            release_id=query.release_id,
+        )
+
+
 class MissingBasisAlgoClient(FakeAlgoClient):
     async def EstimateProb(self, request):
         self.calls.append(("EstimateProb", request))
@@ -20,6 +30,104 @@ class MissingBasisAlgoClient(FakeAlgoClient):
 
 
 class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
+    async def test_grpc_policy_qa_requires_query_text(self):
+        await self.seed_release()
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.client.SubmitRun(
+                pb.SubmitRunRequest(
+                    task_kind=pb.POLICY_QA,
+                    policy_input=pb.PolicyQaInput(
+                        province="湖南",
+                        application_year=2025,
+                        category="物理类",
+                        batch="本科批",
+                    ),
+                    idempotency_key="grpc-policy-no-query",
+                ),
+                metadata=(("x-principal-id", "principal-policy"),),
+            )
+        self.assertEqual(
+            raised.exception.details(),
+            "RETRIEVAL_QUERY_REQUIRED",
+        )
+
+    async def test_grpc_policy_qa_returns_typed_no_evidence_result(self):
+        import asyncio
+
+        from app.run_lifecycle import RunLifecycle
+        from app.server import OrchestratorServicer
+
+        await self.seed_release()
+        lifecycle = RunLifecycle(
+            self.dsn,
+            auto_profile=True,
+            policy_retriever=NoEvidencePolicyRetriever(),
+        )
+        self.addAsyncCleanup(lifecycle.close)
+        server = grpc.aio.server()
+        pb_grpc.add_OrchestratorServicer_to_server(
+            OrchestratorServicer(lifecycle=lifecycle),
+            server,
+        )
+        port = server.add_insecure_port("127.0.0.1:0")
+        await server.start()
+        self.addAsyncCleanup(server.stop, None)
+        channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+        self.addAsyncCleanup(channel.close)
+        client = pb_grpc.OrchestratorStub(channel)
+        metadata = (("x-principal-id", "principal-policy"),)
+
+        receipt = await client.SubmitRun(
+            pb.SubmitRunRequest(
+                task_kind=pb.POLICY_QA,
+                policy_input=pb.PolicyQaInput(
+                    query_text="转专业政策是什么？",
+                    province="湖南",
+                    application_year=2025,
+                    category="物理类",
+                    batch="本科批",
+                    mode="keyword",
+                ),
+                idempotency_key="grpc-policy-qa",
+            ),
+            metadata=metadata,
+        )
+
+        for _ in range(200):
+            view = await client.GetRun(
+                pb.GetRunRequest(run_id=receipt.run_id),
+                metadata=metadata,
+            )
+            if view.state == pb.SUCCEEDED:
+                break
+            await asyncio.sleep(0.01)
+
+        self.assertTrue(receipt.accepted)
+        self.assertEqual(view.task_kind, pb.POLICY_QA)
+        self.assertEqual(view.result.result_kind, "POLICY_EVIDENCE")
+        self.assertEqual(
+            view.policy_evidence.retrieval_status,
+            "NO_EVIDENCE",
+        )
+        self.assertEqual(len(view.policy_evidence.evidence), 0)
+        events = client.WatchRun(
+            pb.WatchRunRequest(
+                run_id=receipt.run_id,
+                after_event_seq=0,
+            ),
+            metadata=metadata,
+        )
+        result_event = None
+        while result_event is None:
+            event = await asyncio.wait_for(events.read(), timeout=1)
+            if event.type == pb.RESULT:
+                result_event = event
+        events.cancel()
+        self.assertEqual(
+            result_event.policy_evidence.retrieval_status,
+            "NO_EVIDENCE",
+        )
+
     async def test_legacy_start_graph_delegates_to_submit_run(self):
         import json
 

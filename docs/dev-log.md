@@ -1261,3 +1261,39 @@ rerank 模型质量。
 
 - 新增“省级误标的校级章程缺 school_id”真实库回归，并保留全国/省级长期政策正向用例。
 - 新增 `GENERATE_PLAN` 从持久 task input 读取学校/文档类型筛选的 run-bound 图测试。
+
+## 40. M4a POLICY_QA 前端验收纵切
+
+**日期与范围**：2026-11-19。补通
+`POLICY_QA → gateway → RunLifecycle → RetrievePolicy → 前端证据卡`；不生成最终政策
+答案、资格判断或报告。
+
+### 实现
+
+- proto additive 新增 `PolicyQaInput`、`PolicyEvidenceResult`、
+  `PolicyEvidenceItem`、RunView/RunEvent typed evidence，以及
+  `POST /v1/policy-queries`。
+- RunLifecycle 接受 typed POLICY_QA，按持久 task input 构造检索 query；`FOUND` 和
+  `NO_EVIDENCE` 发布不可变 `POLICY_EVIDENCE`，scope/配置/技术错误进入稳定 FAILED。
+- 新增 `PostgresPolicyRetriever` 生产 adapter；未配置 embedding 时 hybrid 保持同范围
+  关键词降级。
+- 迁移 19 允许 `run_result` 保存无 Profile 的 `POLICY_EVIDENCE`。
+- 前端新增政策检索模式、证据卡、安全 `NO_EVIDENCE` 文案、hash/locator/source 展示；
+  文档原文只按纯文本渲染。
+- 新增 acceptance seed、Make target 和 `docs/m4a-frontend-acceptance.md`。
+
+### 测试
+
+- Python：POLICY_QA FOUND/NO_EVIDENCE、失败 reason、gRPC GetRun/RESULT 一致性。
+- Go：typed policy-query service/HTTP 和 `policyEvidence` JSON 投影。
+- 前端：typed 提交、证据安全渲染、NO_EVIDENCE、失败提示。
+- Playwright：既有 preview、POLICY_QA FOUND、POLICY_QA NO_EVIDENCE。
+- 真实 orchestrator + gateway HTTP 烟雾：返回 `FOUND`，evidence 的 release/hash/
+  locator/source 完整。
+- acceptance seed 通过真实 `RetrievePolicy`：转专业与全国资助政策返回 FOUND，火星
+  查询返回 NO_EVIDENCE。
+
+### 边界
+
+- 当前只展示检索证据，不生成最终政策解释。
+- seed 只允许写入数据库名含 `test` / `acceptance` 的 DSN。

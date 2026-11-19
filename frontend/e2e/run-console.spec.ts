@@ -131,3 +131,181 @@ test("restores, confirms and renders the controlled preview", async ({ page }) =
     "完整当年资格规则未核验",
   );
 });
+
+test("submits policy query and renders document evidence", async ({ page }) => {
+  await page.route("**/v1/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === "/v1/policy-queries" && request.method() === "POST") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          runId: "run-policy-e2e",
+          sessionId: "session-policy-e2e",
+          status: "accepted",
+        }),
+      });
+      return;
+    }
+    if (
+      url.pathname === "/v1/runs/run-policy-e2e/events" &&
+      request.method() === "GET"
+    ) {
+      const event = {
+        runId: "run-policy-e2e",
+        eventSeq: "2",
+        type: "RESULT",
+        stage: "EVIDENCE_READY",
+        stateVersion: "3",
+      };
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: `id: 2\nevent: RESULT\ndata: ${JSON.stringify(event)}\n\n`,
+      });
+      return;
+    }
+    if (
+      url.pathname === "/v1/runs/run-policy-e2e" &&
+      request.method() === "GET"
+    ) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(policyRunView("FOUND")),
+      });
+      return;
+    }
+    throw new Error(`unexpected request: ${request.method()} ${url.pathname}`);
+  });
+
+  await page.goto("/");
+  await page.getByTestId("mode-policy").click();
+  await page.getByTestId("policy-query").fill("转专业政策是什么？");
+  await page.getByTestId("submit-policy").click();
+
+  await expect(page.getByTestId("run-state")).toHaveText("SUCCEEDED");
+  await expect(page.getByTestId("policy-status")).toContainText(
+    "已找到可核验的文档证据",
+  );
+  await expect(page.getByTestId("evidence-card")).toHaveCount(1);
+  await expect(page.getByTestId("evidence-excerpt")).toContainText(
+    "学生可以申请转专业",
+  );
+});
+
+test("shows NO_EVIDENCE without claiming there is no restriction", async ({
+  page,
+}) => {
+  await page.route("**/v1/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === "/v1/policy-queries" && request.method() === "POST") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          runId: "run-policy-e2e",
+          sessionId: "session-policy-e2e",
+          status: "accepted",
+        }),
+      });
+      return;
+    }
+    if (
+      url.pathname === "/v1/runs/run-policy-e2e/events" &&
+      request.method() === "GET"
+    ) {
+      const event = {
+        runId: "run-policy-e2e",
+        eventSeq: "2",
+        type: "RESULT",
+        stage: "EVIDENCE_READY",
+        stateVersion: "3",
+      };
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: `id: 2\nevent: RESULT\ndata: ${JSON.stringify(event)}\n\n`,
+      });
+      return;
+    }
+    if (
+      url.pathname === "/v1/runs/run-policy-e2e" &&
+      request.method() === "GET"
+    ) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(policyRunView("NO_EVIDENCE")),
+      });
+      return;
+    }
+    throw new Error(`unexpected request: ${request.method()} ${url.pathname}`);
+  });
+
+  await page.goto("/");
+  await page.getByTestId("mode-policy").click();
+  await page.getByTestId("submit-policy").click();
+
+  await expect(page.getByTestId("policy-status")).toContainText(
+    "未检索到可靠证据",
+  );
+  await expect(page.getByTestId("policy-evidence")).toContainText(
+    "不代表没有相关政策限制",
+  );
+  await expect(page.getByTestId("evidence-card")).toHaveCount(0);
+});
+
+function policyRunView(status: "FOUND" | "NO_EVIDENCE") {
+  return {
+    runId: "run-policy-e2e",
+    sessionId: "session-policy-e2e",
+    taskKind: "POLICY_QA",
+    state: "SUCCEEDED",
+    stage: "EVIDENCE_READY",
+    stateVersion: 3,
+    releaseId: "release-policy-e2e",
+    result: {
+      resultVersion: "result-policy-e2e",
+      resultKind: "POLICY_EVIDENCE",
+    },
+    policyEvidence: {
+      resultVersion: "result-policy-e2e",
+      resultKind: "POLICY_EVIDENCE",
+      runId: "run-policy-e2e",
+      releaseId: "release-policy-e2e",
+      retrievalStatus: status,
+      vectorCandidates: status === "FOUND" ? 1 : 0,
+      keywordCandidates: status === "FOUND" ? 1 : 0,
+      rerankEnabled: false,
+      evidence:
+        status === "FOUND"
+          ? [
+              {
+                evidenceId: "evidence-policy-e2e",
+                docId: "doc-policy-e2e",
+                chunkId: "chunk-policy-e2e",
+                title: "湖南测试大学2025年招生章程",
+                documentType: "charter",
+                issuer: "湖南测试大学",
+                sourceUri: "https://example.invalid/charter",
+                fetchedAt: "2025-01-02T00:00:00Z",
+                sectionPath: "第二章 > 转专业",
+                excerpt: "学生可以申请转专业。",
+                excerptSha256: "a".repeat(64),
+                charStart: 0,
+                charEnd: 12,
+                regions: ["湖南"],
+                categories: ["物理类"],
+                batches: ["本科批"],
+                validFrom: "2025-01-01",
+                validTo: "2025-12-31",
+                releaseId: "release-policy-e2e",
+              },
+            ]
+          : [],
+    },
+  };
+}

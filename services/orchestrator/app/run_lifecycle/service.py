@@ -7,7 +7,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Protocol
 from uuid import UUID, uuid4
 
 import grpc
@@ -29,6 +29,7 @@ from app.run_lifecycle.models import (
     CancelRunCommand,
     DeclineFieldsAnswer,
     InterruptView,
+    PolicyQaInput,
     RejectOrEditProfileAnswer,
     ResumeRunCommand,
     ResultReference,
@@ -41,6 +42,19 @@ from app.run_lifecycle.models import (
 )
 from app.run_lifecycle.profile import ProfileRuntime, build_profile_fields
 from app.run_lifecycle.profile_graph import build_profile_graph
+from rag.policy_retrieval import (
+    ApplicabilityScope,
+    PolicyRetrievalError,
+    PolicyRetrievalQuery,
+    PolicyRetrievalResult,
+)
+
+
+class PolicyRetriever(Protocol):
+    async def retrieve(
+        self,
+        query: PolicyRetrievalQuery,
+    ) -> PolicyRetrievalResult: ...
 
 
 class RunLifecycle:
@@ -55,6 +69,7 @@ class RunLifecycle:
         lease_duration: timedelta = timedelta(seconds=30),
         clock: Callable[[], datetime] | None = None,
         algo_client: AlgoClient | None = None,
+        policy_retriever: PolicyRetriever | None = None,
     ) -> None:
         if not dsn:
             raise ValueError("RunLifecycle 需要 PostgreSQL DSN")
@@ -64,6 +79,7 @@ class RunLifecycle:
         self._lease_duration = lease_duration
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._algo_client = algo_client
+        self._policy_retriever = policy_retriever
         self._saver_cm = None
         self._saver: AsyncPostgresSaver | None = None
         self._profile_graph = None
@@ -754,7 +770,8 @@ class RunLifecycle:
             row = await (
                 await conn.execute(
                     """
-                    SELECT run_id, session_id, principal_id, task_input, state, stage,
+                    SELECT run_id, session_id, principal_id, task_kind,
+                           task_input, state, stage,
                            state_version, release_id, working_profile_version,
                            confirmed_profile_version, lease_owner, lease_epoch,
                            lease_expires_at, active_execution_remaining_ms,
@@ -812,7 +829,8 @@ class RunLifecycle:
                       AND state = %s
                       AND state_version = %s
                       AND lease_epoch = %s
-                    RETURNING run_id, session_id, principal_id, task_input, state, stage,
+                    RETURNING run_id, session_id, principal_id, task_kind,
+                              task_input, state, stage,
                               state_version, release_id, working_profile_version,
                               confirmed_profile_version, lease_owner, lease_epoch,
                               lease_expires_at, active_execution_remaining_ms,
@@ -1141,6 +1159,245 @@ class RunLifecycle:
                 },
             )
         return True
+
+    async def _process_policy_qa(
+        self,
+        conn,
+        row: dict[str, Any],
+    ) -> None:
+        if self._policy_retriever is None:
+            await self._park_claim(
+                conn,
+                row,
+                target_state="FAILED",
+                stage="RETRIEVING",
+                terminal_reason="DEPENDENCY_UNAVAILABLE",
+            )
+            return
+        try:
+            input_data = dict(row["task_input"])
+            policy_input = PolicyQaInput(
+                query_text=str(input_data.get("query_text") or ""),
+                province=str(input_data.get("province") or ""),
+                application_year=input_data.get("application_year"),
+                category=str(input_data.get("category") or ""),
+                batch=str(input_data.get("batch") or ""),
+                school_ids=tuple(input_data.get("school_ids") or ()),
+                document_types=tuple(input_data.get("document_types") or ()),
+                mode=str(input_data.get("mode") or "hybrid"),
+            )
+            if not policy_input.query_text.strip():
+                raise RunLifecycleError("RETRIEVAL_QUERY_REQUIRED")
+            if (
+                policy_input.application_year is None
+                or not policy_input.province
+                or not policy_input.category
+                or not policy_input.batch
+            ):
+                raise RunLifecycleError("RETRIEVAL_SCOPE_REQUIRED")
+            result = await self._policy_retriever.retrieve(
+                PolicyRetrievalQuery(
+                    principal_id=row["principal_id"],
+                    query_text=policy_input.query_text,
+                    scope=ApplicabilityScope(
+                        province=policy_input.province,
+                        application_year=int(policy_input.application_year),
+                        category=policy_input.category,
+                        batch=policy_input.batch,
+                    ),
+                    release_id=row["release_id"],
+                    mode=policy_input.mode,
+                    school_ids=policy_input.school_ids,
+                    document_types=policy_input.document_types,
+                )
+            )
+        except PolicyRetrievalError as exc:
+            await self._park_claim(
+                conn,
+                row,
+                target_state="FAILED",
+                stage="RETRIEVING",
+                terminal_reason=exc.reason,
+            )
+            return
+        except RunLifecycleError as exc:
+            await self._park_claim(
+                conn,
+                row,
+                target_state="FAILED",
+                stage="RETRIEVING",
+                terminal_reason=exc.reason,
+            )
+            return
+        except Exception:
+            await self._park_claim(
+                conn,
+                row,
+                target_state="FAILED",
+                stage="RETRIEVING",
+                terminal_reason="RETRIEVAL_UNAVAILABLE",
+            )
+            return
+
+        if result.status not in {"FOUND", "NO_EVIDENCE"}:
+            await self._park_claim(
+                conn,
+                row,
+                target_state="FAILED",
+                stage="RETRIEVING",
+                terminal_reason=result.status,
+            )
+            return
+        await self._publish_policy_evidence(conn, row=row, result=result)
+
+    async def _publish_policy_evidence(
+        self,
+        conn,
+        *,
+        row: dict[str, Any],
+        result: PolicyRetrievalResult,
+    ) -> None:
+        result_version = uuid4()
+        payload = {
+            "result_version": str(result_version),
+            "result_kind": "POLICY_EVIDENCE",
+            "run_id": str(row["run_id"]),
+            "release_id": result.release_id,
+            "retrieval_status": result.status,
+            "degraded_reason": result.diagnostics.degraded_reason,
+            "vector_candidates": result.diagnostics.vector_candidates,
+            "keyword_candidates": result.diagnostics.keyword_candidates,
+            "rerank_enabled": result.diagnostics.rerank_enabled,
+            "rerank_model": result.diagnostics.rerank_model,
+            "rerank_config_version": (
+                result.diagnostics.rerank_config_version
+            ),
+            "evidence": [
+                {
+                    "evidence_id": item.evidence_id,
+                    "doc_id": item.document.doc_id,
+                    "chunk_id": item.document.chunk_id,
+                    "title": item.document.title,
+                    "document_type": item.document.document_type,
+                    "issuer": item.document.issuer,
+                    "source_uri": item.document.source_uri,
+                    "fetched_at": item.document.fetched_at.isoformat(),
+                    "section_path": item.document.section_path,
+                    "excerpt": item.document.excerpt,
+                    "excerpt_sha256": item.document.excerpt_sha256,
+                    "char_start": item.document.char_start,
+                    "char_end": item.document.char_end,
+                    "regions": list(item.document.applicability.regions),
+                    "categories": list(item.document.applicability.categories),
+                    "batches": list(item.document.applicability.batches),
+                    "valid_from": (
+                        item.document.applicability.valid_from.isoformat()
+                    ),
+                    "valid_to": (
+                        item.document.applicability.valid_to.isoformat()
+                        if item.document.applicability.valid_to is not None
+                        else None
+                    ),
+                    "release_id": item.release_id,
+                }
+                for item in result.evidence
+            ],
+        }
+        async with conn.transaction():
+            current = await (
+                await conn.execute(
+                    """
+                    SELECT state, state_version, lease_owner, lease_epoch,
+                           release_id, cancel_requested_at
+                    FROM run
+                    WHERE run_id = %s
+                    FOR UPDATE
+                    """,
+                    (row["run_id"],),
+                )
+            ).fetchone()
+            if (
+                current is None
+                or current["state"] != "RUNNING"
+                or current["lease_owner"] != self._worker_owner
+                or current["lease_epoch"] != row["lease_epoch"]
+                or current["release_id"] != result.release_id
+                or current["cancel_requested_at"] is not None
+            ):
+                raise RunLifecycleError("RUN_STATE_CONFLICT")
+            next_version = current["state_version"] + 1
+            await conn.execute(
+                """
+                INSERT INTO run_result (
+                    result_version, run_id, release_id,
+                    confirmed_profile_version, result_kind, payload,
+                    verification_summary, unverified_conditions
+                )
+                VALUES (%s, %s, %s, NULL, 'POLICY_EVIDENCE', %s, %s, %s)
+                """,
+                (
+                    result_version,
+                    row["run_id"],
+                    result.release_id,
+                    Jsonb(payload),
+                    Jsonb([]),
+                    Jsonb([]),
+                ),
+            )
+            updated = await (
+                await conn.execute(
+                    """
+                    UPDATE run
+                    SET state = 'SUCCEEDED',
+                        stage = 'EVIDENCE_READY',
+                        terminal_reason = NULL,
+                        state_version = %s,
+                        result_version = %s,
+                        result_kind = 'POLICY_EVIDENCE',
+                        lease_owner = NULL,
+                        lease_expires_at = NULL,
+                        active_execution_started_at = NULL,
+                        updated_at = NOW()
+                    WHERE run_id = %s
+                      AND state = 'RUNNING'
+                      AND state_version = %s
+                      AND lease_owner = %s
+                      AND lease_epoch = %s
+                    RETURNING run_id
+                    """,
+                    (
+                        next_version,
+                        result_version,
+                        row["run_id"],
+                        current["state_version"],
+                        self._worker_owner,
+                        row["lease_epoch"],
+                    ),
+                )
+            ).fetchone()
+            if updated is None:
+                raise RunLifecycleError("RUN_STATE_CONFLICT")
+            await append_event(
+                conn,
+                run_id=row["run_id"],
+                event_type="STATE_CHANGED",
+                stage="EVIDENCE_READY",
+                state_version=next_version,
+                payload={"from_state": "RUNNING", "to_state": "SUCCEEDED"},
+            )
+            await append_event(
+                conn,
+                run_id=row["run_id"],
+                event_type="RESULT",
+                stage="EVIDENCE_READY",
+                state_version=next_version,
+                payload={
+                    "result_version": str(result_version),
+                    "result_kind": "POLICY_EVIDENCE",
+                    "retrieval": payload,
+                },
+                payload_version=1,
+            )
 
     async def _process_algorithm_preview(self, conn, row: dict[str, Any]) -> None:
         config = {"configurable": {"thread_id": str(row["run_id"])}}
@@ -1660,6 +1917,9 @@ class RunLifecycle:
                 return
             row = await self._consume_active_budget(conn, row)
             if row is None:
+                return
+            if row["task_kind"] == "POLICY_QA":
+                await self._process_policy_qa(conn, row)
                 return
             if row["confirmed_profile_version"] is not None:
                 try:

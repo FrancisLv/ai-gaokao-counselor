@@ -14,6 +14,7 @@ async def _serve() -> None:
 
     from app.run_lifecycle import RunLifecycle
     from app.run_lifecycle.algo import GrpcAlgoClient
+    from app.run_lifecycle.policy import PostgresPolicyRetriever
     from app.run_lifecycle.worker import RunLifecycleWorker
     from app.server import OrchestratorServicer
     from api.orchestrator.v1 import orchestrator_pb2_grpc
@@ -26,7 +27,15 @@ async def _serve() -> None:
         else None
     )
     lifecycle = (
-        RunLifecycle(dsn, auto_profile=True, algo_client=algo_client)
+        RunLifecycle(
+            dsn,
+            auto_profile=True,
+            algo_client=algo_client,
+            policy_retriever=PostgresPolicyRetriever(
+                dsn,
+                embedding_model=os.getenv("POLICY_EMBEDDING_MODEL"),
+            ),
+        )
         if dsn
         else None
     )

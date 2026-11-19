@@ -11,7 +11,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -80,12 +81,17 @@ h2 {
 }
 
 input,
-select {
+select,
+textarea {
   min-height: 42px;
   padding: 8px 10px;
   border: 1px solid #cbd3e1;
   border-radius: 9px;
   background: white;
+}
+
+textarea {
+  resize: vertical;
 }
 
 .subjects {
@@ -395,4 +401,88 @@ button.danger {
   .candidate-grid {
     grid-template-columns: 1fr 1fr;
   }
+}
+
+.mode-switch {
+  display: flex;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+.mode-switch button {
+  border: 1px solid #c8d1d8;
+  background: #fff;
+  color: #33414c;
+}
+
+.mode-switch button.active {
+  border-color: #1e6f5c;
+  background: #1e6f5c;
+  color: #fff;
+}
+
+.wide-field {
+  grid-column: 1 / -1;
+}
+
+.policy-status,
+.degraded {
+  padding: 0.8rem 1rem;
+  border-radius: 0.7rem;
+  background: #f2f6f5;
+}
+
+.degraded {
+  color: #73510b;
+  background: #fff4d9;
+}
+
+.evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.evidence-card {
+  border: 1px solid #dbe2e6;
+  border-radius: 0.9rem;
+  padding: 1rem;
+  background: #fff;
+}
+
+.evidence-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.evidence-heading p,
+.evidence-section {
+  color: #64727d;
+}
+
+.evidence-card blockquote {
+  margin: 1rem 0;
+  padding: 0.9rem;
+  border-left: 4px solid #1e6f5c;
+  background: #f7faf9;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.evidence-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.35rem 0.8rem;
+  font-size: 0.9rem;
+}
+
+.evidence-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.source-link {
+  display: inline-block;
+  margin-top: 1rem;
 }

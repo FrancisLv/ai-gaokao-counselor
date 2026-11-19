@@ -21,6 +21,7 @@ from app.run_lifecycle import (
     CancelRunCommand,
     ConfirmProfileAnswer,
     DeclineFieldsAnswer,
+    PolicyQaInput,
     RunEvent,
     RunLifecycle,
     RunLifecycleError,
@@ -196,12 +197,44 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
     async def SubmitRun(self, request, context) -> "orchestrator_pb2.RunReceiptReply":
         lifecycle = await self._require_lifecycle(context)
         principal_id = await self._principal(context)
-        if request.task_kind != orchestrator_pb2.GENERATE_PLAN:
+        if request.task_kind not in {
+            orchestrator_pb2.GENERATE_PLAN,
+            orchestrator_pb2.POLICY_QA,
+        }:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "UNSUPPORTED_TASK_KIND")
         try:
             session_id = UUID(request.session_id) if request.session_id else None
         except ValueError:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "INVALID_SESSION_ID")
+        if request.task_kind == orchestrator_pb2.POLICY_QA:
+            policy = request.policy_input
+            if not policy.query_text.strip():
+                await context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    "RETRIEVAL_QUERY_REQUIRED",
+                )
+            try:
+                receipt = await lifecycle.SubmitRun(
+                    SubmitRunCommand(
+                        principal_id=principal_id,
+                        session_id=session_id,
+                        task_kind="POLICY_QA",
+                        input=PolicyQaInput(
+                            query_text=policy.query_text,
+                            province=policy.province,
+                            application_year=policy.application_year or None,
+                            category=policy.category,
+                            batch=policy.batch,
+                            school_ids=tuple(policy.school_ids),
+                            document_types=tuple(policy.document_types),
+                            mode=policy.mode or "hybrid",
+                        ),
+                        idempotency_key=request.idempotency_key,
+                    )
+                )
+            except RunLifecycleError as exc:
+                await self._abort_lifecycle(context, exc)
+            return self._receipt_reply(receipt)
         try:
             receipt = await lifecycle.SubmitRun(
                 SubmitRunCommand(
@@ -346,6 +379,7 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             "PROFILE_UNSUPPORTED_SCOPE": grpc.StatusCode.FAILED_PRECONDITION,
             "PROFILE_UNSUPPORTED_INPUT": grpc.StatusCode.INVALID_ARGUMENT,
             "PROFILE_NOT_CONFIRMED": grpc.StatusCode.FAILED_PRECONDITION,
+            "RETRIEVAL_QUERY_REQUIRED": grpc.StatusCode.INVALID_ARGUMENT,
             "RETRIEVAL_SCOPE_REQUIRED": grpc.StatusCode.FAILED_PRECONDITION,
             "RETRIEVAL_SCOPE_INVALID": grpc.StatusCode.INVALID_ARGUMENT,
             "VALIDATION_FAILED": grpc.StatusCode.FAILED_PRECONDITION,
@@ -403,11 +437,18 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             reply.result.result_version = str(view.result.result_version)
             reply.result.result_kind = view.result.result_kind
         if view.result_payload is not None:
-            reply.result_preview.CopyFrom(
-                OrchestratorServicer._algorithm_preview_message(
-                    view.result_payload
+            if view.result is not None and view.result.result_kind == "POLICY_EVIDENCE":
+                reply.policy_evidence.CopyFrom(
+                    OrchestratorServicer._policy_evidence_message(
+                        view.result_payload
+                    )
                 )
-            )
+            else:
+                reply.result_preview.CopyFrom(
+                    OrchestratorServicer._algorithm_preview_message(
+                        view.result_payload
+                    )
+                )
         reply.created_at.FromDatetime(view.created_at)
         reply.updated_at.FromDatetime(view.updated_at)
         reply.expires_at.FromDatetime(view.expires_at)
@@ -438,15 +479,29 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
         elif event.type == "ERROR":
             populate_error(reply.error, event.payload)
         elif event.type == "RESULT":
-            preview = event.payload.get("preview") or {}
-            reply.result.CopyFrom(
-                OrchestratorServicer._algorithm_preview_message(preview)
-            )
+            if event.payload.get("result_kind") == "POLICY_EVIDENCE":
+                retrieval = event.payload.get("retrieval") or {}
+                reply.policy_evidence.CopyFrom(
+                    OrchestratorServicer._policy_evidence_message(
+                        retrieval
+                    )
+                )
+            else:
+                preview = event.payload.get("preview") or {}
+                reply.result.CopyFrom(
+                    OrchestratorServicer._algorithm_preview_message(preview)
+                )
         return reply
 
     @staticmethod
     def _algorithm_preview_message(payload: dict):
         message = orchestrator_pb2.AlgorithmPreview()
+        json_format.ParseDict(payload, message)
+        return message
+
+    @staticmethod
+    def _policy_evidence_message(payload: dict):
+        message = orchestrator_pb2.PolicyEvidenceResult()
         json_format.ParseDict(payload, message)
         return message
 

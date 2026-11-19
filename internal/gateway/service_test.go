@@ -23,6 +23,7 @@ type fakeRunClient struct {
 	watchEvents []*orchestratorv1.RunEvent
 	watchDelay  time.Duration
 	cancelReply *orchestratorv1.RunReceiptReply
+	getReply    *orchestratorv1.RunViewReply
 	submitMeta  metadata.MD
 	resumeMeta  metadata.MD
 	getMeta     metadata.MD
@@ -70,6 +71,9 @@ func (f *fakeRunClient) GetRun(
 ) (*orchestratorv1.RunViewReply, error) {
 	f.getReq = req
 	f.getMeta, _ = metadata.FromOutgoingContext(ctx)
+	if f.getReply != nil {
+		return f.getReply, nil
+	}
 	return &orchestratorv1.RunViewReply{
 		RunId:        req.GetRunId(),
 		SessionId:    "00000000-0000-0000-0000-000000000002",
@@ -166,6 +170,42 @@ func TestCreatePlanUsesRunLifecycleSubmit(t *testing.T) {
 	}
 	if reply.GetStatus() == "" {
 		t.Fatal("CreatePlan 未返回状态")
+	}
+}
+
+func TestCreatePolicyQueryUsesTypedPolicyInput(t *testing.T) {
+	client := &fakeRunClient{}
+	svc := NewService(client)
+	ctx := trustedContext("principal-policy")
+
+	reply, err := svc.CreatePolicyQuery(
+		ctx,
+		&gatewayv1.CreatePolicyQueryRequest{
+			QueryText:       "转专业政策是什么？",
+			Province:        "湖南",
+			ApplicationYear: 2025,
+			Category:        "物理类",
+			Batch:           "本科批",
+			SchoolIds:       []string{"1001"},
+			DocumentTypes:   []string{"charter"},
+			Mode:            "keyword",
+			IdempotencyKey:  "policy-query-submit",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.submitReq.GetTaskKind() != orchestratorv1.TaskKind_POLICY_QA {
+		t.Fatalf("task_kind = %v", client.submitReq.GetTaskKind())
+	}
+	if client.submitReq.GetPolicyInput().GetQueryText() != "转专业政策是什么？" {
+		t.Fatalf("query_text = %q", client.submitReq.GetPolicyInput().GetQueryText())
+	}
+	if got := client.submitMeta.Get("x-principal-id"); len(got) != 1 || got[0] != "principal-policy" {
+		t.Fatalf("principal metadata = %v", got)
+	}
+	if reply.GetRunId() == "" {
+		t.Fatal("CreatePolicyQuery 未返回 run_id")
 	}
 }
 

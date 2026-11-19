@@ -88,12 +88,24 @@ message StructuredProfileInput {
   repeated string subjects = 6;
 }
 
+message PolicyQaInput {
+  string query_text = 1;
+  string province = 2;
+  int32 application_year = 3;
+  string category = 4;
+  string batch = 5;
+  repeated string school_ids = 6;
+  repeated string document_types = 7;
+  string mode = 8;
+}
+
 message SubmitRunRequest {
   common.v1.Trace trace = 1;
   string session_id = 2;
   TaskKind task_kind = 3;
   StructuredProfileInput profile_input = 4;
   string idempotency_key = 5;
+  PolicyQaInput policy_input = 6;
 }
 
 message RunReceiptReply {
@@ -234,6 +246,43 @@ message AlgorithmPreview {
   bool internal_controlled_only = 25;
 }
 
+message PolicyEvidenceItem {
+  string evidence_id = 1;
+  string doc_id = 2;
+  string chunk_id = 3;
+  string title = 4;
+  string document_type = 5;
+  string issuer = 6;
+  string source_uri = 7;
+  google.protobuf.Timestamp fetched_at = 8;
+  string section_path = 9;
+  string excerpt = 10;
+  string excerpt_sha256 = 11;
+  optional int32 char_start = 12;
+  optional int32 char_end = 13;
+  repeated string regions = 14;
+  repeated string categories = 15;
+  repeated string batches = 16;
+  string valid_from = 17;
+  string valid_to = 18;
+  string release_id = 19;
+}
+
+message PolicyEvidenceResult {
+  string result_version = 1;
+  string result_kind = 2;
+  string run_id = 3;
+  string release_id = 4;
+  string retrieval_status = 5;
+  string degraded_reason = 6;
+  int32 vector_candidates = 7;
+  int32 keyword_candidates = 8;
+  bool rerank_enabled = 9;
+  string rerank_model = 10;
+  string rerank_config_version = 11;
+  repeated PolicyEvidenceItem evidence = 12;
+}
+
 message RunViewReply {
   string run_id = 1;
   string session_id = 2;
@@ -252,6 +301,7 @@ message RunViewReply {
   int64 active_execution_remaining_ms = 15;
   AlgorithmPreview result_preview = 16;
   google.protobuf.Timestamp expires_at = 17;
+  PolicyEvidenceResult policy_evidence = 18;
 }
 
 message StateChangedPayload {
@@ -286,5 +336,6 @@ message RunEvent {
     ProgressPayload progress = 10;
     ErrorPayload error = 11;
     AlgorithmPreview result = 12;
+    PolicyEvidenceResult policy_evidence = 13;
   }
 }

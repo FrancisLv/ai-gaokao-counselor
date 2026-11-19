@@ -101,6 +101,43 @@ class AlgorithmPreviewPayload(TypedDict, total=False):
     result_kind: str
 
 
+class PolicyEvidenceItemPayload(TypedDict, total=False):
+    evidence_id: str
+    doc_id: str
+    chunk_id: str
+    title: str
+    document_type: str
+    issuer: str
+    source_uri: str
+    fetched_at: str
+    section_path: str
+    excerpt: str
+    excerpt_sha256: str
+    char_start: int | None
+    char_end: int | None
+    regions: list[str]
+    categories: list[str]
+    batches: list[str]
+    valid_from: str
+    valid_to: str | None
+    release_id: str
+
+
+class PolicyEvidencePayload(TypedDict, total=False):
+    result_version: str
+    result_kind: str
+    run_id: str
+    release_id: str
+    retrieval_status: str
+    degraded_reason: str | None
+    vector_candidates: int
+    keyword_candidates: int
+    rerank_enabled: bool
+    rerank_model: str | None
+    rerank_config_version: str | None
+    evidence: list[PolicyEvidenceItemPayload]
+
+
 RunEventPayload = (
     dict[str, Any]
     | ProgressPayload
@@ -123,11 +160,23 @@ class StructuredProfileInput:
 
 
 @dataclass(frozen=True, slots=True)
+class PolicyQaInput:
+    query_text: str
+    province: str
+    application_year: int | None
+    category: str
+    batch: str
+    school_ids: tuple[str, ...] = ()
+    document_types: tuple[str, ...] = ()
+    mode: str = "hybrid"
+
+
+@dataclass(frozen=True, slots=True)
 class SubmitRunCommand:
     principal_id: str
     session_id: UUID | None
     task_kind: TaskKind
-    input: StructuredProfileInput
+    input: StructuredProfileInput | PolicyQaInput
     idempotency_key: str
 
 
@@ -223,7 +272,7 @@ class RunView:
     cancel_requested_at: datetime | None
     current_interrupt: InterruptView | None
     result: ResultReference | None
-    result_payload: AlgorithmPreviewPayload | None
+    result_payload: AlgorithmPreviewPayload | PolicyEvidencePayload | None
     created_at: datetime
     updated_at: datetime
     expires_at: datetime

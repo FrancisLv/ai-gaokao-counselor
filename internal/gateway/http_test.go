@@ -86,6 +86,44 @@ func TestCreatePlanReturnsRunIDThroughHTTP(t *testing.T) {
 	}
 }
 
+func TestCreatePolicyQueryReturnsRunIDThroughHTTP(t *testing.T) {
+	client := &fakeRunClient{}
+	ts := newGatewayHTTPServer(t, client)
+	body := []byte(`{
+		"query_text":"转专业政策是什么？",
+		"province":"湖南",
+		"application_year":2025,
+		"category":"物理类",
+		"batch":"本科批",
+		"school_ids":["1001"],
+		"document_types":["charter"],
+		"mode":"keyword",
+		"idempotency_key":"gateway-policy-query"
+	}`)
+	req, err := http.NewRequest(
+		http.MethodPost,
+		ts.URL+"/v1/policy-queries",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-principal-id", "principal-policy")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if client.submitReq.GetTaskKind() != orchestratorv1.TaskKind_POLICY_QA {
+		t.Fatalf("task_kind = %v", client.submitReq.GetTaskKind())
+	}
+}
+
 func TestGetRunReturnsResumeContextThroughHTTP(t *testing.T) {
 	client := &fakeRunClient{}
 	ts := newGatewayHTTPServer(t, client)
@@ -122,6 +160,73 @@ func TestGetRunReturnsResumeContextThroughHTTP(t *testing.T) {
 	}
 	if got["expiresAt"] == nil {
 		t.Fatal("缺少 expiresAt")
+	}
+}
+
+func TestGetRunReturnsPolicyEvidenceThroughHTTP(t *testing.T) {
+	client := &fakeRunClient{
+		getReply: &orchestratorv1.RunViewReply{
+			RunId:        "00000000-0000-0000-0000-000000000001",
+			SessionId:    "00000000-0000-0000-0000-000000000002",
+			TaskKind:     orchestratorv1.TaskKind_POLICY_QA,
+			State:        orchestratorv1.RunState_SUCCEEDED,
+			Stage:        "EVIDENCE_READY",
+			StateVersion: 3,
+			ReleaseId:    "rel-policy",
+			Result: &orchestratorv1.ResultReference{
+				ResultVersion: "00000000-0000-0000-0000-000000000003",
+				ResultKind:    "POLICY_EVIDENCE",
+			},
+			PolicyEvidence: &orchestratorv1.PolicyEvidenceResult{
+				ResultVersion:     "00000000-0000-0000-0000-000000000003",
+				ResultKind:        "POLICY_EVIDENCE",
+				RunId:             "00000000-0000-0000-0000-000000000001",
+				ReleaseId:         "rel-policy",
+				RetrievalStatus:   "FOUND",
+				VectorCandidates:  1,
+				KeywordCandidates: 1,
+				Evidence: []*orchestratorv1.PolicyEvidenceItem{
+					{
+						EvidenceId: "evidence-policy",
+						DocId:      "doc-policy",
+						ChunkId:    "chunk-policy",
+						Title:      "测试政策",
+						Excerpt:    "学生可以申请转专业。",
+						ReleaseId:  "rel-policy",
+					},
+				},
+			},
+		},
+	}
+	ts := newGatewayHTTPServer(t, client)
+	req, err := http.NewRequest(
+		http.MethodGet,
+		ts.URL+"/v1/runs/00000000-0000-0000-0000-000000000001",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("x-principal-id", "principal-policy")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	policyEvidence, ok := got["policyEvidence"].(map[string]any)
+	if !ok {
+		t.Fatalf("policyEvidence = %#v", got["policyEvidence"])
+	}
+	if policyEvidence["retrievalStatus"] != "FOUND" {
+		t.Fatalf("retrievalStatus = %#v", policyEvidence["retrievalStatus"])
 	}
 }
 

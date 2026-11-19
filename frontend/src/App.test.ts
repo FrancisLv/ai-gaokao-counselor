@@ -12,6 +12,134 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("Run verification console", () => {
+  it("submits a typed policy query", async () => {
+    vi.stubEnv("VITE_PRINCIPAL_ID", "principal-policy");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/v1/policy-queries" && init?.method === "POST") {
+        return jsonResponse({
+          runId: "run-policy",
+          sessionId: "session-policy",
+          status: "accepted",
+        });
+      }
+      if (url.startsWith("/v1/runs/run-policy/events")) {
+        return new Response("", {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      throw new Error(`unexpected request: ${init?.method ?? "GET"} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(App);
+
+    await wrapper.get('[data-testid="mode-policy"]').trigger("click");
+    await wrapper.get('[data-testid="policy-query"]').setValue(
+      "转专业政策是什么？",
+    );
+    await wrapper.get('[data-testid="policy-form"]').trigger("submit");
+    await flushPromises();
+
+    const requestInit = fetchMock.mock.calls[0]?.[1];
+    const request = JSON.parse(requestInit!.body as string);
+    expect(request).toMatchObject({
+      query_text: "转专业政策是什么？",
+      province: "湖南",
+      application_year: 2025,
+      category: "物理类",
+      batch: "本科批",
+      school_ids: ["1001"],
+      document_types: ["charter"],
+      mode: "hybrid",
+    });
+    expect(request).not.toHaveProperty("user_text");
+    wrapper.unmount();
+  });
+
+  it("renders policy evidence as untrusted plain text", async () => {
+    vi.stubEnv("VITE_PRINCIPAL_ID", "principal-policy");
+    history.replaceState({}, "", "/?run=run-policy");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(policyEvidenceRunView())),
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="policy-form"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="policy-status"]').text()).toContain(
+      "已找到可核验的文档证据",
+    );
+    expect(wrapper.get('[data-testid="evidence-title"]').text()).toBe(
+      "湖南测试大学2025年招生章程",
+    );
+    expect(wrapper.get('[data-testid="evidence-section"]').text()).toContain(
+      "第二章 > 转专业",
+    );
+    expect(wrapper.get('[data-testid="evidence-excerpt"]').text()).toContain(
+      "<img src=x onerror=alert(1)>",
+    );
+    expect(wrapper.find("img").exists()).toBe(false);
+    expect(wrapper.get('[data-testid="evidence-hash"]').text()).toBe(
+      "aaaaaaaaaaaaaa",
+    );
+    expect(wrapper.get('[data-testid="evidence-locator"]').text()).toBe("0–14");
+    expect(wrapper.get('[data-testid="evidence-source"]').attributes()).toMatchObject(
+      {
+        href: "https://example.invalid/charter",
+        rel: "noopener noreferrer",
+        target: "_blank",
+      },
+    );
+  });
+
+  it("keeps NO_EVIDENCE distinct from no restriction", async () => {
+    vi.stubEnv("VITE_PRINCIPAL_ID", "principal-policy");
+    history.replaceState({}, "", "/?run=run-policy");
+    const run = policyEvidenceRunView();
+    run.policyEvidence.retrievalStatus = "NO_EVIDENCE";
+    run.policyEvidence.evidence = [];
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(run)));
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="policy-status"]').text()).toContain(
+      "未检索到可靠证据",
+    );
+    expect(wrapper.text()).toContain("不代表没有相关政策限制");
+    expect(wrapper.text()).not.toContain("没有限制");
+    expect(wrapper.find('[data-testid="evidence-card"]').exists()).toBe(false);
+  });
+
+  it("explains an unsupported retrieval scope without inventing evidence", async () => {
+    vi.stubEnv("VITE_PRINCIPAL_ID", "principal-policy");
+    history.replaceState({}, "", "/?run=run-policy");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          runId: "run-policy",
+          sessionId: "session-policy",
+          taskKind: "POLICY_QA",
+          state: "FAILED",
+          stage: "RETRIEVING",
+          terminalReason: "UNSUPPORTED_SCOPE",
+          stateVersion: 3,
+          releaseId: "release-policy",
+        }),
+      ),
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="policy-failure"]').text()).toContain(
+      "当前适用范围不受支持",
+    );
+    expect(wrapper.find('[data-testid="policy-evidence"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("无限制");
+  });
+
   it("submits a structured profile and displays the run id", async () => {
     vi.stubEnv("VITE_PRINCIPAL_ID", "principal-a");
     const fetchMock = vi.fn().mockResolvedValue(
@@ -555,6 +683,55 @@ function succeededRunView() {
       internalControlledOnly: true,
       formalRecommendation: false,
       resultKind: "ALGORITHM_PREVIEW",
+    },
+  };
+}
+
+function policyEvidenceRunView() {
+  return {
+    runId: "run-policy",
+    sessionId: "session-policy",
+    taskKind: "POLICY_QA",
+    state: "SUCCEEDED",
+    stage: "EVIDENCE_READY",
+    stateVersion: 3,
+    releaseId: "release-policy",
+    result: {
+      resultVersion: "result-policy",
+      resultKind: "POLICY_EVIDENCE",
+    },
+    policyEvidence: {
+      resultVersion: "result-policy",
+      resultKind: "POLICY_EVIDENCE",
+      runId: "run-policy",
+      releaseId: "release-policy",
+      retrievalStatus: "FOUND",
+      vectorCandidates: 2,
+      keywordCandidates: 1,
+      rerankEnabled: false,
+      evidence: [
+        {
+          evidenceId: "evidence-policy",
+          docId: "doc-charter",
+          chunkId: "chunk-transfer",
+          title: "湖南测试大学2025年招生章程",
+          documentType: "charter",
+          issuer: "湖南测试大学",
+          sourceUri: "https://example.invalid/charter",
+          fetchedAt: "2025-01-02T00:00:00Z",
+          sectionPath: "第二章 > 转专业",
+          excerpt: "<img src=x onerror=alert(1)>",
+          excerptSha256: "a".repeat(64),
+          charStart: 0,
+          charEnd: 14,
+          regions: ["湖南"],
+          categories: ["物理类"],
+          batches: ["本科批"],
+          validFrom: "2025-01-01",
+          validTo: "2025-12-31",
+          releaseId: "release-policy",
+        },
+      ],
     },
   };
 }

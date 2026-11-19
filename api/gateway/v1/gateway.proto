@@ -15,6 +15,15 @@ service Gateway {
     option (google.api.http) = { post: "/v1/plans" body: "*" };
   }
 
+  // 提交一次政策证据检索；不生成最终政策答案。
+  rpc CreatePolicyQuery(CreatePolicyQueryRequest)
+      returns (CreatePolicyQueryReply) {
+    option (google.api.http) = {
+      post: "/v1/policy-queries"
+      body: "*"
+    };
+  }
+
   // 人工确认 / 修正画像（HITL 恢复点）。
   rpc ConfirmProfile(ConfirmProfileRequest) returns (ConfirmProfileReply) {
     option (google.api.http) = {
@@ -62,6 +71,25 @@ message CreatePlanReply {
   string session_id = 1;
   string status     = 2; // accepted | interrupted
   string run_id     = 3;
+}
+
+message CreatePolicyQueryRequest {
+  string query_text = 1;
+  string province = 2;
+  int32 application_year = 3;
+  string category = 4;
+  string batch = 5;
+  repeated string school_ids = 6;
+  repeated string document_types = 7;
+  string mode = 8;
+  string session_id = 9;
+  string idempotency_key = 10;
+}
+
+message CreatePolicyQueryReply {
+  string session_id = 1;
+  string status = 2;
+  string run_id = 3;
 }
 
 message ConfirmProfileRequest {

@@ -84,6 +84,43 @@ export interface AlgorithmPreview {
   resultKind: "ALGORITHM_PREVIEW";
 }
 
+export interface PolicyEvidenceItem {
+  evidenceId: string;
+  docId: string;
+  chunkId: string;
+  title: string;
+  documentType: string;
+  issuer: string;
+  sourceUri: string;
+  fetchedAt?: string;
+  sectionPath: string;
+  excerpt: string;
+  excerptSha256: string;
+  charStart?: number;
+  charEnd?: number;
+  regions: string[];
+  categories: string[];
+  batches: string[];
+  validFrom: string;
+  validTo?: string;
+  releaseId: string;
+}
+
+export interface PolicyEvidenceResult {
+  resultVersion: string;
+  resultKind: "POLICY_EVIDENCE";
+  runId: string;
+  releaseId: string;
+  retrievalStatus: string;
+  degradedReason?: string;
+  vectorCandidates: number;
+  keywordCandidates: number;
+  rerankEnabled: boolean;
+  rerankModel?: string;
+  rerankConfigVersion?: string;
+  evidence: PolicyEvidenceItem[];
+}
+
 export interface CandidateWithProb {
   candidate?: {
     universityCode: string;
@@ -125,7 +162,19 @@ export interface RunView {
   confirmedProfileVersion?: string;
   currentInterrupt?: InterruptView;
   resultPreview?: AlgorithmPreview;
+  policyEvidence?: PolicyEvidenceResult;
   expiresAt?: string;
+}
+
+export interface PolicyQueryForm {
+  queryText: string;
+  province: string;
+  applicationYear: number;
+  category: "物理类" | "历史类" | "不限";
+  batch: "本科批" | "不限";
+  schoolIds: string;
+  documentTypes: string;
+  mode: "hybrid" | "vector" | "keyword";
 }
 
 export interface RunEvent {

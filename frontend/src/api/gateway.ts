@@ -1,6 +1,7 @@
 import type {
   CancelReceipt,
   CreatePlanReply,
+  PolicyQueryForm,
   RunEvent,
   RunView,
   StructuredProfileForm,
@@ -57,6 +58,34 @@ export async function createPlan(
         },
         idempotency_key: idempotencyKey,
       }),
+    }),
+  });
+  return parseResponse<CreatePlanReply>(response);
+}
+
+export async function createPolicyQuery(
+  query: PolicyQueryForm,
+  idempotencyKey: string,
+): Promise<CreatePlanReply> {
+  const response = await fetch("/v1/policy-queries", {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({
+      query_text: query.queryText,
+      province: query.province,
+      application_year: query.applicationYear,
+      category: query.category,
+      batch: query.batch,
+      school_ids: query.schoolIds
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+      document_types: query.documentTypes
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+      mode: query.mode,
+      idempotency_key: idempotencyKey,
     }),
   });
   return parseResponse<CreatePlanReply>(response);

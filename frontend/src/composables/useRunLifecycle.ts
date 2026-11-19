@@ -5,12 +5,14 @@ import {
   cancelRun,
   confirmProfile,
   createPlan,
+  createPolicyQuery,
   getRun,
   subscribeRunEvents,
 } from "../api/gateway";
 import type {
   CancelReceipt,
   CreatePlanReply,
+  PolicyQueryForm,
   RunEvent,
   RunView,
 } from "../api/types";
@@ -28,6 +30,17 @@ export function useRunLifecycle() {
     score: 600,
     subjects: [] as string[],
   });
+  const policy = reactive<PolicyQueryForm>({
+    queryText: "转专业政策是什么？",
+    province: "湖南",
+    applicationYear: 2025,
+    category: "物理类",
+    batch: "本科批",
+    schoolIds: "1001",
+    documentTypes: "charter",
+    mode: "hybrid",
+  });
+  const taskMode = ref<"plan" | "policy">("plan");
   const principalId =
     import.meta.env.VITE_PRINCIPAL_ID?.trim() || "未配置";
   const receipt = ref<CreatePlanReply | null>(null);
@@ -40,6 +53,7 @@ export function useRunLifecycle() {
   const connected = ref(false);
   const cancelReceipt = ref<CancelReceipt | null>(null);
   const submitKey = ref(newKey("submit"));
+  const policySubmitKey = ref(newKey("policy-submit"));
   const confirmKey = ref(newKey("confirm"));
   const cancelKey = ref(newKey("cancel"));
   const lastEventSeq = computed(() =>
@@ -79,6 +93,39 @@ export function useRunLifecycle() {
         taskKind: "GENERATE_PLAN",
         state: "QUEUED",
         stage: "INTAKE",
+        stateVersion: 1,
+        releaseId: "pending",
+      };
+      void connectEvents(receipt.value.runId);
+    } catch (cause) {
+      error.value = errorMessage(cause);
+    } finally {
+      submitting.value = false;
+    }
+  }
+
+  async function submitPolicy(): Promise<void> {
+    if (submitting.value) return;
+    submitting.value = true;
+    error.value = "";
+    events.value = [];
+    cancelReceipt.value = null;
+    try {
+      receipt.value = await createPolicyQuery(
+        {
+          ...policy,
+          schoolIds: policy.schoolIds,
+          documentTypes: policy.documentTypes,
+        },
+        policySubmitKey.value,
+      );
+      rememberRun(receipt.value.runId);
+      run.value = {
+        runId: receipt.value.runId,
+        sessionId: receipt.value.sessionId,
+        taskKind: "POLICY_QA",
+        state: "QUEUED",
+        stage: "RETRIEVAL",
         stateVersion: 1,
         releaseId: "pending",
       };
@@ -133,6 +180,9 @@ export function useRunLifecycle() {
   async function refreshRun(runId: string): Promise<void> {
     try {
       run.value = await getRun(runId);
+      if (run.value.taskKind === "POLICY_QA") {
+        taskMode.value = "policy";
+      }
       rememberRun(runId);
     } catch (cause) {
       error.value = errorMessage(cause);
@@ -177,7 +227,9 @@ export function useRunLifecycle() {
 
   return {
     principalId,
+    taskMode,
     profile,
+    policy,
     receipt,
     run,
     events,
@@ -188,6 +240,7 @@ export function useRunLifecycle() {
     connected,
     cancelReceipt,
     submit,
+    submitPolicy,
     confirm,
     cancel,
     refreshRun,

@@ -32,7 +32,11 @@ func main() {
 	}
 	defer conn.Close()
 
-	hs := http.NewServer(http.Address(":8000"))
+	gatewayAddr := os.Getenv("GATEWAY_ADDR")
+	if gatewayAddr == "" {
+		gatewayAddr = ":8000"
+	}
+	hs := http.NewServer(http.Address(gatewayAddr))
 	service := gateway.NewServiceForOrchestrator(
 		orchestratorv1.NewOrchestratorClient(conn),
 	)
