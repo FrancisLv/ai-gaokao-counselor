@@ -319,7 +319,7 @@ class RetrievePolicy:
             "document_types": list(query.document_types),
         }
         sql = """
-            WITH scope_candidates AS MATERIALIZED (
+            WITH ann_candidates AS MATERIALIZED (
                 SELECT
                     c.id AS chunk_id,
                     c.doc_id,
@@ -329,7 +329,6 @@ class RetrievePolicy:
                     c.char_start,
                     c.char_end,
                     c.chunk_set_version,
-                    c.embedding,
                     d.title,
                     d.document_type,
                     d.issuer,
@@ -344,7 +343,8 @@ class RetrievePolicy:
                     a.categories,
                     a.batches,
                     a.valid_from,
-                    a.valid_to
+                    a.valid_to,
+                    c.embedding <=> %(query_embedding)s::vector AS vector_distance
                 FROM release_policy_doc m
                 JOIN policy_chunk_set cs
                   ON cs.chunk_set_version = m.chunk_set_version
@@ -408,20 +408,31 @@ class RetrievePolicy:
                       OR d.document_type = ANY(%(document_types)s::text[])
                   )
                   AND c.embedding IS NOT NULL
+                ORDER BY c.embedding <=> %(query_embedding)s::vector
+                LIMIT %(pool_k)s
             )
             SELECT
-                scope_candidates.*,
-                embedding <=> %(query_embedding)s::vector AS vector_distance,
-                COUNT(*) OVER () AS candidate_count
-            FROM scope_candidates
+                ann_candidates.*
+            FROM ann_candidates
             ORDER BY vector_distance, chunk_id ASC
-            LIMIT %(pool_k)s
         """
-        with self._conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(sql, params)
-            rows = [dict(row) for row in cur.fetchall()]
-        count = int(rows[0]["candidate_count"]) if rows else 0
-        return rows, count
+        with self._conn.transaction():
+            with self._conn.cursor(row_factory=dict_row) as cur:
+                # Accessing the vector operator loads the extension before its
+                # custom GUCs are set in a fresh backend.
+                cur.execute("SELECT NULL::vector <=> NULL::vector")
+                cur.execute(
+                    """
+                    SELECT
+                        set_config('hnsw.iterative_scan', 'strict_order', true),
+                        set_config('hnsw.max_scan_tuples', '2147483647', true),
+                        set_config('hnsw.ef_search', %s, true)
+                    """,
+                    (str(max(40, params["pool_k"])),),
+                )
+                cur.execute(sql, params)
+                rows = [dict(row) for row in cur.fetchall()]
+        return rows, len(rows)
 
     def _keyword_candidates(
         self,

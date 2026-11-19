@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import unittest
 from collections.abc import Mapping
+from contextlib import nullcontext
 from datetime import date, datetime, timezone
 import hashlib
 import os
@@ -38,7 +39,11 @@ class FakeCursor:
     def execute(self, sql, params=None):
         self.sql = (*self.sql, sql)
         self.params = (*self.params, params)
-        self._current = next(self._responses)
+        normalized = " ".join(sql.split())
+        if normalized.startswith(("SELECT NULL::vector <=>", "SELECT set_config(")):
+            self._current = {}
+        else:
+            self._current = next(self._responses)
         if isinstance(self._current, BaseException):
             raise self._current
 
@@ -55,6 +60,50 @@ class FakeConnection:
 
     def cursor(self, row_factory=None):
         return self.cursor_obj
+
+    def transaction(self):
+        return nullcontext()
+
+
+class TracingCursor:
+    def __init__(self, cursor, capture):
+        self._cursor = cursor
+        self._capture = capture
+
+    def __enter__(self):
+        self._cursor.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self._cursor.__exit__(*args)
+
+    def execute(self, sql, params=None):
+        if "<=>" in sql:
+            self._capture.vector_sql = sql
+            self._capture.vector_params = params
+        return self._cursor.execute(sql, params)
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+
+class TracingConnection:
+    def __init__(self, conn):
+        self._conn = conn
+        self.vector_sql = None
+        self.vector_params = None
+
+    def cursor(self, row_factory=None):
+        return TracingCursor(
+            self._conn.cursor(row_factory=row_factory),
+            self,
+        )
+
+    def transaction(self):
+        return self._conn.transaction()
 
 
 class DeterministicEmbedder:
@@ -703,6 +752,115 @@ class PolicyRetrievalPostgresTests(unittest.TestCase):
             ["doc-match"],
         )
         self.assertEqual(result.diagnostics.vector_candidates, 1)
+
+    def test_vector_query_uses_hnsw_cosine_order_for_filtered_candidates(self):
+        release_id = self._seed_release("rel-vector-hnsw-plan-test")
+        for doc_id, changes in (
+            ("doc-match", {"embedding_axis": 0}),
+            ("doc-in-scope", {"embedding_axis": 1}),
+            ("doc-wrong-province", {"regions": ("湖北",)}),
+            ("doc-wrong-category", {"categories": ("历史类",)}),
+            ("doc-wrong-school", {"school_id": "2002"}),
+        ):
+            self._seed_policy_document(release_id, doc_id, **changes)
+
+        tracing_conn = TracingConnection(self.conn)
+        result = RetrievePolicy(
+            tracing_conn,
+            embedder=DeterministicEmbedder(vector=[1.0] + [0.0] * 1023),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(
+            PolicyRetrievalQuery(
+                principal_id="principal-test",
+                query_text="转专业",
+                scope=ApplicabilityScope("湖南", 2025, "物理类", "本科批"),
+                release_id=release_id,
+                mode="vector",
+                school_ids=("1001",),
+                top_k=2,
+                pool_k=2,
+            )
+        )
+
+        self.assertEqual(result.status, "FOUND")
+        self.assertEqual(
+            [item.document.doc_id for item in result.evidence],
+            ["doc-match", "doc-in-scope"],
+        )
+        self.assertIsNotNone(tracing_conn.vector_sql)
+
+        with self.conn.transaction():
+            self.conn.execute("SET LOCAL enable_seqscan = off")
+            self.conn.execute("SET LOCAL enable_sort = off")
+            self.conn.execute("SET LOCAL hnsw.iterative_scan = 'strict_order'")
+            explained = self.conn.execute(
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "
+                + tracing_conn.vector_sql,
+                tracing_conn.vector_params,
+            ).fetchone()
+
+        plan = explained["QUERY PLAN"][0]["Plan"]
+        nodes = []
+
+        def visit(node):
+            nodes.append(node)
+            for child in node.get("Plans", ()):
+                visit(child)
+
+        visit(plan)
+        self.assertTrue(
+            any(
+                node.get("Relation Name") == "policy_chunk"
+                and node.get("Index Name") == "idx_chunk_embedding"
+                and any(
+                    "<=>" in item
+                    for item in (
+                        (node["Order By"],)
+                        if isinstance(node.get("Order By"), str)
+                        else node.get("Order By", ())
+                    )
+                )
+                for node in nodes
+            ),
+            plan,
+        )
+
+    def test_filtered_ann_does_not_starve_on_cross_scope_decoys(self):
+        release_id = self._seed_release("rel-vector-filtered-ann-test")
+        for index in range(60):
+            self._seed_policy_document(
+                release_id,
+                f"doc-decoy-{index:02d}",
+                regions=("湖北",),
+                embedding_axis=0,
+            )
+        self._seed_policy_document(
+            release_id,
+            "doc-in-scope",
+            embedding_axis=1,
+        )
+
+        result = RetrievePolicy(
+            self.conn,
+            embedder=DeterministicEmbedder(vector=[1.0] + [0.0] * 1023),
+            today=lambda: date(2025, 11, 19),
+        ).retrieve(
+            PolicyRetrievalQuery(
+                principal_id="principal-test",
+                query_text="转专业",
+                scope=ApplicabilityScope("湖南", 2025, "物理类", "本科批"),
+                release_id=release_id,
+                mode="vector",
+                top_k=1,
+                pool_k=1,
+            )
+        )
+
+        self.assertEqual(result.status, "FOUND")
+        self.assertEqual(
+            [item.document.doc_id for item in result.evidence],
+            ["doc-in-scope"],
+        )
 
     def test_vector_mode_rejects_a_chunk_with_a_different_index_identity(self):
         release_id = self._seed_release("rel-vector-chunk-mismatch-test")
