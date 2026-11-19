@@ -172,16 +172,22 @@ VerificationReport
   claims: list<ClaimVerification>
   blocking_reasons: list<string>
   stripped_claim_ids: list<string>
+  citation_coverage: number
 ```
 
 ```text
 ClaimVerification
   claim_id
+  criticality: CRITICAL | NORMAL
   status: VERIFIED | CONTRADICTED | UNVERIFIABLE
   reason: stable code
   checked_against: list<evidence_id>
   deterministic: bool
 ```
+
+`citation_coverage` 按最终保留的事实性 Claim 计算。`BLOCKED` 报告没有可发布结果，
+覆盖率为 `0.0`；没有保留事实性 Claim 时同样不能返回可发布报告。逐 Claim 状态、
+阻断原因、检查证据和剥离 ID 均按稳定键排序。
 
 ### 6.1 文档事实
 

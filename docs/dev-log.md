@@ -1736,3 +1736,38 @@ LLM 规则生成。
 - 本票只定义派生事实校验与注入边界，不在 orchestrator 内重写算法。
 - 普通 `UNVERIFIABLE` 剥离、统一正式门禁、不可变证据包持久化和原子发布仍由后续
   M4c tickets 完成。
+
+## 53. M4c-04：Claim 关键性、剥离与 VerificationReport 状态机
+
+**日期与范围**：2026-11-19，对应 issue #28。通过同一个 `VerifyPackage`
+主 seam 汇总三类 Claim，完成 `PASS / BLOCKED / PARTIAL` 报告状态、关键性门禁和
+普通未知剥离；不实现资格正式门禁、结果持久化或 RunLifecycle 发布接线。
+
+### 实现
+
+- `ClaimVerification` additive 返回 Claim 的关键性；`VerificationReport` 返回最终
+  保留事实的 citation coverage。
+- 任一 `CONTRADICTED` 均阻断；任一 `CRITICAL / UNVERIFIABLE` 返回
+  `BLOCKED / CRITICAL_CLAIM_UNVERIFIABLE`。只有 `NORMAL / UNVERIFIABLE` 可进入
+  确定性剥离。
+- 存在普通未知且仍有可发布的高关键事实时返回 `PARTIAL`，并稳定列出
+  `stripped_claim_ids`；若所有事实都被剥离，则不生成可发布报告。
+- Claim/Evidence 类型不匹配、重复 Claim/evidence ID、非法关键性和畸形 Claim
+  属于结构性失败，不能被普通剥离绕过。
+- 报告按 Claim ID、Evidence ID、blocking reason 与 stripped Claim ID 稳定排序；
+  同一输入重复运行返回相同状态、原因、检查证据和覆盖结果。
+
+### 验证
+
+- `VerifyPackage` 行为测试新增普通未知剥离、关键未知、矛盾优先级、错误类型、
+  重复身份、非法关键性、零保留事实、三类证据混合 `PARTIAL`、citation coverage
+  和阻断/剥离顺序确定性。
+- `make py-check py-test` 通过：253 tests OK，112 个依赖真实库/外部服务的用例按
+  既有约定跳过。
+
+### 边界
+
+- citation coverage 按最终保留的事实性 Claim 计算；`BLOCKED` 没有可发布结果，
+  因此覆盖率为 `0.0`。
+- 资格 `COMPLETE / PASS_PARTIAL` 门禁、必需说明校验、不可变证据包持久化和原子
+  发布仍由后续 M4c tickets 完成。
