@@ -143,6 +143,8 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                 statement = statement.strip()
                 if statement:
                     await conn.execute(statement)
+            migration = ROOT / "migrations" / "22_rule_lifecycle.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
             migration = ROOT / "migrations" / "23_rule_expression_contract.sql"
             for statement in migration.read_text(encoding="utf-8").split(";"):
                 statement = statement.strip()
@@ -165,10 +167,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
 
     async def _apply_sql_file(self, conn, relative_path: str) -> None:
         sql = (ROOT / relative_path).read_text(encoding="utf-8")
-        for statement in sql.split(";"):
-            statement = statement.strip()
-            if statement:
-                await conn.execute(statement)
+        await conn.execute(sql)
 
     async def reset_to_fresh_schema(self) -> None:
         conn = await self._connect()
@@ -196,6 +195,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await self._apply_sql_file(conn, "migrations/19_policy_evidence_results.sql")
             await self._apply_sql_file(conn, "migrations/20_policy_relevance_policy.sql")
             await self._apply_sql_file(conn, "migrations/21_eligibility_rules.sql")
+            await self._apply_sql_file(conn, "migrations/22_rule_lifecycle.sql")
             await self._apply_sql_file(conn, "migrations/23_rule_expression_contract.sql")
         finally:
             await conn.close()

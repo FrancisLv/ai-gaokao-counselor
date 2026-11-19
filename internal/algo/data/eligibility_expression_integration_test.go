@@ -51,7 +51,7 @@ func TestIntegration_RuleExpressionStorageContract(t *testing.T) {
 		query := `INSERT INTO rule_version (
 				rule_id, version, rule_key, rule_type, scope, required_profile_fields,
 				expression, expression_version, outcome_when_true, reason_code,
-				review_status, valid_from, release_id, source_evidence
+				review_status, valid_from, source_evidence, created_by
 			) VALUES (
 				$1, 1, $1, 'OTHER_HARD', '{}'::jsonb, '["category"]'::jsonb,
 				$2::jsonb, $3, 'FAIL', 'RULE_FIXTURE', 'DRAFT', NOW(), $4,
