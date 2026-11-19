@@ -71,7 +71,7 @@
 | FR | 现状 | 证据（文件:行） | 剩余工作 | 关联 | 里程碑 |
 | --- | --- | --- | --- | --- | --- |
 | FR-18 报告生成（P0） | ⛔ | `build.py:38` report 节点 TODO；`state.py:62` 有 `report` 字段但无生成逻辑 | report 节点 + 强制免责声明 + 禁「保证录取」；数值由结构化模板渲染 | P1-05 | M5 |
-| FR-19 事实校验 Verifier（P0） | ⛔ | `build.py:38` verify 节点 TODO；`MAX_VERIFY_RETRIES=2` 已定义但无校验体 | 三类证据模型（文档/结构化/派生）落地；确定性重算比对；打回重写≤2、回算≤2；超限剥离 | P1-05 | M4/M5 |
+| FR-19 事实校验 Verifier（P0） | 🟡 Verifier seam 已闭合 | `services/orchestrator/evidence/verifier.py` 已实现唯一 `VerifyPackage` seam、三类证据、确定性重算/比对、普通剥离和 `formal-gate-v1` 资格/版本/说明门禁；`build.py:38` verify 节点仍为 TODO | 将报告接入图内 verify 节点与正式发布链路；实现打回重写≤2、回算≤2、超限剥离；补证据包持久化与发布事务 | P1-05 | M4/M5 |
 | FR-20 LLM 治理与成本闸门（P0） | ⛔ 仅记账表 | `internal/llmgw/service.go:24,35` `Chat/StreamChat` TODO；`00_schema.sql:353` `llm_call_log` 有 trace/role/model/prompt_hash/token/cost/latency，但**无原子预占+结算、无 logical_call_id/attempt_id**；`:409` `data_version` 为可变 int（非不可变 release_id） | role→model 路由；prompt_hash 缓存（key 携 `release_id`）；Budget Guard 原子预占+结算+账本；早期 Python 直连标注「无完整治理实验链路」 | P1-11, P1-12 | M4/M5 |
 | FR-21 限流与并发保护（P0） | ⛔ | `internal/gateway/service.go:16` 注释「限流器」为 TODO(M2) | 令牌桶限流 + 并发闸门（超限排队非 500）；公网发布前置 | P1-08 | M2/M4 |
 | FR-22 降级与故障处理（P0） | 🟡 | `state.py:66` 有 `degraded` 字段；PRD §7.4 隐私条款已按 R9 回填；但无实际降级路径逻辑（节点全 TODO） | 六类故障降级路径实现；体检/健康最小化+同意+限期+脱敏落地 | P1-03, P1-04, P1-06 | M5 |
@@ -200,6 +200,8 @@
 - `services/orchestrator/graph/nodes/retrieve.py` — 仅经 `RetrievePolicy` 的在线检索节点；其余图业务节点仍待实现
 - `services/orchestrator/rag/retrieve.py:6,24,160,201` — trgm 替代 tsvector / meta 过滤字段 / policy_chunk 查询
 - `services/orchestrator/rag/policy_retrieval.py` — release-bound `RetrievePolicy` 唯一主 seam、硬过滤与文档证据投影
+- `services/orchestrator/evidence/verifier.py` — 唯一 `VerifyPackage` seam、三类证据校验、`PASS/BLOCKED/PARTIAL` 与 `formal-gate-v1` 正式门禁
+- `services/orchestrator/tests/test_evidence_verification.py` — 三类证据、状态机、资格/版本/必需说明与录取承诺门禁行为测试
 - `services/orchestrator/tests/test_policy_retrieval.py` — release/scope/适用域/hash/locator/NO_EVIDENCE、关键词与 pgvector、索引身份故障和确定性外部行为测试
 - `data/golden/retrieval-hunan-2025-v0.2.0-draft/` — 30 条检索 Agent 草稿、可验证 interference 元数据、版本 manifest 与 case/dataset hash
 - `services/orchestrator/eval/retrieval_eval.py` — golden set loader、`RetrievePolicy` 评测 runner、recall/MRR/scope leak/first diff/baseline

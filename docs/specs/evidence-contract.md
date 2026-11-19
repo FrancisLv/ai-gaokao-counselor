@@ -164,6 +164,40 @@ EvidencePackage
   claims: list<Claim>
   evidence_registry: list<EvidenceRef>
   verifier_version: string
+  gate_context: FormalGateContext | null
+```
+
+`gate_context` 缺失时 fail closed。其运行时形状为：
+
+```text
+FormalGateContext
+  context_version: "formal-gate-v1"
+  release_id: string
+  profile_version: string
+  result_version: string
+  algorithm_config_version: string
+  algorithm_config_sha256: string
+  verifier_version: string
+  qualification: QualificationSummary
+  required_notices: list<RequiredNotice>
+
+QualificationSummary
+  status: COMPLETE | PARTIAL | BLOCKED
+  coverage: list<{rule_type, status: FULL | PARTIAL | NONE}>
+  groups: list<{
+    group_key,
+    status: PASS | PASS_PARTIAL | FAIL | UNKNOWN,
+    majors: list<{major_code, status}>,
+    restrictions: list<string>
+  }>
+  conflict_count: int
+  unknown_count: int
+
+RequiredNotice
+  notice_type: DISCLAIMER | RISK_NOTICE | NO_ADMISSION_GUARANTEE
+  normalized_text: string
+  content_sha256: string
+  evidence_refs: list<EvidenceRef>
 ```
 
 ```text
@@ -212,11 +246,17 @@ ClaimVerification
 - 所有 `CRITICAL` claim 为 `VERIFIED`；
 - 不存在 `CONTRADICTED` claim；
 - 所有证据可解析且属于同一 `release_id`；
-- 资格规则结果为 PASS 或明确允许的 PASS_PARTIAL；
-- 结果引用的 Profile、release、算法配置和 verifier 版本一致；
-- 免责声明和风险告警存在且未被改写。
+- 资格整体为 `COMPLETE`；候选组只能是 `PASS`，或没有 `UNKNOWN` 且保留受限专业说明的
+  `PASS_PARTIAL`。任何组 `UNKNOWN / FAIL`、专业 `MISSING_REQUIRED_FACT`、覆盖缺失或
+  非 `FULL`、规则冲突均阻断；
+- 结果引用的确认 Profile、release、result version、算法配置版本/hash 和 verifier
+  版本一致；`DERIVED` 证据的配置 hash 也必须与 gate context 一致；
+- `DISCLAIMER`、`RISK_NOTICE` 和 `NO_ADMISSION_GUARANTEE` 均存在，规范化文本 hash
+  未变，且绑定同 release 的可解析证据；
+- 所有 Claim 和必需说明都不得出现“保证录取”“包录取”“100% 录取”等等价承诺。
 
 非关键 `UNVERIFIABLE` claim 可由确定性模板剥离，只发布剩余已验证内容，并记录 `stripped_claim_ids`。关键 `UNVERIFIABLE` 不能通过剥离掩盖，必须阻断结果。
+任一全局门禁失败时报告为 `BLOCKED`，不得降级为可发布 `PARTIAL`。
 
 ## 8. 证据包生命周期
 
@@ -241,6 +281,28 @@ ClaimVerification
 | `CLAIM_UNSUPPORTED` | 事实没有足够证据 |
 | `CRITICAL_CLAIM_UNVERIFIABLE` | 关键事实无法验证 |
 | `VERIFIER_VERSION_MISSING` | 缺少 verifier 配置身份 |
+| `FORMAL_GATE_CONTEXT_MISSING` | 缺少正式门禁上下文 |
+| `FORMAL_GATE_CONTEXT_VERSION_UNSUPPORTED` | 门禁上下文版本不受支持 |
+| `RELEASE_MISMATCH` | 门禁上下文与证据包 release 不一致 |
+| `PROFILE_VERSION_MISMATCH` | 门禁上下文与确认 Profile 不一致 |
+| `RESULT_VERSION_MISMATCH` | 门禁上下文与结果版本不一致 |
+| `ALGORITHM_CONFIG_MISMATCH` | 算法配置身份缺失或与派生证据不一致 |
+| `VERIFIER_VERSION_MISMATCH` | Verifier 版本不一致 |
+| `ELIGIBILITY_NOT_COMPLETE` | 资格整体不是 `COMPLETE` |
+| `ELIGIBILITY_COVERAGE_MISSING` | 缺少规则覆盖声明 |
+| `ELIGIBILITY_COVERAGE_INCOMPLETE` | 存在非 `FULL` 覆盖 |
+| `ELIGIBILITY_RULE_CONFLICT` | 资格规则冲突计数非零 |
+| `ELIGIBILITY_UNKNOWN` | 资格未知计数非零 |
+| `ELIGIBILITY_GROUP_UNKNOWN` | 组或专业为 `UNKNOWN` |
+| `ELIGIBILITY_GROUP_FAIL` | 组为 `FAIL` |
+| `ELIGIBILITY_GROUP_STATUS_INVALID` | 组汇总与专业状态矛盾或组身份不完整 |
+| `ELIGIBILITY_MISSING_REQUIRED_FACT` | 专业缺少规则所需事实 |
+| `ELIGIBILITY_MAJOR_STATUS_INVALID` | 专业状态不在既有五态内 |
+| `ELIGIBILITY_RESTRICTED_MAJORS_MISSING` | `PASS_PARTIAL` 未保留受限专业说明 |
+| `PASS_PARTIAL_GROUP_OVERSTATED` | 将 `PASS_PARTIAL` 表述为整组可报 |
+| `REQUIRED_NOTICE_MISSING` | 必需说明或其证据缺失 |
+| `REQUIRED_NOTICE_MISMATCH` | 必需说明内容或 hash 被改写 |
+| `ADMISSION_GUARANTEE_FORBIDDEN` | 出现录取保证或等价承诺 |
 
 ## 10. 验收测试
 
