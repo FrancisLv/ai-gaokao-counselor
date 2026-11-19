@@ -143,6 +143,11 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                 statement = statement.strip()
                 if statement:
                     await conn.execute(statement)
+            migration = ROOT / "migrations" / "23_rule_expression_contract.sql"
+            for statement in migration.read_text(encoding="utf-8").split(";"):
+                statement = statement.strip()
+                if statement:
+                    await conn.execute(statement)
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS release_component (
@@ -191,6 +196,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await self._apply_sql_file(conn, "migrations/19_policy_evidence_results.sql")
             await self._apply_sql_file(conn, "migrations/20_policy_relevance_policy.sql")
             await self._apply_sql_file(conn, "migrations/21_eligibility_rules.sql")
+            await self._apply_sql_file(conn, "migrations/23_rule_expression_contract.sql")
         finally:
             await conn.close()
 

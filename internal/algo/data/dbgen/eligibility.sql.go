@@ -77,6 +77,7 @@ SELECT
     scope,
     required_profile_fields,
     expression,
+    expression_version,
     outcome_when_true,
     reason_code,
     review_status,
@@ -98,6 +99,7 @@ type ListPublishedEligibilityRulesRow struct {
 	Scope                 []byte
 	RequiredProfileFields []byte
 	Expression            []byte
+	ExpressionVersion     int32
 	OutcomeWhenTrue       string
 	ReasonCode            string
 	ReviewStatus          string
@@ -122,6 +124,7 @@ func (q *Queries) ListPublishedEligibilityRules(ctx context.Context, releaseID s
 			&i.Scope,
 			&i.RequiredProfileFields,
 			&i.Expression,
+			&i.ExpressionVersion,
 			&i.OutcomeWhenTrue,
 			&i.ReasonCode,
 			&i.ReviewStatus,

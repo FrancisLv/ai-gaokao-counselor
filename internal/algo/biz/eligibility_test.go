@@ -31,11 +31,16 @@ func TestEvaluateEligibility_SubjectRulePassAndFail(t *testing.T) {
 			Version:  1,
 			RuleKey:  "subject-requirement",
 			RuleType: RuleTypeSubjectRequirement,
+			RequiredProfileFields: []string{
+				FieldSubjects,
+				FieldCategory,
+			},
 			When: RuleExpression{Operator: OperatorNot, Child: &RuleExpression{
 				Operator: OperatorSubjectMatch,
 			}},
-			ReasonCode:  "SUBJECT_NOT_MATCHED",
-			ReviewState: ReviewStatePublished,
+			ReasonCode:        "SUBJECT_NOT_MATCHED",
+			ReviewState:       ReviewStatePublished,
+			ExpressionVersion: ExpressionVersionV1,
 			SourceEvidence: []EvidenceRef{{
 				EvidenceID:   "ev-subject",
 				EvidenceType: "DOCUMENT",
@@ -132,7 +137,9 @@ func TestEvaluateEligibility_BlocksReleaseAndDoesNotTreatUnknownAsPass(t *testin
 			Rules: []RuleVersion{{
 				RuleID: "rule-subject", Version: 1, RuleKey: "subject-requirement",
 				RuleType: RuleTypeSubjectRequirement, ReviewState: ReviewStatePublished,
-				When: RuleExpression{Operator: OperatorNot, Child: &RuleExpression{Operator: OperatorSubjectMatch}},
+				RequiredProfileFields: []string{FieldSubjects, FieldCategory},
+				ExpressionVersion:     ExpressionVersionV1,
+				When:                  RuleExpression{Operator: OperatorNot, Child: &RuleExpression{Operator: OperatorSubjectMatch}},
 			}},
 		}})
 		result, err := uc.EvaluateEligibility(context.Background(), eligibilityFixtureRequest())
@@ -156,7 +163,9 @@ func TestEvaluateEligibility_BlocksReleaseAndDoesNotTreatUnknownAsPass(t *testin
 			Rules: []RuleVersion{{
 				RuleID: "rule-subject", Version: 1, RuleKey: "subject-requirement",
 				RuleType: RuleTypeSubjectRequirement, ReviewState: ReviewStatePublished,
-				OutcomeWhenTrue: "PASS",
+				RequiredProfileFields: []string{FieldSubjects, FieldCategory},
+				ExpressionVersion:     ExpressionVersionV1,
+				OutcomeWhenTrue:       "PASS",
 				When: RuleExpression{Operator: OperatorNot, Child: &RuleExpression{
 					Operator: OperatorSubjectMatch,
 				}},
