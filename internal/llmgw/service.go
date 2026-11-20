@@ -108,6 +108,7 @@ type routeConfig struct {
 	maxOutput              int32
 	timeoutMS              int32
 	maxAttempts            int32
+	allowResultCache       bool
 	requiresResponseSchema bool
 	models                 []modelPrice
 }
@@ -142,6 +143,9 @@ type preparedCall struct {
 	reservedCost     int64
 	attemptTokenCap  int64
 	attemptCostCap   int64
+	cacheKeyHash     string
+	cacheClaimToken  string
+	cacheHit         bool
 	providerRequest  ProviderRequest
 	traceID          string
 	startedAt        time.Time
@@ -219,17 +223,54 @@ func (s *Service) Chat(ctx context.Context, req *llmgwv1.ChatRequest) (*llmgwv1.
 	if err != nil {
 		return nil, err
 	}
+
+	var (
+		cacheKeyHash string
+		cacheClaim   *resultCacheClaim
+	)
+	if resultCacheEligible(governed, route) {
+		identity, err := buildResultCacheIdentity(governed, route, prompt, schema)
+		if err != nil {
+			return nil, err
+		}
+		cacheKeyHash = identity.keyHash
+		var cached *resultCacheEntry
+		cacheClaim, cached, err = s.claimResultCache(ctx, identity, route.timeoutMS)
+		if err != nil {
+			return nil, err
+		}
+		if cached != nil {
+			return s.recordResultCacheHit(
+				ctx, governed, route, prompt, requestHash, identity.keyHash, cached,
+			)
+		}
+	}
+
 	prepared, replayed, err := s.reserveCall(
 		ctx, governed, route, prompt, schema, requestHash, inputBound,
 	)
 	if err != nil {
+		if cacheClaim != nil {
+			s.failResultCache(cacheClaim)
+		}
 		return nil, err
 	}
 	if replayed != nil {
+		if cacheClaim != nil {
+			s.failResultCache(cacheClaim)
+		}
 		return replayed, nil
 	}
+	prepared.cacheKeyHash = cacheKeyHash
+	if cacheClaim != nil {
+		prepared.cacheClaimToken = cacheClaim.token
+	}
 
-	return s.executeProviderAttempts(ctx, prepared)
+	response, err := s.executeProviderAttempts(ctx, prepared)
+	if err != nil && cacheClaim != nil {
+		s.failResultCache(cacheClaim)
+	}
+	return response, err
 }
 
 func (s *Service) executeProviderAttempts(ctx context.Context, prepared *preparedCall) (*llmgwv1.ChatResponse, error) {
@@ -444,6 +485,7 @@ func (s *Service) loadRoute(ctx context.Context, req governedRequest, binding ru
 		       route.max_output_tokens,
 		       route.timeout_ms,
 		       route.max_attempts,
+		       route.allow_result_cache,
 		       route.requires_response_schema,
 		       route.price_table_version,
 		       price.effective_at,
@@ -461,6 +503,7 @@ func (s *Service) loadRoute(ctx context.Context, req governedRequest, binding ru
 		&route.maxOutput,
 		&route.timeoutMS,
 		&route.maxAttempts,
+		&route.allowResultCache,
 		&route.requiresResponseSchema,
 		&route.priceVersion,
 		&effectiveAt,
@@ -1066,6 +1109,7 @@ func (s *Service) settleCall(
 	if err := tx.Commit(ctx); err != nil {
 		return nil, newStableError(codes.Internal, 500, "INTERNAL", "提交预算结算失败")
 	}
+	s.storeResultCache(prepared, result)
 	attempts, err := s.loadAttemptSummaries(ctx, prepared.logicalCallPK)
 	if err != nil {
 		return nil, err
@@ -1530,6 +1574,8 @@ func (s *Service) resolveExistingCall(
 		actualCost     *int64
 		resultPayload  []byte
 		attemptID      string
+		cacheHit       bool
+		cacheKeyHash   *string
 	)
 	err := s.pool.QueryRow(ctx, `
 		SELECT logical_call_pk::text,
@@ -1552,6 +1598,8 @@ func (s *Service) resolveExistingCall(
 		       actual_output_tokens,
 		       actual_cost_micro_usd,
 		       response_payload,
+		       cache_hit,
+		       cache_key_hash,
 		       COALESCE((
 		           SELECT attempt.attempt_id::text
 		           FROM llm_provider_attempt attempt
@@ -1568,7 +1616,8 @@ func (s *Service) resolveExistingCall(
 		&callPK, &ledgerID, &storedHash, &status, &errorReason, &routeVersion,
 		&priceVersion, &modelID, &promptKey, &promptVersion, &promptDigest,
 		&schemaKey, &schemaVersion, &schemaDigest, &reservedCost, &reservedTokens,
-		&actualIn, &actualOut, &actualCost, &resultPayload, &attemptID,
+		&actualIn, &actualOut, &actualCost, &resultPayload,
+		&cacheHit, &cacheKeyHash, &attemptID,
 	)
 	if err != nil {
 		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "读取逻辑调用幂等状态失败")
@@ -1635,6 +1684,8 @@ func (s *Service) resolveExistingCall(
 		selected:       modelPrice{modelID: modelID},
 		reservedTokens: reservedTokens,
 		reservedCost:   reservedCost,
+		cacheHit:       cacheHit,
+		cacheKeyHash:   valueOrEmpty(cacheKeyHash),
 	}
 	if promptKey != nil && promptVersion != nil {
 		prepared.prompt.key = *promptKey
@@ -1749,18 +1800,21 @@ func (s *Service) insertProjection(
 			trace_id, session_id, node, role, model, prompt_hash,
 			in_tokens, out_tokens, cost, latency_ms, status, error_message,
 			logical_call_id, ledger_entry_id, attempt_id, route_version,
-			price_table_version, cost_micro_usd, settlement_status
+			price_table_version, cost_micro_usd, settlement_status,
+			cache_hit, cache_key_hash
 		) VALUES (
 			NULLIF($1, ''), $2, $3, $3, $4, $5,
 			$6, $7, $8, $9, 'success', NULL,
-			$10, $11, $12, $13, $14, $15, 'SETTLED'
+			$10, $11, NULLIF($12, '')::uuid, $13, $14, $15, $16,
+			$17, $18
 		)`,
 		prepared.traceID, prepared.sessionID, prepared.role,
 		prepared.selected.modelID, prepared.requestHash,
 		result.InputTokens, result.OutputTokens, float64(actualCostMicroUSD)/1_000_000,
 		time.Since(prepared.startedAt).Milliseconds(), prepared.logicalCallID,
 		prepared.ledgerEntryID, prepared.attemptID, prepared.route.version,
-		prepared.route.priceVersion, actualCostMicroUSD,
+		prepared.route.priceVersion, actualCostMicroUSD, settlementStatus(prepared),
+		prepared.cacheHit, nullableText(prepared.cacheKeyHash),
 	)
 }
 
@@ -1820,16 +1874,16 @@ func buildResponse(
 		},
 		CostDetail: &llmgwv1.Cost{
 			CurrencyUnit:     "USD_MICRO",
-			ReservedMicroUsd: prepared.reservedCost,
+			ReservedMicroUsd: reservedCostForResponse(prepared),
 			ActualMicroUsd:   actualCostMicroUSD,
-			SettlementStatus: "SETTLED",
+			SettlementStatus: settlementStatus(prepared),
 		},
 		Attempts:              attempts,
 		LedgerEntryId:         prepared.ledgerEntryID,
 		RouteVersion:          prepared.route.version,
 		PriceTableVersion:     prepared.route.priceVersion,
 		LogicalCallId:         prepared.logicalCallID,
-		CacheHit:              false,
+		CacheHit:              prepared.cacheHit,
 		FinishReason:          result.FinishReason,
 		ReleaseId:             prepared.releaseID,
 		StructuredOutput:      structuredOutput,
@@ -1838,6 +1892,20 @@ func buildResponse(
 		ResponseSchemaKey:     schemaKey(prepared.schema),
 		ResponseSchemaVersion: schemaVersion(prepared.schema),
 	}
+}
+
+func settlementStatus(prepared *preparedCall) string {
+	if prepared.cacheHit {
+		return "CACHE_HIT"
+	}
+	return "SETTLED"
+}
+
+func reservedCostForResponse(prepared *preparedCall) int64 {
+	if prepared.cacheHit {
+		return 0
+	}
+	return prepared.reservedCost
 }
 
 func actualCost(model modelPrice, inputTokens, outputTokens int64) (int64, error) {
