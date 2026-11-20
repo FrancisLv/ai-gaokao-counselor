@@ -2250,25 +2250,28 @@ class RunLifecycle:
             principal_id=row["principal_id"],
             run_id=row["run_id"],
         )
-        task_input = dict(row["task_input"])
+        profile = await (
+            await conn.execute(
+                """
+                SELECT lifecycle, fields
+                FROM profile_revision
+                WHERE profile_version = %s
+                """,
+                (row["confirmed_profile_version"],),
+            )
+        ).fetchone()
+        if profile is None or profile["lifecycle"] != "CONFIRMED":
+            raise RunLifecycleError("PROFILE_NOT_CONFIRMED")
+        fields = profile["fields"]
         try:
             package, report_payload = build_formal_report(
                 preview=preview,
                 artifact=artifact,
                 scope=VerificationScope(
-                    province=str(
-                        task_input.get("province")
-                        or preview["audit_basis"]["province"]
-                    ),
-                    application_year=int(
-                        task_input.get("application_year")
-                        or row["created_at"].year
-                    ),
-                    category=str(
-                        task_input.get("category")
-                        or preview["audit_basis"]["category"]
-                    ),
-                    batch=str(task_input.get("batch") or "本科批"),
+                    province=str(fields["province"]["value"]),
+                    application_year=int(fields["application_year"]["value"]),
+                    category=str(fields["category"]["value"]),
+                    batch=str(fields["batch"]["value"]),
                     school_id=None,
                 ),
                 applicable_as_of=row["created_at"].date(),
