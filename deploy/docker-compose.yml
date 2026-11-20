@@ -27,8 +27,14 @@ services:
         GO_RUNTIME_IMAGE: ${GO_RUNTIME_IMAGE:-gcr.io/distroless/static-debian12}
         GOPROXY: ${BUILD_GOPROXY:-https://proxy.golang.org,direct}
     environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY:?set OPENAI_API_KEY in .env}
-    depends_on: [redis]
+      - LLMGW_DSN=postgres://app:app@postgres:5432/gaokao?sslmode=disable
+    working_dir: /
+    volumes:
+      - ../configs:/configs:ro
+    ports: ["9001:9001"]
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   algo:
     build:

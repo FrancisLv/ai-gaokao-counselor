@@ -5,6 +5,7 @@ package llmgw.v1;
 option go_package = "github.com/choucisan/ai-gaokao-counselor/api/llmgw/v1;llmgwv1";
 
 import "api/common/v1/common.proto";
+import "google/protobuf/struct.proto";
 
 // svc-llm-gateway（Go）实现；svc-orchestrator 调用。
 // 职责：按 role 路由模型、缓存、预算闸门、重试/降级、成本记账。**模型 key 只存在于此服务。**
@@ -27,14 +28,62 @@ message ChatRequest {
   double          temperature = 5;
   int32           max_tokens  = 6;
   int32           timeout_ms  = 7;
+
+  // 以下字段只补充调用身份与治理引用；principal_id 只从可信 metadata 读取。
+  string session_id              = 8;
+  string run_id                  = 9;
+  string release_id              = 10;
+  string logical_call_id         = 11;
+  string prompt_template_key     = 12;
+  string prompt_template_version = 13;
+  string response_schema_key     = 14;
+  string response_schema_version = 15;
+  string data_classification     = 16;
 }
 
 message ChatResponse {
+  // 1-5 保留旧客户端兼容语义；新客户端读取下方类型化字段。
   string content    = 1;
   string model      = 2;
   int32  in_tokens  = 3;
   int32  out_tokens = 4;
-  double cost       = 5; // 记账用
+  double cost       = 5; // 已弃用的展示字段，不参与权威记账
+
+  Usage usage                    = 6;
+  Cost cost_detail               = 7;
+  repeated AttemptSummary attempts = 8;
+  string ledger_entry_id         = 9;
+  string route_version           = 10;
+  string price_table_version     = 11;
+  string logical_call_id         = 12;
+  bool cache_hit                 = 13;
+  string finish_reason           = 14;
+  string release_id              = 15;
+  google.protobuf.Struct structured_output = 16;
+}
+
+message Usage {
+  int64 input_tokens  = 1;
+  int64 output_tokens = 2;
+}
+
+message Cost {
+  string currency_unit          = 1; // USD_MICRO
+  int64  reserved_micro_usd     = 2;
+  int64  actual_micro_usd       = 3;
+  string settlement_status      = 4; // SETTLED / PENDING_RECONCILIATION
+}
+
+message AttemptSummary {
+  string attempt_id          = 1;
+  string model_id            = 2;
+  string provider            = 3;
+  string status              = 4;
+  int64  latency_ms          = 5;
+  Usage  usage               = 6;
+  int64  cost_micro_usd      = 7;
+  string provider_request_id = 8;
+  string error_code          = 9;
 }
 
 message ChatDelta {

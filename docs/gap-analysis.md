@@ -26,7 +26,7 @@
 - **svc-algo（Go）**：既有四 RPC 全部实现（`RankConvert / EstimateProb / CheckConstraints / OptimizeWishlist`）；`EvaluateEligibility` 已具备 release-bound 规则、生命周期、覆盖声明、受限 AST、条件字段 typed facts，以及专业五态与组级 PASS_PARTIAL 汇总。薄 service + biz usecase 分层，仍是当前最成体系的已实现能力。
 - **svc-orchestrator（Python/LangGraph）**：🟡 RunLifecycle 已提供持久 run/interrupt/租约与受控算法预览，`RetrievePolicy` 与在线检索节点已接线；自然语言画像、完整 POLICY_QA 子图、Strategy/Critic/report 等业务节点仍待实现，未调用 llmgw。
 - **svc-gateway（Go）**：⛔ 三个入口方法（`CreatePlan / ConfirmProfile / BackfillProfile`）全部 `return errors.New("TODO")`。
-- **svc-llm-gateway（Go）**：⛔ `Chat / StreamChat` 全部 TODO；仅有 `llm_call_log` 记账表 schema，无路由 / 缓存 / 预占结算。
+- **svc-llm-gateway（Go）**：🟡 类型化 `Chat` 单次治理闭环已实现：可信 principal、session/run/release 校验、release-bound route/模型白名单/价格、单事务预算预占、fake provider、按实际 usage 结算及 logical call / attempt 权威账本；`StreamChat`、缓存、prompt/schema、六类敏感数据边界、并发重试与对账仍待后续 M5a issue。
 
 ---
 
@@ -72,7 +72,7 @@
 | --- | --- | --- | --- | --- | --- |
 | FR-18 报告生成（P0） | ⛔ | `build.py:38` report 节点 TODO；`state.py:62` 有 `report` 字段但无生成逻辑 | report 节点 + 强制免责声明 + 禁「保证录取」；数值由结构化模板渲染 | P1-05 | M5 |
 | FR-19 事实校验 Verifier（P0） | 🟡 Verifier 与正式发布闭环已接 | `services/orchestrator/evidence/verifier.py` 保留唯一 `VerifyPackage` seam；内部 `claims / formal_gate / normalization / models` 分离三类 Claim、正式门禁、规范值与运行时模型。Verifier 覆盖确定性单位/年份/语义绑定、notice registry、adapter 版本和版本化适用日期；`RunLifecycle.PublishFormalResult` 绑定 `run_formal_gate_artifact` 的权威资格/配置，`migrations/27`/`28` 以 insert-only 证据包、报告、资格 artifact、不可变结果和独立 ACTIVE/STALE 状态原子发布 `V1_FORMAL`，GET/Watch 返回同一报告及必需说明原文；真实 PG 覆盖 PASS、PARTIAL、BLOCKED、伪造资格、重试冲突、release 撤销及发布/取消竞态 | `build.py:38` verify 节点仍为 TODO；后续接入图内报告生成、重写≤2、回算≤2 与最终文案剥离 | P1-05 | M4/M5 |
-| FR-20 LLM 治理与成本闸门（P0） | ⛔ 仅记账表 | `internal/llmgw/service.go:24,35` `Chat/StreamChat` TODO；`00_schema.sql:353` `llm_call_log` 有 trace/role/model/prompt_hash/token/cost/latency，但**无原子预占+结算、无 logical_call_id/attempt_id**；`:409` `data_version` 为可变 int（非不可变 release_id） | role→model 路由；prompt_hash 缓存（key 携 `release_id`）；Budget Guard 原子预占+结算+账本；早期 Python 直连标注「无完整治理实验链路」 | P1-11, P1-12 | M4/M5 |
+| FR-20 LLM 治理与成本闸门（P0） | 🟡 单次类型化 Chat 已闭环 | `api/llmgw/v1/llmgw.proto` 加法演进保留旧字段并返回 typed usage/cost/attempt/ledger；`internal/llmgw/service.go` 从可信 `x-principal-id` 经 release-bound `llm_role_route` / `llm_model_allowlist` / `llm_price_table` 选主模型，在 fake provider 前完成 logical call + 预算 + RESERVED attempt 单事务预占，成功后按实际 usage 同一结算事务释放差额；`migrations/29_llm_gateway_chat.sql` 建立版本化价格、预算、逻辑调用与 provider attempt 账本。真实 PG client 测试覆盖成功、身份/run、角色、白名单、价格、release 撤销/未发布、预算拒绝、幂等重放/冲突、fresh 结构 schema `00/07→29` 与 `28→29` 升级 | 后续 M5a：并发预算边界、备用模型/重试与 attempt 状态机、未知计费对账、prompt/schema 注册与校验、六类数据分类、缓存、完整 `StreamChat`；真实 provider 接线前保持 fail closed | P1-11, P1-12 | M5a 进行中 |
 | FR-21 限流与并发保护（P0） | ⛔ | `internal/gateway/service.go:16` 注释「限流器」为 TODO(M2) | 令牌桶限流 + 并发闸门（超限排队非 500）；公网发布前置 | P1-08 | M2/M4 |
 | FR-22 降级与故障处理（P0） | 🟡 | `state.py:66` 有 `degraded` 字段；PRD §7.4 隐私条款已按 R9 回填；但无实际降级路径逻辑（节点全 TODO） | 六类故障降级路径实现；体检/健康最小化+同意+限期+脱敏落地 | P1-03, P1-04, P1-06 | M5 |
 | FR-23 评测与发布门禁（P0） | 🟡 检索 harness 已建，待签字与真实基线 | `data/golden/retrieval-hunan-2025-v0.2.0-draft/` 有 30 条检索 Agent 草稿、可验证 interference 元数据与 hash manifest，`owner_status=PENDING_SIGNOFF`；`services/orchestrator/eval/retrieval_eval.py` 只经 `RetrievePolicy` runner 计算 recall@5/20、MRR、逐例 scope leak 与 first diff，并对签字真实 run 应用 recall/MRR 质量门禁；`scripts/run_retrieval_eval.py` 支持确定性 fixture 和可复现 baseline | Francis 定标 30 条草稿；绑定全国/省级政策 release；跑真实政策索引 baseline；补首批 10 条端到端集、四层测试与发布门禁阈值 | P2-04 | M4 进行中 |
@@ -98,8 +98,8 @@
 | P1-08 | SSE 连接承担了任务生命周期 | FR-05/FR-06 | ✅ R3 | ✅ RunLifecycle 事件游标与持久状态不依赖订阅连接 |
 | P1-09 | 有检查点≠有并发安全执行权 | FR-07 | ✅(租约/fencing) | ✅ worker 租约 + epoch fencing 已接 |
 | P1-10 | 按 session 去重吞掉合法第二次回答 | FR-06/FR-07 | ✅ R3(run/interrupt) | ⛔ |
-| P1-11 | 缓存 data_version 非跨服务一致快照 | FR-20 | ✅ R10(release_id) | ⛔ schema 仍 data_version |
-| P1-12 | 硬预算缺原子预占及重试账本 | FR-20 | ✅ R4 | ⛔ |
+| P1-11 | 缓存 data_version 非跨服务一致快照 | FR-20 | ✅ R10(release_id) | 🟡 `Chat` 的 route/price 与逻辑调用已绑定不可变 `release_id`；缓存键与失效策略仍在后续 M5a issue |
+| P1-12 | 硬预算缺原子预占及重试账本 | FR-20 | ✅ R4 | 🟡 单次 Chat 已原子预占/结算并有 logical call + attempt；并发硬边界、重试 fallback 与对账状态仍待后续 M5a issue |
 | P1-13 | 画像修正后回边与派生数据失效不一致 | FR-04/FR-13 | ✅(REVISE_PLAN 新建 run) | ⛔ |
 | P1-14 | 原文算法流程与当前接口无法接合 | FR-12/FR-14/FR-17 | ✅ R1/R7 | 🟡 RunLifecycle 已接四 RPC 并产出 ALGORITHM_PREVIEW；正式全链路仍待 M4/M5 |
 | P1-15 | 历史专业组数据不能直接作当年资格 | FR-13/FR-15 | ✅(标设计目标) | ⛔ 数据边界 |
