@@ -9,6 +9,8 @@ import (
 // Provider is the process-internal boundary for one governed supplier request.
 // The public gRPC seam never exposes provider URLs, credentials, retries, or raw errors.
 type Provider interface {
+	// Chat performs exactly one supplier request. Provider SDK automatic retries
+	// must stay disabled; retry accounting belongs to the gateway.
 	Chat(context.Context, ProviderRequest) (ProviderResponse, error)
 }
 
@@ -34,6 +36,22 @@ type ProviderResponse struct {
 	OutputTokens      int64
 	ProviderRequestID string
 	FinishReason      string
+}
+
+// ProviderFailure is a supplier rejection that the adapter has determined did
+// not incur a charge. Retryable failures may use the next route model. Any
+// failure without this classification remains potentially charged.
+type ProviderFailure struct {
+	Code              string
+	Retryable         bool
+	ProviderRequestID string
+}
+
+func (e *ProviderFailure) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Code
 }
 
 type unavailableProvider struct{}

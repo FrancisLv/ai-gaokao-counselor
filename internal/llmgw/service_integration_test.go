@@ -33,22 +33,30 @@ import (
 )
 
 type providerCall struct {
+	attemptID string
 	model     string
 	maxTokens int32
 	messages  []llmgw.ProviderMessage
 }
 
-type fakeProvider struct {
-	mu       sync.Mutex
-	calls    []providerCall
+type fakeBehavior struct {
 	response llmgw.ProviderResponse
 	err      error
-	onCall   func(context.Context)
+}
+
+type fakeProvider struct {
+	mu        sync.Mutex
+	calls     []providerCall
+	response  llmgw.ProviderResponse
+	err       error
+	behaviors []fakeBehavior
+	onCall    func(context.Context)
 }
 
 func (p *fakeProvider) Chat(ctx context.Context, req llmgw.ProviderRequest) (llmgw.ProviderResponse, error) {
 	p.mu.Lock()
 	p.calls = append(p.calls, providerCall{
+		attemptID: req.AttemptID,
 		model:     req.Model,
 		maxTokens: req.MaxOutputTokens,
 		messages:  append([]llmgw.ProviderMessage(nil), req.Messages...),
@@ -56,6 +64,12 @@ func (p *fakeProvider) Chat(ctx context.Context, req llmgw.ProviderRequest) (llm
 	onCall := p.onCall
 	response := p.response
 	providerErr := p.err
+	if len(p.behaviors) > 0 {
+		behavior := p.behaviors[0]
+		p.behaviors = p.behaviors[1:]
+		response = behavior.response
+		providerErr = behavior.err
+	}
 	p.mu.Unlock()
 	if onCall != nil {
 		onCall(ctx)
@@ -90,6 +104,8 @@ type llmTestFixture struct {
 	priceTable string
 	route      string
 	model      string
+	fallback   string
+	fallback2  string
 }
 
 func newLLMTestFixture(t *testing.T) *llmTestFixture {
@@ -154,6 +170,8 @@ func newLLMTestFixture(t *testing.T) *llmTestFixture {
 		priceTable: "price_m5a_32_v1",
 		route:      "route_profile_v1",
 		model:      "fake-governed-model",
+		fallback:   "fake-fallback-model",
+		fallback2:  "fake-fallback-model-2",
 	}
 	fixture.seed(t)
 	return fixture
@@ -177,7 +195,7 @@ func (f *llmTestFixture) seedBudget(t *testing.T, tokenLimit, costLimit int64) s
 
 func applyLLMGatewayMigrations(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	applyLLMGatewayMigrationsThrough(t, pool, 30)
+	applyLLMGatewayMigrationsThrough(t, pool, 31)
 }
 
 func applyLLMGatewayMigrationsThrough(t *testing.T, pool *pgxpool.Pool, last int) {
@@ -265,8 +283,13 @@ func (f *llmTestFixture) seed(t *testing.T) {
 			price_table_version, model_id,
 			input_micro_usd_per_million_tokens,
 			output_micro_usd_per_million_tokens
-		) VALUES ($1, $2, 1000000, 2000000)`,
+		) VALUES
+			($1, $2, 1000000, 2000000),
+			($1, $3, 2000000, 4000000),
+			($1, $4, 3000000, 6000000)`,
 		f.priceTable, f.model,
+		f.fallback,
+		f.fallback2,
 	); err != nil {
 		t.Fatalf("seed price entry: %v", err)
 	}
@@ -294,6 +317,46 @@ func (f *llmTestFixture) seed(t *testing.T) {
 		f.releaseID, f.route, f.model, f.priceTable,
 	); err != nil {
 		t.Fatalf("seed route: %v", err)
+	}
+}
+
+func (f *llmTestFixture) enableFallback(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := f.pool.Exec(ctx, `
+		INSERT INTO llm_model_allowlist (release_id, model_id, provider, enabled)
+		VALUES ($1, $2, 'fake', TRUE)`,
+		f.releaseID, f.fallback,
+	); err != nil {
+		t.Fatalf("seed fallback allowlist: %v", err)
+	}
+	if _, err := f.pool.Exec(ctx, `
+		UPDATE llm_role_route
+		SET fallback_model_ids = ARRAY[$1]::TEXT[]
+		WHERE release_id = $2 AND role = 'profile'`,
+		f.fallback, f.releaseID,
+	); err != nil {
+		t.Fatalf("seed fallback route: %v", err)
+	}
+}
+
+func (f *llmTestFixture) enableFallbackChain(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := f.pool.Exec(ctx, `
+		INSERT INTO llm_model_allowlist (release_id, model_id, provider, enabled)
+		VALUES ($1, $2, 'fake', TRUE), ($1, $3, 'fake', TRUE)`,
+		f.releaseID, f.fallback, f.fallback2,
+	); err != nil {
+		t.Fatalf("seed fallback chain allowlist: %v", err)
+	}
+	if _, err := f.pool.Exec(ctx, `
+		UPDATE llm_role_route
+		SET fallback_model_ids = ARRAY[$1, $2]::TEXT[]
+		WHERE release_id = $3 AND role = 'profile'`,
+		f.fallback, f.fallback2, f.releaseID,
+	); err != nil {
+		t.Fatalf("seed fallback chain route: %v", err)
 	}
 }
 
@@ -374,6 +437,13 @@ func assertStableError(t *testing.T, err error, wantCode codes.Code, wantReason 
 	if got := kerrors.Reason(err); got != wantReason {
 		t.Errorf("stable reason = %q, want %q", got, wantReason)
 	}
+}
+
+func valueOrEmptyForTest(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func TestChatCommitsBudgetAndLedgerThroughGeneratedClient(t *testing.T) {
@@ -1348,6 +1418,7 @@ func TestLLMGatewayMigrationUpgradesExistingRunSchema(t *testing.T) {
 
 	applyLLMGatewayMigration(t, pool, "29_llm_gateway_chat.sql")
 	applyLLMGatewayMigration(t, pool, "30_llm_budget_overrun.sql")
+	applyLLMGatewayMigration(t, pool, "31_llm_attempt_limit.sql")
 	var gotRun string
 	if err := pool.QueryRow(ctx, `SELECT run_id::text FROM run WHERE run_id = $1`, runID).Scan(&gotRun); err != nil {
 		t.Fatalf("upgrade 后读取旧 run: %v", err)
@@ -1363,6 +1434,23 @@ func TestLLMGatewayMigrationUpgradesExistingRunSchema(t *testing.T) {
 	}
 	if !tableExists {
 		t.Fatal("upgrade 后缺少 llm_logical_call")
+	}
+}
+
+func TestLLMGatewayRejectsMoreThanTwoAttempts(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	_, err := fixture.pool.Exec(context.Background(), `
+		INSERT INTO llm_role_route (
+			release_id, role, route_version, primary_model_id, fallback_model_ids,
+			max_output_tokens, timeout_ms, max_attempts, price_table_version
+		) VALUES (
+			$1, 'report', 'route_report_three_attempts', $2,
+			ARRAY[$2, $2]::TEXT[], 1000, 5000, 3, $3
+		)`,
+		fixture.releaseID, fixture.model, fixture.priceTable,
+	)
+	if err == nil {
+		t.Fatal("route 的 max_attempts=3 应被数据库拒绝")
 	}
 }
 
@@ -1429,5 +1517,514 @@ func TestSameLogicalCallWithChangedRequestConflicts(t *testing.T) {
 	assertStableError(t, err, codes.Aborted, llmgw.ReasonIdempotencyConflict)
 	if calls := provider.callsSnapshot(); len(calls) != 1 {
 		t.Fatalf("冲突路径产生 provider 调用 %d 次, want 1", len(calls))
+	}
+}
+
+func TestRetryablePrimaryFailureFallsBackAndReplaysBothAttempts(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	fixture.enableFallback(t)
+	provider := &fakeProvider{behaviors: []fakeBehavior{
+		{
+			err: &llmgw.ProviderFailure{
+				Code:              llmgw.ReasonProviderRateLimited,
+				Retryable:         true,
+				ProviderRequestID: "provider-rate-limited",
+			},
+		},
+		{
+			response: llmgw.ProviderResponse{
+				Content:           "备用模型结果",
+				InputTokens:       10,
+				OutputTokens:      5,
+				ProviderRequestID: "provider-fallback",
+				FinishReason:      "STOP",
+			},
+		},
+	}}
+	client := fixture.chatClient(t, provider)
+	req := fixture.chatRequest("logical-fallback")
+
+	first, err := client.Chat(trustedChatContext(fixture.principal), req)
+	if err != nil {
+		t.Fatalf("主备切换 Chat: %v", err)
+	}
+	if first.GetModel() != fixture.fallback || first.GetContent() != "备用模型结果" {
+		t.Fatalf("最终结果未归属备用模型: %+v", first)
+	}
+	if first.GetUsage().GetInputTokens() != 10 ||
+		first.GetUsage().GetOutputTokens() != 5 ||
+		first.GetCostDetail().GetActualMicroUsd() != 40 {
+		t.Fatalf("最终 usage/cost = %+v", first.GetCostDetail())
+	}
+	if len(first.GetAttempts()) != 2 {
+		t.Fatalf("attempt summaries = %d, want 2", len(first.GetAttempts()))
+	}
+	primary, fallback := first.GetAttempts()[0], first.GetAttempts()[1]
+	if primary.GetAttemptId() == "" ||
+		primary.GetAttemptId() == fallback.GetAttemptId() ||
+		primary.GetModelId() != fixture.model ||
+		primary.GetStatus() != "FAILED_NO_CHARGE" ||
+		primary.GetErrorCode() != llmgw.ReasonProviderRateLimited ||
+		primary.GetProviderRequestId() != "provider-rate-limited" ||
+		primary.GetCostMicroUsd() != 0 {
+		t.Fatalf("主模型 attempt = %+v", primary)
+	}
+	if fallback.GetAttemptId() == "" ||
+		fallback.GetModelId() != fixture.fallback ||
+		fallback.GetStatus() != "SUCCEEDED" ||
+		fallback.GetProviderRequestId() != "provider-fallback" ||
+		fallback.GetCostMicroUsd() != 40 {
+		t.Fatalf("备用模型 attempt = %+v", fallback)
+	}
+	calls := provider.callsSnapshot()
+	if len(calls) != 2 ||
+		calls[0].model != fixture.model ||
+		calls[1].model != fixture.fallback ||
+		calls[0].attemptID == calls[1].attemptID ||
+		calls[0].attemptID != primary.GetAttemptId() ||
+		calls[1].attemptID != fallback.GetAttemptId() {
+		t.Fatalf("provider attempts = %+v", calls)
+	}
+
+	replayed, err := client.Chat(trustedChatContext(fixture.principal), req)
+	if err != nil {
+		t.Fatalf("重放主备切换结果: %v", err)
+	}
+	if len(provider.callsSnapshot()) != 2 {
+		t.Fatal("幂等重放新增了 provider 调用")
+	}
+	if replayed.GetLedgerEntryId() != first.GetLedgerEntryId() ||
+		len(replayed.GetAttempts()) != 2 ||
+		replayed.GetAttempts()[0].GetAttemptId() != primary.GetAttemptId() ||
+		replayed.GetAttempts()[1].GetAttemptId() != fallback.GetAttemptId() ||
+		replayed.GetModel() != fixture.fallback ||
+		replayed.GetCostDetail().GetActualMicroUsd() != 40 {
+		t.Fatalf("重放账本身份 = %+v", replayed)
+	}
+
+	type attemptLedgerRow struct {
+		no, cost          int64
+		in, out           *int64
+		id, model, status string
+		request, error    *string
+		started, finished bool
+	}
+	rows, err := fixture.pool.Query(context.Background(), `
+		SELECT attempt_no, attempt_id::text, model_id, status,
+		       provider_request_id, input_tokens, output_tokens,
+		       cost_micro_usd, error_code,
+		       started_at IS NOT NULL, finished_at IS NOT NULL
+		FROM llm_provider_attempt
+		WHERE logical_call_pk = (
+			SELECT logical_call_pk
+			FROM llm_logical_call
+			WHERE logical_call_id = 'logical-fallback'
+		)
+		ORDER BY attempt_no`)
+	if err != nil {
+		t.Fatalf("读取主备切换 attempt 账本: %v", err)
+	}
+	defer rows.Close()
+	var ledgerAttempts []attemptLedgerRow
+	for rows.Next() {
+		var row attemptLedgerRow
+		if err := rows.Scan(
+			&row.no, &row.id, &row.model, &row.status, &row.request,
+			&row.in, &row.out, &row.cost, &row.error,
+			&row.started, &row.finished,
+		); err != nil {
+			t.Fatalf("解析主备切换 attempt 账本: %v", err)
+		}
+		ledgerAttempts = append(ledgerAttempts, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("遍历主备切换 attempt 账本: %v", err)
+	}
+	if len(ledgerAttempts) != 2 ||
+		ledgerAttempts[0].no != 1 ||
+		ledgerAttempts[0].id != primary.GetAttemptId() ||
+		ledgerAttempts[0].model != fixture.model ||
+		ledgerAttempts[0].status != "FAILED_NO_CHARGE" ||
+		valueOrEmptyForTest(ledgerAttempts[0].request) != "provider-rate-limited" ||
+		valueOrEmptyForTest(ledgerAttempts[0].error) != llmgw.ReasonProviderRateLimited ||
+		ledgerAttempts[0].cost != 0 ||
+		!ledgerAttempts[0].started ||
+		!ledgerAttempts[0].finished ||
+		ledgerAttempts[1].no != 2 ||
+		ledgerAttempts[1].id != fallback.GetAttemptId() ||
+		ledgerAttempts[1].model != fixture.fallback ||
+		ledgerAttempts[1].status != "SUCCEEDED" ||
+		valueOrEmptyForTest(ledgerAttempts[1].request) != "provider-fallback" ||
+		valueOrEmptyForTest(ledgerAttempts[1].error) != "" ||
+		ledgerAttempts[1].in == nil ||
+		*ledgerAttempts[1].in != 10 ||
+		ledgerAttempts[1].out == nil ||
+		*ledgerAttempts[1].out != 5 ||
+		ledgerAttempts[1].cost != 40 ||
+		!ledgerAttempts[1].started ||
+		!ledgerAttempts[1].finished {
+		t.Fatalf("主备切换权威账本 = %+v", ledgerAttempts)
+	}
+}
+
+func TestNonRetryableProviderFailuresDoNotUseFallback(t *testing.T) {
+	tests := []struct {
+		name       string
+		code       string
+		wantStatus codes.Code
+	}{
+		{
+			name:       "bad request",
+			code:       llmgw.ReasonProviderBadRequest,
+			wantStatus: codes.InvalidArgument,
+		},
+		{
+			name:       "authentication",
+			code:       llmgw.ReasonProviderAuthFailed,
+			wantStatus: codes.PermissionDenied,
+		},
+		{
+			name:       "schema unsupported",
+			code:       llmgw.ReasonSchemaUnsupported,
+			wantStatus: codes.FailedPrecondition,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newLLMTestFixture(t)
+			fixture.enableFallback(t)
+			provider := &fakeProvider{behaviors: []fakeBehavior{
+				{
+					err: &llmgw.ProviderFailure{
+						Code:              test.code,
+						Retryable:         false,
+						ProviderRequestID: "provider-rejected",
+					},
+				},
+				{
+					response: llmgw.ProviderResponse{
+						Content:      "must not run",
+						InputTokens:  1,
+						OutputTokens: 1,
+					},
+				},
+			}}
+			client := fixture.chatClient(t, provider)
+
+			_, err := client.Chat(
+				trustedChatContext(fixture.principal),
+				fixture.chatRequest("logical-permanent-"+strings.ReplaceAll(test.name, " ", "-")),
+			)
+			assertStableError(t, err, test.wantStatus, test.code)
+			calls := provider.callsSnapshot()
+			if len(calls) != 1 || calls[0].model != fixture.model {
+				t.Fatalf("不可重试故障 provider calls = %+v", calls)
+			}
+
+			var (
+				attemptCount  int
+				attemptStatus string
+				attemptCode   string
+				callStatus    string
+				reservedCost  int64
+				reservedToken int64
+			)
+			if err := fixture.pool.QueryRow(context.Background(), `
+				SELECT count(*) OVER (),
+				       attempt.status,
+				       attempt.error_code,
+				       call.status,
+				       budget.cost_reserved_micro_usd,
+				       budget.provider_tokens_reserved
+				FROM llm_logical_call call
+				JOIN llm_budget_scope budget
+				  ON budget.budget_scope_id = call.budget_scope_id
+				JOIN llm_provider_attempt attempt
+				  ON attempt.logical_call_pk = call.logical_call_pk
+				WHERE call.principal_id = $1
+				  AND call.session_id = $2
+				  AND call.logical_call_id LIKE 'logical-permanent-%'`,
+				fixture.principal, fixture.sessionID,
+			).Scan(
+				&attemptCount, &attemptStatus, &attemptCode, &callStatus,
+				&reservedCost, &reservedToken,
+			); err != nil {
+				t.Fatalf("读取不可重试账本: %v", err)
+			}
+			if attemptCount != 1 ||
+				attemptStatus != "FAILED_NO_CHARGE" ||
+				attemptCode != test.code ||
+				callStatus != "FAILED" ||
+				reservedCost != 0 ||
+				reservedToken != 0 {
+				t.Fatalf(
+					"不可重试账本 = attempts %d status %q/%q call %q reserved %d/%d",
+					attemptCount, attemptStatus, attemptCode, callStatus,
+					reservedToken, reservedCost,
+				)
+			}
+		})
+	}
+}
+
+func TestSemanticRepairUsesANewLogicalCall(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	provider := &fakeProvider{behaviors: []fakeBehavior{
+		{
+			err: &llmgw.ProviderFailure{
+				Code:      llmgw.ReasonProviderBadRequest,
+				Retryable: false,
+			},
+		},
+		{
+			response: llmgw.ProviderResponse{
+				Content:      "repaired",
+				InputTokens:  10,
+				OutputTokens: 5,
+				FinishReason: "STOP",
+			},
+		},
+	}}
+	client := fixture.chatClient(t, provider)
+
+	_, err := client.Chat(
+		trustedChatContext(fixture.principal),
+		fixture.chatRequest("logical-before-repair"),
+	)
+	assertStableError(t, err, codes.InvalidArgument, llmgw.ReasonProviderBadRequest)
+
+	repaired, err := client.Chat(
+		trustedChatContext(fixture.principal),
+		fixture.chatRequest("logical-after-repair"),
+	)
+	if err != nil {
+		t.Fatalf("新 logical_call_id 语义修复失败: %v", err)
+	}
+	if repaired.GetLogicalCallId() != "logical-after-repair" ||
+		repaired.GetContent() != "repaired" ||
+		len(provider.callsSnapshot()) != 2 {
+		t.Fatalf("语义修复结果 = %+v", repaired)
+	}
+}
+
+func TestRetryableFailuresStopAtTwoAttemptsAndReleaseReservation(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	fixture.enableFallbackChain(t)
+	provider := &fakeProvider{behaviors: []fakeBehavior{
+		{err: &llmgw.ProviderFailure{Code: llmgw.ReasonProviderRateLimited, Retryable: true}},
+		{err: &llmgw.ProviderFailure{Code: llmgw.ReasonProviderRateLimited, Retryable: true}},
+		{
+			response: llmgw.ProviderResponse{
+				Content: "third request must not run", InputTokens: 1, OutputTokens: 1,
+			},
+		},
+	}}
+	client := fixture.chatClient(t, provider)
+
+	_, err := client.Chat(
+		trustedChatContext(fixture.principal),
+		fixture.chatRequest("logical-two-attempt-limit"),
+	)
+	assertStableError(t, err, codes.ResourceExhausted, llmgw.ReasonProviderRateLimited)
+	calls := provider.callsSnapshot()
+	if len(calls) != 2 ||
+		calls[0].model != fixture.model ||
+		calls[1].model != fixture.fallback {
+		t.Fatalf("两次 attempt 后 provider calls = %+v", calls)
+	}
+
+	var (
+		attemptCount  int
+		failedCount   int
+		callStatus    string
+		reservedCost  int64
+		reservedToken int64
+	)
+	if err := fixture.pool.QueryRow(context.Background(), `
+		SELECT count(*),
+		       count(*) FILTER (WHERE attempt.status = 'FAILED_NO_CHARGE'),
+		       min(call.status),
+		       min(budget.cost_reserved_micro_usd),
+		       min(budget.provider_tokens_reserved)
+		FROM llm_logical_call call
+		JOIN llm_budget_scope budget
+		  ON budget.budget_scope_id = call.budget_scope_id
+		JOIN llm_provider_attempt attempt
+		  ON attempt.logical_call_pk = call.logical_call_pk
+		WHERE call.principal_id = $1
+		  AND call.session_id = $2
+		  AND call.logical_call_id = 'logical-two-attempt-limit'`,
+		fixture.principal, fixture.sessionID,
+	).Scan(
+		&attemptCount, &failedCount, &callStatus,
+		&reservedCost, &reservedToken,
+	); err != nil {
+		t.Fatalf("读取两次 attempt 账本: %v", err)
+	}
+	if attemptCount != 2 ||
+		failedCount != 2 ||
+		callStatus != "FAILED" ||
+		reservedCost != 0 ||
+		reservedToken != 0 {
+		t.Fatalf(
+			"两次 attempt 账本 = attempts %d failed %d call %q reserved %d/%d",
+			attemptCount, failedCount, callStatus, reservedToken, reservedCost,
+		)
+	}
+}
+
+func TestConcurrentSameLogicalCallUsesPostgresArbitration(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	provider := &fakeProvider{
+		response: llmgw.ProviderResponse{
+			Content:           "single authoritative result",
+			InputTokens:       10,
+			OutputTokens:      5,
+			ProviderRequestID: "provider-concurrent",
+			FinishReason:      "STOP",
+		},
+		onCall: func(ctx context.Context) {
+			entered <- struct{}{}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		},
+	}
+	client := fixture.chatClient(t, provider)
+	req := fixture.chatRequest("logical-concurrent-arbitration")
+
+	type chatResult struct {
+		response *llmgwv1.ChatResponse
+		err      error
+	}
+	firstDone := make(chan chatResult, 1)
+	go func() {
+		response, err := client.Chat(trustedChatContext(fixture.principal), req)
+		firstDone <- chatResult{response: response, err: err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("首个调用未到达 provider")
+	}
+
+	_, err := client.Chat(trustedChatContext(fixture.principal), req)
+	assertStableError(t, err, codes.Aborted, llmgw.ReasonCallInProgress)
+	if calls := provider.callsSnapshot(); len(calls) != 1 {
+		t.Fatalf("在途仲裁产生 provider calls = %d, want 1", len(calls))
+	}
+
+	close(release)
+	var first chatResult
+	select {
+	case first = <-firstDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("首个调用未完成")
+	}
+	if first.err != nil {
+		t.Fatalf("首个调用失败: %v", first.err)
+	}
+
+	replayed, err := client.Chat(trustedChatContext(fixture.principal), req)
+	if err != nil {
+		t.Fatalf("完成态重放: %v", err)
+	}
+	if len(provider.callsSnapshot()) != 1 ||
+		replayed.GetLedgerEntryId() != first.response.GetLedgerEntryId() ||
+		len(replayed.GetAttempts()) != 1 ||
+		replayed.GetAttempts()[0].GetAttemptId() != first.response.GetAttempts()[0].GetAttemptId() {
+		t.Fatalf("完成态重放账本身份不一致")
+	}
+
+	var (
+		logicalCount int
+		attemptCount int
+		settledCost  int64
+	)
+	if err := fixture.pool.QueryRow(context.Background(), `
+		SELECT count(DISTINCT call.logical_call_pk),
+		       count(attempt.attempt_id),
+		       min(budget.cost_settled_micro_usd)
+		FROM llm_logical_call call
+		JOIN llm_budget_scope budget
+		  ON budget.budget_scope_id = call.budget_scope_id
+		JOIN llm_provider_attempt attempt
+		  ON attempt.logical_call_pk = call.logical_call_pk
+		WHERE call.principal_id = $1
+		  AND call.session_id = $2
+		  AND call.logical_call_id = 'logical-concurrent-arbitration'`,
+		fixture.principal, fixture.sessionID,
+	).Scan(&logicalCount, &attemptCount, &settledCost); err != nil {
+		t.Fatalf("读取并发仲裁账本: %v", err)
+	}
+	if logicalCount != 1 || attemptCount != 1 || settledCost != 20 {
+		t.Fatalf(
+			"并发仲裁账本 = logical %d attempt %d settled cost %d",
+			logicalCount, attemptCount, settledCost,
+		)
+	}
+}
+
+func TestRequestHashCoversGovernanceAndParameters(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	provider := &fakeProvider{response: llmgw.ProviderResponse{
+		Content: "first", InputTokens: 10, OutputTokens: 5, FinishReason: "STOP",
+	}}
+	client := fixture.chatClient(t, provider)
+	base := fixture.chatRequest("logical-request-hash")
+	if _, err := client.Chat(trustedChatContext(fixture.principal), base); err != nil {
+		t.Fatalf("首次 Chat: %v", err)
+	}
+
+	variants := []struct {
+		name   string
+		change func(*llmgwv1.ChatRequest)
+	}{
+		{
+			name:   "messages",
+			change: func(req *llmgwv1.ChatRequest) { req.Messages[0].Content = "changed" },
+		},
+		{
+			name:   "prompt version",
+			change: func(req *llmgwv1.ChatRequest) { req.PromptTemplateVersion = "v2" },
+		},
+		{
+			name:   "schema version",
+			change: func(req *llmgwv1.ChatRequest) { req.ResponseSchemaVersion = "v2" },
+		},
+		{
+			name:   "raw schema",
+			change: func(req *llmgwv1.ChatRequest) { req.JsonSchema = `{"type":"object"}` },
+		},
+		{
+			name:   "data classification",
+			change: func(req *llmgwv1.ChatRequest) { req.DataClassification = "PRINCIPAL_DATA" },
+		},
+		{
+			name:   "temperature",
+			change: func(req *llmgwv1.ChatRequest) { req.Temperature = 0.5 },
+		},
+		{
+			name:   "max tokens",
+			change: func(req *llmgwv1.ChatRequest) { req.MaxTokens = 700 },
+		},
+		{
+			name:   "timeout",
+			change: func(req *llmgwv1.ChatRequest) { req.TimeoutMs = 1000 },
+		},
+	}
+	for _, variant := range variants {
+		t.Run(variant.name, func(t *testing.T) {
+			req := fixture.chatRequest("logical-request-hash")
+			variant.change(req)
+			_, err := client.Chat(trustedChatContext(fixture.principal), req)
+			assertStableError(t, err, codes.Aborted, llmgw.ReasonIdempotencyConflict)
+		})
+	}
+	if calls := provider.callsSnapshot(); len(calls) != 1 {
+		t.Fatalf("request hash 变体产生 provider calls = %d, want 1", len(calls))
 	}
 }

@@ -29,6 +29,8 @@ type Service struct {
 	newID    func() string
 }
 
+const maxProviderAttempts int32 = 2
+
 type Option func(*Service)
 
 func WithClock(now func() time.Time) Option {
@@ -106,27 +108,26 @@ type routeConfig struct {
 }
 
 type preparedCall struct {
-	logicalCallPK   string
-	ledgerEntryID   string
-	attemptID       string
-	principalID     string
-	sessionID       string
-	runID           string
-	role            string
-	releaseID       string
-	logicalCallID   string
-	requestHash     string
-	route           routeConfig
-	selected        modelPrice
-	inputBound      int64
-	outputBound     int64
-	reservedTokens  int64
-	reservedCost    int64
-	attemptTokenCap int64
-	attemptCostCap  int64
-	providerRequest ProviderRequest
-	traceID         string
-	startedAt       time.Time
+	logicalCallPK    string
+	ledgerEntryID    string
+	attemptID        string
+	principalID      string
+	sessionID        string
+	runID            string
+	role             string
+	releaseID        string
+	logicalCallID    string
+	requestHash      string
+	route            routeConfig
+	selected         modelPrice
+	inputBound       int64
+	outputBound      int64
+	reservedTokens   int64
+	reservedCost     int64
+	providerRequest  ProviderRequest
+	traceID          string
+	startedAt        time.Time
+	attemptStartedAt time.Time
 }
 
 type canonicalRequest struct {
@@ -188,47 +189,75 @@ func (s *Service) Chat(ctx context.Context, req *llmgwv1.ChatRequest) (*llmgwv1.
 		return replayed, nil
 	}
 
-	providerCtx, cancel := context.WithTimeout(ctx, time.Duration(prepared.providerRequest.Timeout))
-	defer cancel()
-	providerResponse, providerErr := s.provider.Chat(providerCtx, prepared.providerRequest)
-	if providerErr != nil {
-		if errors.Is(providerErr, ErrProviderNotCharged) {
-			return nil, s.releaseUnchargedCall(ctx, prepared)
+	return s.executeProviderAttempts(ctx, prepared)
+}
+
+func (s *Service) executeProviderAttempts(ctx context.Context, prepared *preparedCall) (*llmgwv1.ChatResponse, error) {
+	candidateCount := len(prepared.route.models)
+	if int64(candidateCount) > int64(effectiveAttemptLimit(prepared.route)) {
+		candidateCount = int(effectiveAttemptLimit(prepared.route))
+	}
+	for candidateIndex := 0; candidateIndex < candidateCount; candidateIndex++ {
+		if candidateIndex > 0 {
+			if err := s.startAttempt(ctx, prepared, prepared.route.models[candidateIndex], int32(candidateIndex+1)); err != nil {
+				return nil, err
+			}
 		}
-		return nil, s.markProviderUnknown(ctx, prepared, providerErr)
-	}
-	result := providerResult{
-		Content:           providerResponse.Content,
-		InputTokens:       providerResponse.InputTokens,
-		OutputTokens:      providerResponse.OutputTokens,
-		ProviderRequestID: providerResponse.ProviderRequestID,
-		FinishReason:      providerResponse.FinishReason,
-	}
-	if result.FinishReason == "" {
-		result.FinishReason = "STOP"
-	}
-	if result.InputTokens < 0 || result.OutputTokens < 0 {
-		return nil, s.markProviderUnknown(ctx, prepared, errors.New("provider returned negative usage"))
-	}
 
-	actualCostMicroUSD, err := actualCost(prepared.selected, result.InputTokens, result.OutputTokens)
-	if err != nil {
-		return nil, s.markProviderUnknown(ctx, prepared, err)
-	}
-	actualTokens, err := checkedAdd(result.InputTokens, result.OutputTokens)
-	if err != nil {
-		return nil, s.markProviderUnknown(ctx, prepared, err)
-	}
-	if actualCostMicroUSD > prepared.reservedCost || actualTokens > prepared.reservedTokens {
-		return nil, s.markBudgetOverrun(ctx, prepared, result, actualCostMicroUSD)
-	}
+		providerCtx, cancel := context.WithTimeout(ctx, prepared.providerRequest.Timeout)
+		providerResponse, providerErr := s.provider.Chat(providerCtx, prepared.providerRequest)
+		cancel()
+		if providerErr != nil {
+			var failure *ProviderFailure
+			if errors.As(providerErr, &failure) {
+				if failure.Retryable && candidateIndex+1 < candidateCount {
+					if err := s.finishRetryableAttempt(ctx, prepared, failure); err != nil {
+						return nil, err
+					}
+					continue
+				}
+				return nil, s.releaseProviderFailure(ctx, prepared, failure)
+			}
+			if errors.Is(providerErr, ErrProviderNotCharged) {
+				return nil, s.releaseUnchargedCall(ctx, prepared)
+			}
+			return nil, s.markProviderUnknown(ctx, prepared, providerErr)
+		}
 
-	response, err := s.settleCall(ctx, prepared, result, actualCostMicroUSD, actualTokens)
-	if err != nil {
-		return nil, err
+		result := providerResult{
+			Content:           providerResponse.Content,
+			InputTokens:       providerResponse.InputTokens,
+			OutputTokens:      providerResponse.OutputTokens,
+			ProviderRequestID: providerResponse.ProviderRequestID,
+			FinishReason:      providerResponse.FinishReason,
+		}
+		if result.FinishReason == "" {
+			result.FinishReason = "STOP"
+		}
+		if result.InputTokens < 0 || result.OutputTokens < 0 {
+			return nil, s.markProviderUnknown(ctx, prepared, errors.New("provider returned negative usage"))
+		}
+
+		actualCostMicroUSD, err := actualCost(prepared.selected, result.InputTokens, result.OutputTokens)
+		if err != nil {
+			return nil, s.markProviderUnknown(ctx, prepared, err)
+		}
+		actualTokens, err := checkedAdd(result.InputTokens, result.OutputTokens)
+		if err != nil {
+			return nil, s.markProviderUnknown(ctx, prepared, err)
+		}
+		if actualCostMicroUSD > prepared.reservedCost || actualTokens > prepared.reservedTokens {
+			return nil, s.markBudgetOverrun(ctx, prepared, result, actualCostMicroUSD)
+		}
+
+		response, err := s.settleCall(ctx, prepared, result, actualCostMicroUSD, actualTokens)
+		if err != nil {
+			return nil, err
+		}
+		s.insertProjection(ctx, prepared, result, actualCostMicroUSD)
+		return response, nil
 	}
-	s.insertProjection(ctx, prepared, result, actualCostMicroUSD)
-	return response, nil
+	return nil, newStableError(codes.Internal, 500, "INTERNAL", "route 未配置可用模型")
 }
 
 // StreamChat remains wire-compatible but is intentionally not implemented in M5a-01.
@@ -487,7 +516,8 @@ func (s *Service) reserveCall(
 	if err != nil {
 		return nil, nil, newStableError(codes.InvalidArgument, 400, ReasonLimitExceeded, "请求 token 上界溢出")
 	}
-	reservedTokens, ok := checkedMul(attemptTokens, int64(route.maxAttempts))
+	attemptLimit := int64(effectiveAttemptLimit(route))
+	reservedTokens, ok := checkedMul(attemptTokens, attemptLimit)
 	if !ok {
 		return nil, nil, newStableError(codes.InvalidArgument, 400, ReasonLimitExceeded, "请求 token 预留溢出")
 	}
@@ -495,33 +525,32 @@ func (s *Service) reserveCall(
 	if err != nil {
 		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "价格计算失败")
 	}
-	reservedCost, ok := checkedMul(attemptCost, int64(route.maxAttempts))
+	reservedCost, ok := checkedMul(attemptCost, attemptLimit)
 	if !ok {
 		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "预算预留溢出")
 	}
 
 	prepared := &preparedCall{
-		logicalCallPK:   s.newID(),
-		ledgerEntryID:   s.newID(),
-		attemptID:       s.newID(),
-		principalID:     req.PrincipalID,
-		sessionID:       req.SessionID,
-		runID:           req.RunID,
-		role:            req.Role,
-		releaseID:       req.ReleaseID,
-		logicalCallID:   req.LogicalCallID,
-		requestHash:     requestHash,
-		route:           route,
-		selected:        route.models[0],
-		inputBound:      inputBound,
-		outputBound:     outputBound,
-		reservedTokens:  reservedTokens,
-		reservedCost:    reservedCost,
-		attemptTokenCap: attemptTokens,
-		attemptCostCap:  attemptCost,
-		traceID:         req.TraceID,
-		startedAt:       s.now(),
+		logicalCallPK:  s.newID(),
+		ledgerEntryID:  s.newID(),
+		attemptID:      s.newID(),
+		principalID:    req.PrincipalID,
+		sessionID:      req.SessionID,
+		runID:          req.RunID,
+		role:           req.Role,
+		releaseID:      req.ReleaseID,
+		logicalCallID:  req.LogicalCallID,
+		requestHash:    requestHash,
+		route:          route,
+		selected:       route.models[0],
+		inputBound:     inputBound,
+		outputBound:    outputBound,
+		reservedTokens: reservedTokens,
+		reservedCost:   reservedCost,
+		traceID:        req.TraceID,
+		startedAt:      s.now(),
 	}
+	prepared.attemptStartedAt = prepared.startedAt
 	prepared.providerRequest = ProviderRequest{
 		LogicalCallID:   req.LogicalCallID,
 		AttemptID:       prepared.attemptID,
@@ -531,6 +560,10 @@ func (s *Service) reserveCall(
 		Temperature:     req.Temperature,
 		MaxOutputTokens: route.maxOutput,
 		Timeout:         time.Duration(route.timeoutMS) * time.Millisecond,
+	}
+	firstAttemptCost, err := actualCost(prepared.selected, inputBound, outputBound)
+	if err != nil {
+		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "供应商 attempt 成本计算失败")
 	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -628,7 +661,7 @@ func (s *Service) reserveCall(
 		) VALUES ($1, $2, $3, 1, $4, $5, 'IN_PROGRESS', $6, $7, $8)`,
 		prepared.attemptID, prepared.logicalCallPK, req.LogicalCallID,
 		prepared.selected.modelID, prepared.selected.provider,
-		attemptTokens, attemptCost, prepared.startedAt,
+		attemptTokens, firstAttemptCost, prepared.attemptStartedAt,
 	); err != nil {
 		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "创建供应商 attempt 失败")
 	}
@@ -636,6 +669,67 @@ func (s *Service) reserveCall(
 		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "提交预算预占失败")
 	}
 	return prepared, nil, nil
+}
+
+func (s *Service) startAttempt(
+	ctx context.Context,
+	prepared *preparedCall,
+	model modelPrice,
+	attemptNo int32,
+) error {
+	attemptTokens, err := checkedAdd(prepared.inputBound, prepared.outputBound)
+	if err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "供应商 attempt token 上界溢出")
+	}
+	attemptCost, err := actualCost(model, prepared.inputBound, prepared.outputBound)
+	if err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "供应商 attempt 成本计算失败")
+	}
+	attemptID := s.newID()
+	startedAt := s.now()
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO llm_provider_attempt (
+			attempt_id, logical_call_pk, logical_call_id, attempt_no,
+			model_id, provider, status, reserved_tokens,
+			reserved_cost_micro_usd, started_at
+		) VALUES ($1, $2, $3, $4, $5, $6, 'IN_PROGRESS', $7, $8, $9)`,
+		attemptID, prepared.logicalCallPK, prepared.logicalCallID, attemptNo,
+		model.modelID, model.provider, attemptTokens, attemptCost, startedAt,
+	); err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "创建供应商 attempt 失败")
+	}
+	prepared.attemptID = attemptID
+	prepared.selected = model
+	prepared.attemptStartedAt = startedAt
+	prepared.providerRequest.AttemptID = attemptID
+	prepared.providerRequest.Model = model.modelID
+	prepared.providerRequest.Provider = model.provider
+	return nil
+}
+
+func (s *Service) finishRetryableAttempt(
+	ctx context.Context,
+	prepared *preparedCall,
+	failure *ProviderFailure,
+) error {
+	finishedAt := s.now()
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE llm_provider_attempt
+		SET status = 'FAILED_NO_CHARGE',
+		    cost_micro_usd = 0,
+		    provider_request_id = NULLIF($1, ''),
+		    error_code = $2,
+		    finished_at = $3
+		WHERE attempt_id = $4 AND status = 'IN_PROGRESS'`,
+		failure.ProviderRequestID, failure.Code, finishedAt, prepared.attemptID,
+	)
+	if err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "记录可重试供应商失败失败")
+	}
+	if tag.RowsAffected() != 1 {
+		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "attempt 状态不允许可重试失败结算")
+	}
+	return nil
 }
 
 func (s *Service) settleCall(
@@ -694,7 +788,7 @@ func (s *Service) settleCall(
 		return nil, newStableError(codes.Internal, 500, "INTERNAL", "预算预留状态不一致")
 	}
 
-	if _, err := tx.Exec(ctx, `
+	tag, err = tx.Exec(ctx, `
 		UPDATE llm_provider_attempt
 		SET status = 'SUCCEEDED',
 		    input_tokens = $1,
@@ -706,10 +800,14 @@ func (s *Service) settleCall(
 		WHERE attempt_id = $6 AND status = 'IN_PROGRESS'`,
 		result.InputTokens, result.OutputTokens, actualCostMicroUSD,
 		result.ProviderRequestID, finishedAt, prepared.attemptID,
-	); err != nil {
+	)
+	if err != nil {
 		return nil, newStableError(codes.Internal, 500, "INTERNAL", "结算供应商 attempt 失败")
 	}
-	if _, err := tx.Exec(ctx, `
+	if tag.RowsAffected() != 1 {
+		return nil, newStableError(codes.Aborted, 409, ReasonCallInProgress, "attempt 状态不允许成功结算")
+	}
+	tag, err = tx.Exec(ctx, `
 		UPDATE llm_logical_call
 		SET status = 'SUCCEEDED',
 		    actual_input_tokens = $1,
@@ -721,16 +819,54 @@ func (s *Service) settleCall(
 		WHERE logical_call_pk = $6 AND status = 'IN_PROGRESS'`,
 		result.InputTokens, result.OutputTokens, actualCostMicroUSD,
 		payload, finishedAt, prepared.logicalCallPK,
-	); err != nil {
+	)
+	if err != nil {
 		return nil, newStableError(codes.Internal, 500, "INTERNAL", "提交逻辑调用结果失败")
+	}
+	if tag.RowsAffected() != 1 {
+		return nil, newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用状态不允许成功结算")
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, newStableError(codes.Internal, 500, "INTERNAL", "提交预算结算失败")
 	}
-	return buildResponse(prepared, result, actualCostMicroUSD, finishedAt), nil
+	attempts, err := s.loadAttemptSummaries(ctx, prepared.logicalCallPK)
+	if err != nil {
+		return nil, err
+	}
+	return buildResponse(prepared, result, actualCostMicroUSD, attempts), nil
 }
 
 func (s *Service) releaseUnchargedCall(ctx context.Context, prepared *preparedCall) error {
+	return s.releaseKnownUnchargedFailure(
+		ctx,
+		prepared,
+		"",
+		"PROVIDER_NOT_CHARGED",
+		newStableError(codes.Unavailable, 503, ReasonProviderUnavailable, "供应商明确未受理且未计费"),
+	)
+}
+
+func (s *Service) releaseProviderFailure(
+	ctx context.Context,
+	prepared *preparedCall,
+	failure *ProviderFailure,
+) error {
+	return s.releaseKnownUnchargedFailure(
+		ctx,
+		prepared,
+		failure.ProviderRequestID,
+		failure.Code,
+		stableProviderFailure(failure),
+	)
+}
+
+func (s *Service) releaseKnownUnchargedFailure(
+	ctx context.Context,
+	prepared *preparedCall,
+	providerRequestID string,
+	attemptErrorCode string,
+	returnError error,
+) error {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return newStableError(codes.Internal, 500, "INTERNAL", "启动免计费释放事务失败")
@@ -775,10 +911,12 @@ func (s *Service) releaseUnchargedCall(ctx context.Context, prepared *preparedCa
 	tag, err = tx.Exec(ctx, `
 		UPDATE llm_provider_attempt
 		SET status = 'FAILED_NO_CHARGE',
-		    error_code = 'PROVIDER_NOT_CHARGED',
-		    finished_at = $1
-		WHERE attempt_id = $2 AND status = 'IN_PROGRESS'`,
-		finishedAt, prepared.attemptID,
+		    cost_micro_usd = 0,
+		    provider_request_id = NULLIF($1, ''),
+		    error_code = $2,
+		    finished_at = $3
+		WHERE attempt_id = $4 AND status = 'IN_PROGRESS'`,
+		providerRequestID, attemptErrorCode, finishedAt, prepared.attemptID,
 	)
 	if err != nil {
 		return newStableError(codes.Internal, 500, "INTERNAL", "记录免计费 attempt 失败")
@@ -789,11 +927,11 @@ func (s *Service) releaseUnchargedCall(ctx context.Context, prepared *preparedCa
 	tag, err = tx.Exec(ctx, `
 		UPDATE llm_logical_call
 		SET status = 'FAILED',
-		    error_reason = 'PROVIDER_NOT_CHARGED',
-		    completed_at = $1,
-		    updated_at = $1
-		WHERE logical_call_pk = $2 AND status = 'IN_PROGRESS'`,
-		finishedAt, prepared.logicalCallPK,
+		    error_reason = $1,
+		    completed_at = $2,
+		    updated_at = $2
+		WHERE logical_call_pk = $3 AND status = 'IN_PROGRESS'`,
+		attemptErrorCode, finishedAt, prepared.logicalCallPK,
 	)
 	if err != nil {
 		return newStableError(codes.Internal, 500, "INTERNAL", "提交免计费逻辑调用失败")
@@ -804,7 +942,22 @@ func (s *Service) releaseUnchargedCall(ctx context.Context, prepared *preparedCa
 	if err := tx.Commit(ctx); err != nil {
 		return newStableError(codes.Internal, 500, "INTERNAL", "提交免计费释放失败")
 	}
-	return newStableError(codes.Unavailable, 503, ReasonProviderUnavailable, "供应商明确未受理且未计费")
+	return returnError
+}
+
+func stableProviderFailure(failure *ProviderFailure) error {
+	switch failure.Code {
+	case ReasonProviderRateLimited:
+		return newStableError(codes.ResourceExhausted, 429, ReasonProviderRateLimited, "供应商限流且确认未计费")
+	case ReasonProviderBadRequest:
+		return newStableError(codes.InvalidArgument, 400, ReasonProviderBadRequest, "供应商拒绝请求参数且确认未计费")
+	case ReasonProviderAuthFailed:
+		return newStableError(codes.PermissionDenied, 403, ReasonProviderAuthFailed, "供应商认证失败且确认未计费")
+	case ReasonSchemaUnsupported:
+		return newStableError(codes.FailedPrecondition, 412, ReasonSchemaUnsupported, "供应商不支持请求的输出 schema")
+	default:
+		return newStableError(codes.Unavailable, 503, ReasonProviderUnavailable, "供应商请求失败且确认未计费")
+	}
 }
 
 func (s *Service) markBudgetOverrun(
@@ -1030,54 +1183,77 @@ func (s *Service) replayResponse(
 	result providerResult,
 	actualCostMicroUSD int64,
 ) (*llmgwv1.ChatResponse, error) {
-	var (
-		attemptID     string
-		attemptStatus string
-		provider      string
-		inputTokens   *int64
-		outputTokens  *int64
-		costMicroUSD  *int64
-		requestID     *string
-		errorCode     *string
-		startedAt     *time.Time
-		finishedAt    *time.Time
-	)
-	err := s.pool.QueryRow(ctx, `
-		SELECT attempt_id::text, status, provider, input_tokens,
-		       output_tokens, cost_micro_usd, provider_request_id,
-		       error_code, started_at, finished_at
+	attempts, err := s.loadAttemptSummaries(ctx, prepared.logicalCallPK)
+	if err != nil {
+		return nil, err
+	}
+	return buildResponse(prepared, result, actualCostMicroUSD, attempts), nil
+}
+
+func (s *Service) loadAttemptSummaries(
+	ctx context.Context,
+	logicalCallPK string,
+) ([]*llmgwv1.AttemptSummary, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT attempt_id::text, model_id, provider, status,
+		       input_tokens, output_tokens, cost_micro_usd,
+		       provider_request_id, error_code, started_at, finished_at
 		FROM llm_provider_attempt
 		WHERE logical_call_pk = $1
-		ORDER BY attempt_no
-		LIMIT 1`,
-		prepared.logicalCallPK,
-	).Scan(
-		&attemptID, &attemptStatus, &provider, &inputTokens,
-		&outputTokens, &costMicroUSD, &requestID, &errorCode,
-		&startedAt, &finishedAt,
+		ORDER BY attempt_no`,
+		logicalCallPK,
 	)
 	if err != nil {
-		return nil, newStableError(codes.Internal, 500, "INTERNAL", "读取已结算 attempt 失败")
+		return nil, newStableError(codes.Internal, 500, "INTERNAL", "读取供应商 attempt 失败")
 	}
-	prepared.attemptID = attemptID
-	prepared.selected.provider = provider
-	response := buildResponse(prepared, result, actualCostMicroUSD, valueOrZeroTime(finishedAt))
-	response.Attempts[0].Status = attemptStatus
-	response.Attempts[0].ProviderRequestId = valueOrEmpty(requestID)
-	response.Attempts[0].ErrorCode = valueOrEmpty(errorCode)
-	if startedAt != nil && finishedAt != nil {
-		response.Attempts[0].LatencyMs = finishedAt.Sub(*startedAt).Milliseconds()
+	defer rows.Close()
+
+	var attempts []*llmgwv1.AttemptSummary
+	for rows.Next() {
+		var (
+			attempt                                 llmgwv1.AttemptSummary
+			inputTokens, outputTokens, costMicroUSD *int64
+			providerRequestID, errorCode            *string
+			startedAt, finishedAt                   *time.Time
+		)
+		if err := rows.Scan(
+			&attempt.AttemptId,
+			&attempt.ModelId,
+			&attempt.Provider,
+			&attempt.Status,
+			&inputTokens,
+			&outputTokens,
+			&costMicroUSD,
+			&providerRequestID,
+			&errorCode,
+			&startedAt,
+			&finishedAt,
+		); err != nil {
+			return nil, newStableError(codes.Internal, 500, "INTERNAL", "解析供应商 attempt 失败")
+		}
+		if inputTokens != nil || outputTokens != nil {
+			attempt.Usage = &llmgwv1.Usage{}
+			if inputTokens != nil {
+				attempt.Usage.InputTokens = *inputTokens
+			}
+			if outputTokens != nil {
+				attempt.Usage.OutputTokens = *outputTokens
+			}
+		}
+		if costMicroUSD != nil {
+			attempt.CostMicroUsd = *costMicroUSD
+		}
+		attempt.ProviderRequestId = valueOrEmpty(providerRequestID)
+		attempt.ErrorCode = valueOrEmpty(errorCode)
+		if startedAt != nil && finishedAt != nil {
+			attempt.LatencyMs = finishedAt.Sub(*startedAt).Milliseconds()
+		}
+		attempts = append(attempts, &attempt)
 	}
-	if inputTokens != nil {
-		response.Attempts[0].Usage.InputTokens = *inputTokens
+	if err := rows.Err(); err != nil {
+		return nil, newStableError(codes.Internal, 500, "INTERNAL", "遍历供应商 attempt 失败")
 	}
-	if outputTokens != nil {
-		response.Attempts[0].Usage.OutputTokens = *outputTokens
-	}
-	if costMicroUSD != nil {
-		response.Attempts[0].CostMicroUsd = *costMicroUSD
-	}
-	return response, nil
+	return attempts, nil
 }
 
 func (s *Service) insertProjection(
@@ -1110,15 +1286,18 @@ func buildResponse(
 	prepared *preparedCall,
 	result providerResult,
 	actualCostMicroUSD int64,
-	finishedAt time.Time,
+	attempts []*llmgwv1.AttemptSummary,
 ) *llmgwv1.ChatResponse {
-	latency := int64(0)
-	if !prepared.startedAt.IsZero() && !finishedAt.IsZero() {
-		latency = finishedAt.Sub(prepared.startedAt).Milliseconds()
+	modelID := prepared.selected.modelID
+	for _, attempt := range attempts {
+		if attempt.GetStatus() == "SUCCEEDED" {
+			modelID = attempt.GetModelId()
+			break
+		}
 	}
 	return &llmgwv1.ChatResponse{
 		Content:   result.Content,
-		Model:     prepared.selected.modelID,
+		Model:     modelID,
 		InTokens:  int32(result.InputTokens),
 		OutTokens: int32(result.OutputTokens),
 		Cost:      float64(actualCostMicroUSD) / 1_000_000,
@@ -1132,16 +1311,7 @@ func buildResponse(
 			ActualMicroUsd:   actualCostMicroUSD,
 			SettlementStatus: "SETTLED",
 		},
-		Attempts: []*llmgwv1.AttemptSummary{{
-			AttemptId:         prepared.attemptID,
-			ModelId:           prepared.selected.modelID,
-			Provider:          prepared.selected.provider,
-			Status:            "SUCCEEDED",
-			LatencyMs:         latency,
-			Usage:             &llmgwv1.Usage{InputTokens: result.InputTokens, OutputTokens: result.OutputTokens},
-			CostMicroUsd:      actualCostMicroUSD,
-			ProviderRequestId: result.ProviderRequestID,
-		}},
+		Attempts:          attempts,
 		LedgerEntryId:     prepared.ledgerEntryID,
 		RouteVersion:      prepared.route.version,
 		PriceTableVersion: prepared.route.priceVersion,
@@ -1176,6 +1346,16 @@ func maxAttemptCost(models []modelPrice, inputBound, outputBound int64) (int64, 
 		}
 	}
 	return maximum, nil
+}
+
+func effectiveAttemptLimit(route routeConfig) int32 {
+	if route.maxAttempts < 1 {
+		return 1
+	}
+	if route.maxAttempts > maxProviderAttempts {
+		return maxProviderAttempts
+	}
+	return route.maxAttempts
 }
 
 func costForTokens(tokens, microUSDPerMillion int64) (int64, error) {
@@ -1213,13 +1393,6 @@ func isUniqueViolation(err error) bool {
 func valueOrEmpty(value *string) string {
 	if value == nil {
 		return ""
-	}
-	return *value
-}
-
-func valueOrZeroTime(value *time.Time) time.Time {
-	if value == nil {
-		return time.Time{}
 	}
 	return *value
 }
