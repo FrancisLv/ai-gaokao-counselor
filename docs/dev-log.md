@@ -2022,3 +2022,51 @@ fake provider、按实际 usage 结算和权威调用账本；不实现后续票
   与验证、六类敏感数据分类及缓存；这些是 #33 起的后续 M5a 增量。
 - request hash 当前对规范化请求做 SHA-256，数据分类与直接标识检测尚未接入；
   在 #37 完成前不得把该入口视为完整隐私边界。
+
+## 61. M5a-02 principal + session 预算硬边界
+
+**日期与范围**：2026-11-20，issue #33。按 TDD 从生成的
+`LLMGatewayClient.Chat` 收紧 `principal_id + session_id` 作用域的 token/cost
+硬上限；不实现 #34 的多 attempt fallback、并发同 ID 仲裁或后续 prompt/schema、
+敏感分类、缓存与流式能力。
+
+### 事务与状态语义
+
+- 默认作用域仍为 50,000 provider tokens 与 150,000 `USD_MICRO`。同一 session
+  的新 run 继续累计，同一 principal 的新 session 建立独立 scope；服务端不接受
+  客户端覆盖限额或作用域身份。
+- logical call 直接以 `IN_PROGRESS`、首个 provider attempt 直接以
+  `IN_PROGRESS` 与预算预占在同一事务提交。预占只用一条带
+  `budget_status = 'ACTIVE'` 和 `settled + reserved + request <= limit` 条件的
+  UPDATE 仲裁；失败事务回滚 logical call/attempt，provider 零调用。
+- 成功结算在同一事务中扣减整笔预留、增加实际 provider tokens/cost，并持久化
+  attempt 与逻辑调用；成功响应只在该事务提交后返回。
+- provider 通过 `ErrProviderNotCharged` 明确表示未受理且未计费时，attempt 进入
+  `FAILED_NO_CHARGE`、logical call 进入 `FAILED`，token/cost 预留全部释放。
+- 实际 usage 超过预占时，attempt 进入 `PENDING_RECONCILIATION`，logical call
+  进入 `BUDGET_OVERRUN`，预算 scope 锁存 `budget_status = 'BUDGET_OVERRUN'`；
+  留存既有预留和实际 usage 供人工对账，后续新调用在 provider 零调用下返回
+  `BUDGET_OVERRUN`。
+- `llm_call_log` 继续只做 best-effort 投影；其写入失败、表缺失或内容不一致均不
+  参与预算判定，权威来源仅为 scope / logical call / provider attempt。
+- `migrations/30_llm_budget_overrun.sql` 只增作用域封锁状态与时间、扩展 logical
+  call 状态约束；不修改历史迁移或旧 `chat_session` 预算列。
+
+### 验证
+
+- 真实 PostgreSQL 主 seam 测试从生成的 `LLMGatewayClient.Chat` 进入，使用
+  Kratos gRPC + bufconn 和 fake provider；每个测试使用独立临时 schema。
+- 覆盖并发 token 上限、并发成本上限、失败请求零 provider/attempt、跨 run 累计、
+  独立 session 不串账、默认 50K/150K、成功结算差额、明确未计费全额释放、
+  实际用量超预留后封锁后续调用，以及删除 `llm_call_log` 后权威预算仍正确。
+- fresh schema 覆盖 `00/07→30`，升级路径覆盖 `28→29→30`；SQL CHECK 拒绝非法
+  `budget_status`。
+
+### 边界与风险
+
+- provider 仍只有 fail-closed 实现；`ErrProviderNotCharged` 是可测试的内部
+  adapter 语义，不代表已接入真实供应商 SDK。
+- 因 `BUDGET_OVERRUN` 保持预留待人工对账，本票没有新增对账 RPC；#35 需要提供
+  幂等对账并决定超限费用的最终入账方式。
+- route 当前仍按最坏 `max_attempts` 预占但只执行首个 attempt；fallback 与可重试
+  故障分类属于 #34。
