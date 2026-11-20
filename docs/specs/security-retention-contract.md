@@ -216,6 +216,7 @@ DeletePrincipalDataCommand
 | `SENSITIVE_DATA_NOT_ALLOWED` | 敏感原文进入云模型 |
 | `DELETION_IN_PROGRESS` | 删除处理中禁止访问 |
 | `DELETION_FAILED_RETRYABLE` | 删除部分失败，保持 pending |
+| `DELETION_CONFIRMATION_INVALID` | 删除确认缺失、过期、已消费或参数不匹配 |
 | `RETENTION_POLICY_INVALID` | 没有匹配保留策略 |
 | `SECRET_EXPOSURE_BLOCKED` | 日志/响应检测到敏感凭据 |
 

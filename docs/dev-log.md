@@ -2505,7 +2505,55 @@ principal、目的、数据类别和 policy 版本绑定的 consent 检查；不
 - 本票只闭合 consent 使用闸门；删除、保留和恢复由后续 M5b tickets 完成。
 - 报告 LLM 尚未接入；后续报告叙事必须只消费规则级脱敏结论，不能回读敏感画像值。
 
-## 71. M5b-02 受控报告叙事、剥离与降级
+## 71. M5b-06 principal 删除即时封锁、tombstone 与资源 ledger
+
+**日期与范围**：2026-11-20，issue #46。实现 `DeletePrincipalData` 控制面
+adapter；不实现保留清理（#47）或备份恢复重放（#48），不新增公开业务 seam。
+
+### 行为与安全边界
+
+- 删除请求在可信 principal、绑定请求的一次性确认和稳定 `request_id` 通过后，
+  先原子写入 `DELETION_PENDING`、最小 tombstone 与请求 ledger，再执行资源清理。
+  同一 `request_id` 已完成时重放原 receipt；部分失败时保持 pending，后续重试
+  继续清理且不重新消费确认。
+- `RunLifecycle` 的 `SubmitRun`、`ResumeRun`、`GetRun`、`WatchRun`、`CancelRun`
+  与 run-bound 检索 binding 在私有访问前检查 principal 状态。删除中返回
+  `DELETION_IN_PROGRESS`，删除完成后返回 `PRINCIPAL_DELETED`，不会先泄露 run
+  是否存在。
+- 清理覆盖 Profile revision/confirmation、interrupt、event、命令 receipt、
+  `plan_checkpoint`、官方 LangGraph checkpoint、正式结果、证据包、验证报告、
+  资格 artifact 与状态事件。run/session 保留最小去标识化 stub 以维持调用账本
+  引用；LLM logical call/预算/兼容投影去除 principal/session 关联、响应原文和
+  错误文本。
+- tombstone 只保存 principal 的 SHA-256 不可逆引用、request id、稳定原因码和
+  时间；用户提交的自由文本 `reason` 与确认 token 不进入 tombstone/ledger。
+- 正式结果默认仍不可改写；新迁移只在显式开启
+  `app.principal_deletion=on` 的删除事务中允许受控 DELETE，防止以删除实现绕过
+  ACTIVE/STALE 追加状态。
+
+### 验证
+
+- 测试从 `SubmitRun → GetRun` 观察删除前可读、删除中不可读、删除后不可见；
+  同时验证已删除 principal 不能重新 `SubmitRun`。
+- 删除已发布 `V1_FORMAL` 后，`run_result / run_evidence_package /
+  run_verification_report / run_formal_gate_artifact` 均清零；公开 release
+  保持存在。
+- 覆盖幂等重放且确认只消费一次、部分失败保持 pending 后重试成功、无效确认
+  稳定拒绝且保持原访问、Profile/task input/event/checkpoint 清理，以及敏感
+  reason 不落入审计表。
+- `ORCHESTRATOR_TEST_DSN=...` 下 #46 集成测试与完整真实 PostgreSQL 套件通过；
+  `make py-check`、`make build check test` 通过。
+
+### 边界与风险
+
+- 本票只关闭删除请求与即时封锁；7/30/180 天定时保留策略由 #47 完成，
+  备份恢复时 tombstone/ledger 重放由 #48 完成。
+- Redis 投影未直接清理；现状没有按 principal 存储的权威 Redis 对象，最终恢复
+  与投影重建仍须在 #48 验证。
+- 确认签发与重新认证服务不在本票范围；控制面通过
+  `DeletionConfirmationAuthority` 注入，生产未接线时不能放行删除。
+
+## 72. M5b-02 受控报告叙事、剥离与降级
 
 **日期与范围**：2026-11-20，issue #42。为确定性正式报告增加受
 `role=report` 约束的 LLMGateway 叙事 adapter；不新增公开 seam，不修改检索器、
@@ -2517,9 +2565,9 @@ principal、目的、数据类别和 policy 版本绑定的 consent 检查；不
   writer 只能返回 `overview / candidate_reasons / note`；总述与逐候选说明按稳定
   顺序合并，候选身份、概率、单位、年份、资格和最终顺序仍由既有模板渲染。
 - 叙事在进入报告前执行确定性边界检查：拒绝数字、已知学校/代码/专业身份、
-  EvidenceRef、未知字段、控制字符和模板控制符；`录取稳了` 等等价承诺也与既有
-  Verifier 词边界一并阻断。越界输出进入 `FAILED / VALIDATION_FAILED`，不回退后
-  静默发布。
+  EvidenceRef、未知字段、控制字符、模板控制符、资格结论和录取承诺；
+  `录取稳了` 等等价承诺也与既有 Verifier 词边界一并阻断。越界输出进入
+  `FAILED / VALIDATION_FAILED`，不回退后静默发布。
 - 模型超时、限流、不可用或缺失结构化输出时退回同事实集的确定性模板，并在风险
   区明确记录“生成质量降级”；NARRATIVE_RETRY 最多重写 2 次，超限同样降级。
 - 模型可选补充说明若没有证据，作为 NORMAL Claim 进入 VerifyPackage；由既有规则
@@ -2534,11 +2582,13 @@ principal、目的、数据类别和 policy 版本绑定的 consent 检查；不
 
 ### 验证
 
-- 新增主 seam 测试覆盖 LLM 叙事成功、事实/数值篡改、schema 污染、录取承诺、
-  非关键未知剥离、超时降级和两次重写上限；全部从
+- 新增主 seam 测试覆盖 LLM 叙事成功、事实/数值篡改、schema 污染、资格越权、
+  录取承诺、非关键未知剥离、超时降级和两次重写上限；全部从
   `SubmitRun → ResumeRun → GetRun` 观察。
-- `test_run_lifecycle_report` 共 11 项通过；需要后续在完整集成分支重跑
-  `test_run*.py` 与全仓检查。
+- `test_run_lifecycle_report` 共 12 项通过；真实 PostgreSQL `test_run*.py`
+  共 111 项通过、1 项因未配置真实算法地址跳过。
+- `make py-check py-test`、`make build check test`、`make compose-check`
+  与 `git diff --check` 通过。
 
 ### 边界与风险
 

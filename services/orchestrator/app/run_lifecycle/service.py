@@ -207,6 +207,10 @@ class RunLifecycle:
         conn = await self._connect()
         try:
             async with conn.transaction():
+                await self._raise_if_principal_unavailable(
+                    conn,
+                    command.principal_id,
+                )
                 await conn.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                     (receipt_lock,),
@@ -298,6 +302,7 @@ class RunLifecycle:
     async def GetRun(self, *, principal_id: str, run_id: UUID) -> RunView:
         conn = await self._connect()
         try:
+            await self._raise_if_principal_unavailable(conn, principal_id)
             row = await (
                 await conn.execute(
                     """
@@ -421,6 +426,28 @@ class RunLifecycle:
         finally:
             await conn.close()
 
+    @staticmethod
+    async def _raise_if_principal_unavailable(
+        conn: psycopg.AsyncConnection,
+        principal_id: str,
+    ) -> None:
+        row = await (
+            await conn.execute(
+                """
+                SELECT status
+                FROM principal_data_state
+                WHERE principal_id = %s
+                """,
+                (principal_id,),
+            )
+        ).fetchone()
+        if row is None:
+            return
+        if row["status"] == "DELETION_PENDING":
+            raise RunLifecycleError("DELETION_IN_PROGRESS")
+        if row["status"] == "DELETED":
+            raise RunLifecycleError("PRINCIPAL_DELETED")
+
     async def GetRetrievalRunBinding(
         self,
         *,
@@ -443,6 +470,7 @@ class RunLifecycle:
 
         conn = await self._connect()
         try:
+            await self._raise_if_principal_unavailable(conn, principal_id)
             row = await (
                 await conn.execute(
                     """
@@ -1404,6 +1432,10 @@ class RunLifecycle:
         conn = await self._connect()
         try:
             async with conn.transaction():
+                await self._raise_if_principal_unavailable(
+                    conn,
+                    command.principal_id,
+                )
                 await conn.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                     (receipt_lock,),
@@ -4061,6 +4093,10 @@ class RunLifecycle:
         conn = await self._connect()
         try:
             async with conn.transaction():
+                await self._raise_if_principal_unavailable(
+                    conn,
+                    command.principal_id,
+                )
                 await conn.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                     (receipt_lock,),
@@ -4344,6 +4380,7 @@ class RunLifecycle:
     ) -> AsyncIterator[RunEvent]:
         conn = await self._connect(autocommit=True)
         try:
+            await self._raise_if_principal_unavailable(conn, principal_id)
             owned = await (
                 await conn.execute(
                     "SELECT 1 FROM run WHERE run_id = %s AND principal_id = %s",
