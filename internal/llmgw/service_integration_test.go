@@ -457,8 +457,9 @@ func (f *llmTestFixture) chatClient(t *testing.T, provider llmgw.Provider) llmgw
 }
 
 func (f *llmTestFixture) chatRequest(logicalCallID string) *llmgwv1.ChatRequest {
+	trace := commonv1Trace()
 	return &llmgwv1.ChatRequest{
-		Trace:                 &commonTrace,
+		Trace:                 &trace,
 		Role:                  "profile",
 		Messages:              []*llmgwv1.Msg{{Role: "user", Content: "请概括这份已脱敏画像"}},
 		Temperature:           0,
@@ -2758,5 +2759,295 @@ func TestChatRejectsUnknownTypedDataClassBeforeProvider(t *testing.T) {
 	assertStableError(t, err, codes.InvalidArgument, llmgw.ReasonRequestInvalid)
 	if calls := provider.callsSnapshot(); len(calls) != 0 {
 		t.Fatalf("未知 data class 触发 provider %d 次", len(calls))
+	}
+}
+
+func TestChatRejectsDirectIdentifiersAndRawSensitiveFactsBeforePersistence(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	provider := &fakeProvider{}
+	client := fixture.chatClient(t, provider)
+
+	tests := []struct {
+		name   string
+		mutate func(*llmgwv1.ChatRequest)
+		secret string
+	}{
+		{
+			name: "mobile number",
+			mutate: func(req *llmgwv1.ChatRequest) {
+				req.Messages[0].Content = "手机号：13800138000"
+			},
+			secret: "13800138000",
+		},
+		{
+			name: "formatted mobile number",
+			mutate: func(req *llmgwv1.ChatRequest) {
+				req.Messages[0].Content = "手机号：138-0013-8000"
+			},
+			secret: "138-0013-8000",
+		},
+		{
+			name: "resident identity number",
+			mutate: func(req *llmgwv1.ChatRequest) {
+				req.Messages[0].Content = "身份证 11010519491231002X"
+			},
+			secret: "11010519491231002X",
+		},
+		{
+			name: "email address",
+			mutate: func(req *llmgwv1.ChatRequest) {
+				req.Messages[0].Content = "联系 candidate@example.com"
+			},
+			secret: "candidate@example.com",
+		},
+		{
+			name: "raw colour vision fact",
+			mutate: func(req *llmgwv1.ChatRequest) {
+				req.Messages[0].Content = "我有色弱"
+			},
+			secret: "色弱",
+		},
+		{
+			name: "raw visual acuity fact",
+			mutate: func(req *llmgwv1.ChatRequest) {
+				req.Messages[0].Content = "裸眼视力4.8"
+			},
+			secret: "4.8",
+		},
+		{
+			name: "raw gender fact",
+			mutate: func(req *llmgwv1.ChatRequest) {
+				req.Messages[0].Content = "性别：女"
+			},
+			secret: "性别：女",
+		},
+		{
+			name: "raw household registration fact",
+			mutate: func(req *llmgwv1.ChatRequest) {
+				req.Messages[0].Content = "户籍：湖南长沙"
+			},
+			secret: "湖南长沙",
+		},
+		{
+			name: "raw school registration in prompt variable",
+			mutate: func(req *llmgwv1.ChatRequest) {
+				req.PromptVariables["candidate_name"] = "学籍：长沙一中"
+			},
+			secret: "长沙一中",
+		},
+		{
+			name: "direct identifier in trace",
+			mutate: func(req *llmgwv1.ChatRequest) {
+				req.Trace.TraceId = "trace-13912345678"
+			},
+			secret: "13912345678",
+		},
+		{
+			name: "model secret token",
+			mutate: func(req *llmgwv1.ChatRequest) {
+				req.Messages[0].Content = "api key sk-live-1234567890abcdef"
+			},
+			secret: "sk-live-1234567890abcdef",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logicalCallID := "logical-sensitive-" + strings.ReplaceAll(tt.name, " ", "-")
+			req := fixture.chatRequest(logicalCallID)
+			tt.mutate(req)
+
+			_, err := client.Chat(trustedChatContext(fixture.principal), req)
+			assertStableError(t, err, codes.FailedPrecondition, llmgw.ReasonSensitiveDataNotAllowed)
+			if strings.Contains(err.Error(), tt.secret) {
+				t.Fatalf("错误泄漏敏感原文 %q: %v", tt.secret, err)
+			}
+			var logicalCount, projectionCount int
+			if err := fixture.pool.QueryRow(context.Background(), `
+				SELECT
+					(SELECT count(*) FROM llm_logical_call WHERE logical_call_id = $1),
+					(SELECT count(*) FROM llm_call_log WHERE logical_call_id = $1)`,
+				logicalCallID,
+			).Scan(&logicalCount, &projectionCount); err != nil {
+				t.Fatalf("检查敏感拒绝持久化: %v", err)
+			}
+			if logicalCount != 0 || projectionCount != 0 {
+				t.Fatalf("敏感拒绝仍写入 logical/projection = %d/%d", logicalCount, projectionCount)
+			}
+		})
+	}
+	if calls := provider.callsSnapshot(); len(calls) != 0 {
+		t.Fatalf("敏感原文触发 provider %d 次", len(calls))
+	}
+}
+
+func TestChatDoesNotPersistUnsafeProviderOutput(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		secret  string
+	}{
+		{
+			name:    "mobile number echoed",
+			content: "联系手机号 13800138000",
+			secret:  "13800138000",
+		},
+		{
+			name:    "raw colour vision fact echoed",
+			content: "该考生色弱，限制规则为 FAIL",
+			secret:  "色弱",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newLLMTestFixture(t)
+			provider := &fakeProvider{response: llmgw.ProviderResponse{
+				Content: tt.content, InputTokens: 4, OutputTokens: 2,
+				FinishReason: "STOP", ProviderRequestID: "provider-safe-id",
+			}}
+			client := fixture.chatClient(t, provider)
+			logicalCallID := "logical-unsafe-output-" + strings.ReplaceAll(tt.name, " ", "-")
+			req := fixture.chatRequest(logicalCallID)
+
+			resp, err := client.Chat(trustedChatContext(fixture.principal), req)
+			assertStableError(t, err, codes.FailedPrecondition, llmgw.ReasonSensitiveDataNotAllowed)
+			if resp != nil {
+				t.Fatalf("不安全供应商输出返回了响应: %+v", resp)
+			}
+			if strings.Contains(err.Error(), tt.secret) {
+				t.Fatalf("错误泄漏供应商敏感原文 %q: %v", tt.secret, err)
+			}
+			if calls := provider.callsSnapshot(); len(calls) != 1 {
+				t.Fatalf("不安全输出 provider calls = %d, want 1", len(calls))
+			}
+
+			var (
+				logicalStatus    string
+				errorReason      *string
+				responsePayload  *string
+				attemptStatus    string
+				attemptErrorCode *string
+				settledTokens    int64
+				settledCost      int64
+				reservedTokens   int64
+				reservedCost     int64
+				projectionStatus string
+				projectionError  string
+			)
+			if err := fixture.pool.QueryRow(context.Background(), `
+				SELECT logical.status,
+				       logical.error_reason,
+				       logical.response_payload::text,
+				       attempt.status,
+				       attempt.error_code,
+				       budget.provider_tokens_settled,
+				       budget.cost_settled_micro_usd,
+				       budget.provider_tokens_reserved,
+				       budget.cost_reserved_micro_usd
+				FROM llm_logical_call logical
+				JOIN llm_provider_attempt attempt
+				  ON attempt.logical_call_pk = logical.logical_call_pk
+				JOIN llm_budget_scope budget
+				  ON budget.budget_scope_id = logical.budget_scope_id
+				WHERE logical.logical_call_id = $1`,
+				logicalCallID,
+			).Scan(
+				&logicalStatus, &errorReason, &responsePayload,
+				&attemptStatus, &attemptErrorCode, &settledTokens,
+				&settledCost, &reservedTokens, &reservedCost,
+			); err != nil {
+				t.Fatalf("读取不安全输出账本: %v", err)
+			}
+			if logicalStatus != "FAILED" || attemptStatus != "SUCCEEDED" {
+				t.Fatalf("不安全输出状态 = logical %q attempt %q", logicalStatus, attemptStatus)
+			}
+			if errorReason == nil || *errorReason != llmgw.ReasonSensitiveDataNotAllowed ||
+				attemptErrorCode == nil || *attemptErrorCode != llmgw.ReasonSensitiveDataNotAllowed {
+				t.Fatalf("不安全输出原因 = logical %v attempt %v", errorReason, attemptErrorCode)
+			}
+			if responsePayload != nil {
+				t.Fatalf("不安全供应商响应写入账本: %q", *responsePayload)
+			}
+			if settledTokens != 6 || settledCost != 8 || reservedTokens != 0 || reservedCost != 0 {
+				t.Fatalf("不安全输出结算 = settled %d/%d reserved %d/%d",
+					settledTokens, settledCost, reservedTokens, reservedCost)
+			}
+			if err := fixture.pool.QueryRow(context.Background(), `
+				SELECT status, error_message
+				FROM llm_call_log
+				WHERE logical_call_id = $1`,
+				logicalCallID,
+			).Scan(&projectionStatus, &projectionError); err != nil {
+				t.Fatalf("读取不安全输出投影: %v", err)
+			}
+			if projectionStatus != "fail" || projectionError != llmgw.ReasonSensitiveDataNotAllowed {
+				t.Fatalf("不安全输出投影 = %q/%q", projectionStatus, projectionError)
+			}
+			if strings.Contains(projectionError, tt.secret) {
+				t.Fatalf("投影泄漏敏感原文 %q", projectionError)
+			}
+
+			_, replayErr := client.Chat(trustedChatContext(fixture.principal), req)
+			assertStableError(t, replayErr, codes.FailedPrecondition, llmgw.ReasonSensitiveDataNotAllowed)
+			if calls := provider.callsSnapshot(); len(calls) != 1 {
+				t.Fatalf("不安全输出重放 provider calls = %d, want 1", len(calls))
+			}
+		})
+	}
+}
+
+func TestChatAllowsSanitizedEligibilityConclusionInProviderOutput(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	provider := &fakeProvider{response: llmgw.ProviderResponse{
+		Content:     "色觉要求结论：FAIL；健康限制核验为 UNKNOWN",
+		InputTokens: 3, OutputTokens: 2, FinishReason: "STOP",
+	}}
+	client := fixture.chatClient(t, provider)
+
+	resp, err := client.Chat(
+		trustedChatContext(fixture.principal),
+		fixture.chatRequest("logical-safe-sanitized-output"),
+	)
+	if err != nil {
+		t.Fatalf("合法脱敏供应商输出被拒绝: %v", err)
+	}
+	if !strings.Contains(resp.GetContent(), "PASS") &&
+		!strings.Contains(resp.GetContent(), "FAIL") &&
+		!strings.Contains(resp.GetContent(), "UNKNOWN") {
+		t.Fatalf("合法脱敏供应商输出内容异常: %q", resp.GetContent())
+	}
+}
+
+func TestChatAllowsSanitizedEligibilityRuleConclusions(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	provider := &fakeProvider{response: llmgw.ProviderResponse{
+		Content: "已按脱敏规则结论生成", InputTokens: 1, OutputTokens: 1, FinishReason: "STOP",
+	}}
+	client := fixture.chatClient(t, provider)
+	conclusions := []string{
+		"色觉要求结论：FAIL",
+		"健康限制核验为 UNKNOWN",
+		"户籍规则结论：PASS",
+		"视力条件：FAIL",
+	}
+	for index, conclusion := range conclusions {
+		req := fixture.chatRequest(fmt.Sprintf("logical-sanitized-%d", index))
+		req.Messages[0].Content = conclusion
+		if _, err := client.Chat(trustedChatContext(fixture.principal), req); err != nil {
+			t.Fatalf("合法脱敏结论 [%d] %q 被拒绝: %v", index, conclusion, err)
+		}
+	}
+	calls := provider.callsSnapshot()
+	if len(calls) != len(conclusions) {
+		t.Fatalf("合法脱敏结论 provider calls = %d, want %d", len(calls), len(conclusions))
+	}
+	for index, call := range calls {
+		contents := make([]string, 0, len(call.messages))
+		for _, message := range call.messages {
+			contents = append(contents, message.Content)
+		}
+		joined := strings.Join(contents, "\n")
+		if !strings.Contains(joined, conclusions[index]) {
+			t.Fatalf("provider 未收到脱敏结论 %q: %s", conclusions[index], joined)
+		}
 	}
 }

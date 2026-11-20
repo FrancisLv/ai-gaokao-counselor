@@ -188,6 +188,9 @@ func (s *Service) Chat(ctx context.Context, req *llmgwv1.ChatRequest) (*llmgwv1.
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectUnsafeInput(governed); err != nil {
+		return nil, err
+	}
 
 	binding, err := s.loadRunBinding(ctx, governed)
 	if err != nil {
@@ -279,6 +282,11 @@ func (s *Service) executeProviderAttempts(ctx context.Context, prepared *prepare
 		actualTokens, err := checkedAdd(result.InputTokens, result.OutputTokens)
 		if err != nil {
 			return nil, s.markProviderUnknown(ctx, prepared, err)
+		}
+		if containsUnsafeProviderOutput(result) {
+			return nil, s.settleSensitiveOutputFailure(
+				ctx, prepared, result, actualCostMicroUSD, actualTokens,
+			)
 		}
 		if actualCostMicroUSD > prepared.reservedCost || actualTokens > prepared.reservedTokens {
 			return nil, s.markBudgetOverrun(ctx, prepared, result, actualCostMicroUSD)
@@ -1058,9 +1066,39 @@ func (s *Service) settleSchemaFailure(
 	actualCostMicroUSD int64,
 	actualTokens int64,
 ) error {
+	return s.settleRejectedProviderResult(
+		ctx, prepared, result, actualCostMicroUSD, actualTokens,
+		ReasonSchemaValidationFailed,
+		"供应商输出不符合已注册 response schema",
+	)
+}
+
+func (s *Service) settleSensitiveOutputFailure(
+	ctx context.Context,
+	prepared *preparedCall,
+	result providerResult,
+	actualCostMicroUSD int64,
+	actualTokens int64,
+) error {
+	return s.settleRejectedProviderResult(
+		ctx, prepared, result, actualCostMicroUSD, actualTokens,
+		ReasonSensitiveDataNotAllowed,
+		"供应商输出包含不得返回或持久化的敏感原文",
+	)
+}
+
+func (s *Service) settleRejectedProviderResult(
+	ctx context.Context,
+	prepared *preparedCall,
+	result providerResult,
+	actualCostMicroUSD int64,
+	actualTokens int64,
+	errorReason string,
+	errorMessage string,
+) error {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return newStableError(codes.Internal, 500, "INTERNAL", "启动 schema 失败结算事务失败")
+		return newStableError(codes.Internal, 500, "INTERNAL", "启动被拒输出结算事务失败")
 	}
 	defer tx.Rollback(ctx)
 
@@ -1072,7 +1110,7 @@ func (s *Service) settleSchemaFailure(
 		FOR UPDATE`,
 		prepared.logicalCallPK,
 	).Scan(&currentStatus); err != nil {
-		return newStableError(codes.Internal, 500, "INTERNAL", "读取 schema 失败调用状态失败")
+		return newStableError(codes.Internal, 500, "INTERNAL", "读取被拒输出调用状态失败")
 	}
 	if currentStatus != "IN_PROGRESS" {
 		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用已完成或正在结算")
@@ -1097,7 +1135,7 @@ func (s *Service) settleSchemaFailure(
 		actualTokens, actualCostMicroUSD, finishedAt, prepared.logicalCallPK,
 	)
 	if err != nil {
-		return newStableError(codes.Internal, 500, "INTERNAL", "释放 schema 失败预算差额失败")
+		return newStableError(codes.Internal, 500, "INTERNAL", "释放被拒输出预算差额失败")
 	}
 	if tag.RowsAffected() != 1 {
 		return newStableError(codes.Internal, 500, "INTERNAL", "预算预留状态不一致")
@@ -1114,13 +1152,13 @@ func (s *Service) settleSchemaFailure(
 		    finished_at = $6
 		WHERE attempt_id = $7 AND status = 'IN_PROGRESS'`,
 		result.InputTokens, result.OutputTokens, actualCostMicroUSD,
-		result.ProviderRequestID, ReasonSchemaValidationFailed, finishedAt, prepared.attemptID,
+		result.ProviderRequestID, errorReason, finishedAt, prepared.attemptID,
 	)
 	if err != nil {
-		return newStableError(codes.Internal, 500, "INTERNAL", "结算 schema 失败 attempt 失败")
+		return newStableError(codes.Internal, 500, "INTERNAL", "结算被拒输出 attempt 失败")
 	}
 	if tag.RowsAffected() != 1 {
-		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "attempt 状态不允许 schema 失败结算")
+		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "attempt 状态不允许被拒输出结算")
 	}
 
 	tag, err = tx.Exec(ctx, `
@@ -1135,21 +1173,20 @@ func (s *Service) settleSchemaFailure(
 		    updated_at = $5
 		WHERE logical_call_pk = $6 AND status = 'IN_PROGRESS'`,
 		result.InputTokens, result.OutputTokens, actualCostMicroUSD,
-		ReasonSchemaValidationFailed, finishedAt, prepared.logicalCallPK,
+		errorReason, finishedAt, prepared.logicalCallPK,
 	)
 	if err != nil {
-		return newStableError(codes.Internal, 500, "INTERNAL", "提交 schema 失败逻辑调用失败")
+		return newStableError(codes.Internal, 500, "INTERNAL", "提交被拒输出逻辑调用失败")
 	}
 	if tag.RowsAffected() != 1 {
-		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用状态不允许 schema 失败结算")
+		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用状态不允许被拒输出结算")
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return newStableError(codes.Internal, 500, "INTERNAL", "提交 schema 失败结算失败")
+		return newStableError(codes.Internal, 500, "INTERNAL", "提交被拒输出结算失败")
 	}
-	s.insertFailedProjection(ctx, prepared, result, actualCostMicroUSD)
+	s.insertFailedProjection(ctx, prepared, result, actualCostMicroUSD, errorReason)
 	return newStableError(
-		codes.FailedPrecondition, 412, ReasonSchemaValidationFailed,
-		"供应商输出不符合已注册 response schema",
+		codes.FailedPrecondition, 412, errorReason, errorMessage,
 	)
 }
 
@@ -1352,10 +1389,6 @@ func (s *Service) markBudgetOverrun(
 		return newStableError(codes.Internal, 500, "INTERNAL", "预算作用域状态不一致")
 	}
 
-	payload, err := json.Marshal(result)
-	if err != nil {
-		return newStableError(codes.Internal, 500, "INTERNAL", "序列化预算超限结果失败")
-	}
 	tag, err = tx.Exec(ctx, `
 		UPDATE llm_provider_attempt
 		SET status = 'PENDING_RECONCILIATION',
@@ -1382,12 +1415,12 @@ func (s *Service) markBudgetOverrun(
 		    actual_input_tokens = $1,
 		    actual_output_tokens = $2,
 		    actual_cost_micro_usd = $3,
-		    response_payload = $4,
-		    error_reason = $5,
-		    updated_at = $6
-		WHERE logical_call_pk = $7 AND status = 'IN_PROGRESS'`,
+		    response_payload = NULL,
+		    error_reason = $4,
+		    updated_at = $5
+		WHERE logical_call_pk = $6 AND status = 'IN_PROGRESS'`,
 		result.InputTokens, result.OutputTokens, actualCostMicroUSD,
-		payload, ReasonBudgetOverrun, finishedAt, prepared.logicalCallPK,
+		ReasonBudgetOverrun, finishedAt, prepared.logicalCallPK,
 	)
 	if err != nil {
 		return newStableError(codes.Internal, 500, "INTERNAL", "记录预算超限逻辑调用失败")
@@ -1519,6 +1552,13 @@ func (s *Service) resolveExistingCall(
 		return nil, nil, newStableError(
 			codes.FailedPrecondition, 412, ReasonSchemaValidationFailed,
 			"供应商输出不符合已注册 response schema",
+		)
+	}
+	if status == "FAILED" && errorReason != nil &&
+		*errorReason == ReasonSensitiveDataNotAllowed {
+		return nil, nil, newStableError(
+			codes.FailedPrecondition, 412, ReasonSensitiveDataNotAllowed,
+			"供应商输出包含不得返回或持久化的敏感原文",
 		)
 	}
 	if status == "FAILED" || status == "BUDGET_OVERRUN" {
@@ -1682,6 +1722,7 @@ func (s *Service) insertFailedProjection(
 	prepared *preparedCall,
 	result providerResult,
 	actualCostMicroUSD int64,
+	errorReason string,
 ) {
 	_, _ = s.pool.Exec(ctx, `
 		INSERT INTO llm_call_log (
@@ -1697,7 +1738,7 @@ func (s *Service) insertFailedProjection(
 		prepared.traceID, prepared.sessionID, prepared.role,
 		prepared.selected.modelID, prepared.requestHash,
 		result.InputTokens, result.OutputTokens, float64(actualCostMicroUSD)/1_000_000,
-		time.Since(prepared.startedAt).Milliseconds(), ReasonSchemaValidationFailed,
+		time.Since(prepared.startedAt).Milliseconds(), errorReason,
 		prepared.logicalCallID, prepared.ledgerEntryID, prepared.attemptID,
 		prepared.route.version, prepared.route.priceVersion, actualCostMicroUSD,
 	)

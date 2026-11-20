@@ -104,6 +104,13 @@ func invalidDataClassification() error {
 func sensitiveDataNotAllowed() error {
 	return newStableError(
 		codes.FailedPrecondition, 412, ReasonSensitiveDataNotAllowed,
-		"请求数据分类或内容不允许进入云模型",
+		"请求数据分类未被 route 的云端策略允许",
+	)
+}
+
+func sensitiveInputNotAllowed() error {
+	return newStableError(
+		codes.FailedPrecondition, 412, ReasonSensitiveDataNotAllowed,
+		"请求内容包含不得进入云模型的敏感原文或直接身份标识",
 	)
 }
