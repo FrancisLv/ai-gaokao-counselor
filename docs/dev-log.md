@@ -2471,3 +2471,36 @@ LLM、不新增 golden set/EvalRun，不改检索器、资格规则或第二业�
   算法派生事实伪装为文档事实。
 - `ALGORITHM_PREVIEW` 标识与存储能力为兼容保留，但已确认画像的正常成功路径现在
   发布 `V1_FORMAL`；需要预览的独立产品入口不在本票范围。
+
+## 70. M5b-05 敏感资格数据的 consent 使用闸门
+
+**日期与范围**：2026-11-20，issue #45。为已确认画像中的敏感资格字段增加
+principal、目的、数据类别和 policy 版本绑定的 consent 检查；不实现删除、保留、
+备份恢复或报告 LLM 叙事。
+
+### 行为与实现
+
+- 新增 `consent_record` 迁移，保存 principal、目的、数据类别、policy 版本、
+  授予/撤销时间和监护人确认。敏感字段分类覆盖色觉/视力/健康、性别、户籍和学籍；
+  只有 `PROVIDED/DERIVED` 且值存在时触发闸门。
+- consent 查询按 `SENSITIVE_ELIGIBILITY_EVALUATION + SENSITIVE_ELIGIBILITY_DATA`
+  精确匹配当前 policy 版本。存在有效记录才放行；当前版本已撤销返回
+  `CONSENT_REVOKED`；缺失、目的不符、数据类别不符或 policy 过期返回
+  `CONSENT_REQUIRED`。
+- 检查发生在编译算法/资格预览前，并在已有预览准备进入报告时再次执行，防止同意在
+  执行期间撤销后继续发布。失败沿用 RunLifecycle 稳定终态，不产生正式结果。
+- PROFILE_CONFIRM/INTAKE_ASK 的持久业务事件对敏感字段值做确定性脱敏，仅保留字段
+  状态和来源；测试同时检查事件、RESULT 和正式结果不包含色觉原始值。
+
+### 验证
+
+- 新增主 seam 测试覆盖无同意、撤销、目的不符、数据类别不符、policy 过期、有效
+  同意和敏感值脱敏；成功路径仍从 `SubmitRun → ResumeRun → GetRun` 发布
+  `V1_FORMAL`。
+- 真实 PostgreSQL 下完整 `test_run*.py` 共 103 项通过、1 项因未配置真实算法地址
+  跳过；`make py-check py-test` 通过。
+
+### 边界与风险
+
+- 本票只闭合 consent 使用闸门；删除、保留和恢复由后续 M5b tickets 完成。
+- 报告 LLM 尚未接入；后续报告叙事必须只消费规则级脱敏结论，不能回读敏感画像值。
