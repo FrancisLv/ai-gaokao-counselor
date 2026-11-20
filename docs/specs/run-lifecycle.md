@@ -3,7 +3,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 版本 | v1.0 |
-| 状态 | 待确认；确认后作为 M2 实现基线 |
+| 状态 | 已确认；作为 M2 实现基线 |
 | 上游 | [PRD v1.3 §5.2、§6.2、§8.2、§13](../prd.md)、[GLOSSARY.md](../../GLOSSARY.md) |
 | 关联 | [ADR-0002](../adr/0002-langgraph-official-postgres-saver.md)、[Profile Contract](./profile-contract.md) |
 
@@ -327,6 +327,9 @@ expires_at
   `disclaimer / risk_notice / no_admission_guarantee`。
 - 正式结果响应还以 additively added `report` 返回版本化、已通过门禁的确定性报告章节；
   报告中的候选身份、数值、单位和样本年份必须与已固化证据包一致。
+- 可读报告的每个 section 返回 `citations`，至少包含 `evidence_id`、
+  `content_sha256`、`release_id` 和可用的 source locator；当前算法产物未提供当前
+  招生计划数时必须显式列入 `unverified_facts`，不得从历史录取人数推断。
 - 同一 `result_version` 只能映射一份规范化输入摘要；重试重放原结果与事件，摘要冲突
   返回 `RESULT_VERSION_CONFLICT`。发布与取消竞争只有一个终态提交成功。
 - Redis 仅作通知或可重建投影，不是权威状态。

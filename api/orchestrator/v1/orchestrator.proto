@@ -334,6 +334,17 @@ message FormalReportSection {
   string section_key = 1;
   string title = 2;
   string body = 3;
+  repeated FormalEvidenceCitation citations = 4;
+}
+
+message FormalEvidenceCitation {
+  string evidence_id = 1;
+  string evidence_type = 2;
+  string content_sha256 = 3;
+  string label = 4;
+  string source_uri = 5;
+  string section_path = 6;
+  string release_id = 7;
 }
 
 message FormalReport {
@@ -341,6 +352,7 @@ message FormalReport {
   string generation_mode = 2;
   repeated FormalReportSection sections = 3;
   repeated string claim_ids = 4;
+  repeated string unverified_facts = 5;
 }
 
 message RunViewReply {

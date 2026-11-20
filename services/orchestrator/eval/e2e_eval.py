@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-import hashlib
 import json
 
 from eval.eval_dataset import JointEvalDataset
+from eval.eval_run import finalize_eval_run
 from evidence.normalization import text_exceeds_admission_boundary
 
 
@@ -401,22 +401,7 @@ def build_eval_run(
             for case in e2e_report.cases
         ],
     }
-    canonical = json.dumps(
-        {
-            key: value
-            for key, value in payload.items()
-            if key != "generated_at"
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    result_sha256 = hashlib.sha256(canonical).hexdigest()
-    return {
-        **payload,
-        "result_sha256": result_sha256,
-        "eval_run_id": "eval_" + result_sha256,
-    }
+    return finalize_eval_run(payload)
 
 
 def _first_difference(

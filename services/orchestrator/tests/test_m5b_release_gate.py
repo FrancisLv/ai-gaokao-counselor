@@ -12,13 +12,20 @@ def _quality_report(*, gate_status="PASS", failed_metrics=(), metrics=None):
         "retrieval_recall_at_5": 0.9,
         "retrieval_mrr": 0.8,
         "retrieval_scope_leak_rate": 0.0,
+        "retrieval_mrr": 0.8,
+        "retrieval_scope_leak_rate": 0.0,
         "factual_claim_count": 10,
         "claim_citation_coverage": 1.0,
         "claim_citation_accuracy": 1.0,
         "claim_contradiction_rate": 0.0,
         "claim_critical_unverifiable_rate": 0.0,
         "claim_hallucination_rate": 0.0,
+        "illegal_candidate_leak_rate": 0.0,
         "run_active_execution_p99_ms": 1000,
+        "run_active_execution_max_ms": 1000,
+        "run_sample_count": 100,
+        "run_reproducibility_rate": 1.0,
+        "budget_reconciliation_pending_count": 0,
         "session_token_count_max": 100,
         "session_cost_micro_usd_max": 100,
         "budget_violation_count": 0,
@@ -47,29 +54,90 @@ def _passing_security_evidence():
     )
 
 
+def _dataset(owner_status="SIGNED_OFF"):
+    from eval.eval_dataset import JointEvalDataset
+
+    return JointEvalDataset(
+        manifest={
+            "dataset_version": "eval-v1",
+            "dataset_sha256": "a" * 64,
+            "release_id": "rel-v1",
+            "owner_status": owner_status,
+        },
+        retrieval_cases=(),
+        e2e_cases=(),
+    )
+
+
+def _evaluate(dataset, quality_report, security_evidence, *, identity=None):
+    from eval.eval_run import EvalRunRecord, finalize_eval_run
+    from eval.release_gate import evaluate_m5b_release_gate
+
+    identity = {
+        "git_sha": "b" * 40,
+        "baseline_eval_run_id": "eval_baseline",
+        "environment": "ci",
+        "hardware_profile": "linux-x86",
+        "model_route_version": "route-v1",
+        **(identity or {}),
+    }
+    payload = finalize_eval_run(
+        {
+            "schema_version": "eval-run-v1",
+            "generated_at": "2026-11-20T00:00:00+00:00",
+            "dataset": {
+                "version": dataset.manifest["dataset_version"],
+                "sha256": dataset.manifest["dataset_sha256"],
+                "owner_status": dataset.manifest["owner_status"],
+            },
+            "release_id": dataset.manifest["release_id"],
+            "code_identity": {"git_sha": identity["git_sha"]},
+            **{
+                key: value
+                for key, value in identity.items()
+                if key != "git_sha"
+            },
+            "metrics": quality_report.metrics,
+            "gate_status": quality_report.gate_status,
+            "release_gate_status": quality_report.gate_status,
+            "performance_context": {
+                "environment": identity["environment"],
+                "hardware_profile": identity["hardware_profile"],
+                "database_data_size": "fixture-small",
+                "model_route_version": identity["model_route_version"],
+                "cache_state": "warm",
+                "concurrency": 1,
+            },
+            "failed_metrics": list(quality_report.failed_metrics),
+            "failed_case_ids": [],
+            "failure_details": list(quality_report.failure_details),
+        }
+    )
+    record = EvalRunRecord(
+        eval_run_id=payload["eval_run_id"],
+        result_sha256=payload["result_sha256"],
+        dataset_version=dataset.manifest["dataset_version"],
+        dataset_sha256=dataset.manifest["dataset_sha256"],
+        release_id=dataset.manifest["release_id"],
+        git_sha=identity["git_sha"],
+        gate_status=quality_report.gate_status,
+        payload=payload,
+    )
+    return evaluate_m5b_release_gate(
+        dataset=dataset,
+        eval_run=record,
+        security_evidence=security_evidence,
+    )
+
+
 class M5bReleaseGateTests(unittest.TestCase):
     def test_all_quality_fact_and_security_gates_produce_a_publishable_decision(self):
         from eval.release_gate import evaluate_m5b_release_gate
 
-        dataset = type(
-            "Dataset",
-            (),
-            {
-                "manifest": {
-                    "dataset_version": "eval-v1",
-                    "dataset_sha256": "a" * 64,
-                    "release_id": "rel-v1",
-                }
-            },
-        )()
-        decision = evaluate_m5b_release_gate(
+        dataset = _dataset()
+        decision = _evaluate(
             dataset=dataset,
             quality_report=_quality_report(),
-            run_identity={
-                "git_sha": "b" * 40,
-                "baseline_eval_run_id": "eval_baseline",
-            },
-            failed_case_ids=(),
             security_evidence=_passing_security_evidence(),
         )
 
@@ -97,28 +165,13 @@ class M5bReleaseGateTests(unittest.TestCase):
     def test_budget_failure_blocks_release_without_misreporting_fact_failure(self):
         from eval.release_gate import evaluate_m5b_release_gate
 
-        dataset = type(
-            "Dataset",
-            (),
-            {
-                "manifest": {
-                    "dataset_version": "eval-v1",
-                    "dataset_sha256": "a" * 64,
-                    "release_id": "rel-v1",
-                }
-            },
-        )()
-        decision = evaluate_m5b_release_gate(
+        dataset = _dataset()
+        decision = _evaluate(
             dataset=dataset,
             quality_report=_quality_report(
                 gate_status="FAIL",
                 failed_metrics=("session_cost_micro_usd",),
             ),
-            run_identity={
-                "git_sha": "b" * 40,
-                "baseline_eval_run_id": "eval_baseline",
-            },
-            failed_case_ids=(),
             security_evidence=_passing_security_evidence(),
         )
 
@@ -137,27 +190,12 @@ class M5bReleaseGateTests(unittest.TestCase):
     def test_final_fact_contradiction_blocks_even_when_quality_gate_claims_pass(self):
         from eval.release_gate import evaluate_m5b_release_gate
 
-        dataset = type(
-            "Dataset",
-            (),
-            {
-                "manifest": {
-                    "dataset_version": "eval-v1",
-                    "dataset_sha256": "a" * 64,
-                    "release_id": "rel-v1",
-                }
-            },
-        )()
-        decision = evaluate_m5b_release_gate(
+        dataset = _dataset()
+        decision = _evaluate(
             dataset=dataset,
             quality_report=_quality_report(
                 metrics={"claim_contradiction_rate": 0.1},
             ),
-            run_identity={
-                "git_sha": "b" * 40,
-                "baseline_eval_run_id": "eval_baseline",
-            },
-            failed_case_ids=("e2e-fact",),
             security_evidence=_passing_security_evidence(),
         )
 
@@ -181,17 +219,7 @@ class M5bReleaseGateTests(unittest.TestCase):
             evaluate_m5b_release_gate,
         )
 
-        dataset = type(
-            "Dataset",
-            (),
-            {
-                "manifest": {
-                    "dataset_version": "eval-v1",
-                    "dataset_sha256": "a" * 64,
-                    "release_id": "rel-v1",
-                }
-            },
-        )()
+        dataset = _dataset()
         duplicate = SecurityGateEvidence(
             gate_id="CONSENT",
             passed=False,
@@ -199,14 +227,9 @@ class M5bReleaseGateTests(unittest.TestCase):
             threshold={"failed_cases": 0},
             failed_case_ids=("consent-case",),
         )
-        decision = evaluate_m5b_release_gate(
+        decision = _evaluate(
             dataset=dataset,
             quality_report=_quality_report(),
-            run_identity={
-                "git_sha": "b" * 40,
-                "baseline_eval_run_id": "eval_baseline",
-            },
-            failed_case_ids=(),
             security_evidence=(
                 *_passing_security_evidence(),
                 duplicate,
@@ -223,17 +246,7 @@ class M5bReleaseGateTests(unittest.TestCase):
     def test_each_security_failure_blocks_release_and_preserves_context(self):
         from eval.release_gate import evaluate_m5b_release_gate
 
-        dataset = type(
-            "Dataset",
-            (),
-            {
-                "manifest": {
-                    "dataset_version": "eval-v1",
-                    "dataset_sha256": "a" * 64,
-                    "release_id": "rel-v1",
-                }
-            },
-        )()
+        dataset = _dataset()
         for gate_id in ("CONSENT", "DELETION", "RETENTION", "RESTORE"):
             with self.subTest(gate_id=gate_id):
                 security = tuple(
@@ -248,14 +261,9 @@ class M5bReleaseGateTests(unittest.TestCase):
                     else evidence
                     for evidence in _passing_security_evidence()
                 )
-                decision = evaluate_m5b_release_gate(
+                decision = _evaluate(
                     dataset=dataset,
                     quality_report=_quality_report(),
-                    run_identity={
-                        "git_sha": "b" * 40,
-                        "baseline_eval_run_id": "eval_baseline",
-                    },
-                    failed_case_ids=(),
                     security_evidence=security,
                 )
 
@@ -283,25 +291,10 @@ class M5bReleaseGateTests(unittest.TestCase):
     def test_missing_security_evidence_fails_closed(self):
         from eval.release_gate import evaluate_m5b_release_gate
 
-        dataset = type(
-            "Dataset",
-            (),
-            {
-                "manifest": {
-                    "dataset_version": "eval-v1",
-                    "dataset_sha256": "a" * 64,
-                    "release_id": "rel-v1",
-                }
-            },
-        )()
-        decision = evaluate_m5b_release_gate(
+        dataset = _dataset()
+        decision = _evaluate(
             dataset=dataset,
             quality_report=_quality_report(),
-            run_identity={
-                "git_sha": "b" * 40,
-                "baseline_eval_run_id": "eval_baseline",
-            },
-            failed_case_ids=(),
             security_evidence=tuple(
                 evidence
                 for evidence in _passing_security_evidence()
@@ -322,25 +315,10 @@ class M5bReleaseGateTests(unittest.TestCase):
             evaluate_m5b_release_gate,
         )
 
-        dataset = type(
-            "Dataset",
-            (),
-            {
-                "manifest": {
-                    "dataset_version": "eval-v1",
-                    "dataset_sha256": "a" * 64,
-                    "release_id": "rel-v1",
-                }
-            },
-        )()
-        decision = evaluate_m5b_release_gate(
+        dataset = _dataset()
+        decision = _evaluate(
             dataset=dataset,
             quality_report=_quality_report(),
-            run_identity={
-                "git_sha": "b" * 40,
-                "baseline_eval_run_id": "eval_baseline",
-            },
-            failed_case_ids=(),
             security_evidence=(
                 *_passing_security_evidence(),
                 SecurityGateEvidence(
@@ -361,28 +339,10 @@ class M5bReleaseGateTests(unittest.TestCase):
     def test_pending_signoff_blocks_quality_gate_without_claiming_fact_failure(self):
         from eval.release_gate import evaluate_m5b_release_gate
 
-        dataset = type(
-            "Dataset",
-            (),
-            {
-                "manifest": {
-                    "dataset_version": "eval-v1",
-                    "dataset_sha256": "a" * 64,
-                    "release_id": "rel-v1",
-                }
-            },
-        )()
-        decision = evaluate_m5b_release_gate(
+        dataset = _dataset("PENDING_SIGNOFF")
+        decision = _evaluate(
             dataset=dataset,
-            quality_report=_quality_report(
-                gate_status="FAIL",
-                failed_metrics=("dataset_owner_status",),
-            ),
-            run_identity={
-                "git_sha": "b" * 40,
-                "baseline_eval_run_id": "eval_baseline",
-            },
-            failed_case_ids=(),
+            quality_report=_quality_report(),
             security_evidence=_passing_security_evidence(),
         )
 
@@ -398,39 +358,74 @@ class M5bReleaseGateTests(unittest.TestCase):
         )
         self.assertEqual(critical["status"], "PASS")
 
+    def test_tampered_eval_run_content_cannot_supply_a_publishable_pass(self):
+        from eval.eval_run import EvalRunRecord
+        from eval.release_gate import evaluate_m5b_release_gate
+
+        dataset = _dataset()
+        record = EvalRunRecord(
+            eval_run_id="eval_" + "c" * 64,
+            result_sha256="c" * 64,
+            dataset_version="eval-v1",
+            dataset_sha256="a" * 64,
+            release_id="rel-v1",
+            git_sha="b" * 40,
+            gate_status="PASS",
+            payload={
+                **{
+                    "schema_version": "eval-run-v1",
+                    "generated_at": "2026-11-20T00:00:00+00:00",
+                    "dataset": {
+                        "version": "eval-v1",
+                        "sha256": "a" * 64,
+                    },
+                    "release_id": "rel-v1",
+                    "code_identity": {"git_sha": "b" * 40},
+                    "metrics": {
+                        **_quality_report().metrics,
+                        "claim_contradiction_rate": 1.0,
+                    },
+                    "gate_status": "PASS",
+                    "release_gate_status": "PASS",
+                    "failed_metrics": [],
+                    "failed_case_ids": [],
+                    "failure_details": [],
+                },
+                "result_sha256": "c" * 64,
+                "eval_run_id": "eval_" + "c" * 64,
+            },
+        )
+
+        decision = evaluate_m5b_release_gate(
+            dataset=dataset,
+            eval_run=record,
+            security_evidence=_passing_security_evidence(),
+        )
+
+        self.assertEqual(decision.gate_status, "FAIL")
+        self.assertIn("eval_run_integrity", decision.failed_metrics)
+
     def test_reordered_security_evidence_keeps_a_stable_artifact_identity(self):
         from eval.release_gate import evaluate_m5b_release_gate
 
-        dataset = type(
-            "Dataset",
-            (),
-            {
-                "manifest": {
-                    "dataset_version": "eval-v1",
-                    "dataset_sha256": "a" * 64,
-                    "release_id": "rel-v1",
-                }
-            },
-        )()
+        dataset = _dataset()
         identity = {
             "git_sha": "b" * 40,
             "baseline_eval_run_id": "eval_baseline",
         }
-        first = evaluate_m5b_release_gate(
+        first = _evaluate(
             dataset=dataset,
             quality_report=_quality_report(),
-            run_identity=identity,
-            failed_case_ids=(),
             security_evidence=_passing_security_evidence(),
+            identity=identity,
         )
-        second = evaluate_m5b_release_gate(
+        second = _evaluate(
             dataset=dataset,
             quality_report=_quality_report(),
-            run_identity=identity,
-            failed_case_ids=(),
             security_evidence=tuple(
                 reversed(_passing_security_evidence())
             ),
+            identity=identity,
         )
 
         self.assertEqual(first.artifact_sha256, second.artifact_sha256)

@@ -26,6 +26,7 @@ class FakeAlgoClient:
                         major_code="M01",
                         major_name="测试专业",
                         subject_req="首选物理，再选不限",
+                        tuition=5000,
                     )
                 ],
                 school_tier="985",

@@ -10,7 +10,7 @@ from typing import Protocol
 import psycopg
 from psycopg.rows import dict_row
 
-from app.data_lifecycle.deletion import (
+from app.data_lifecycle.cleaner import (
     DeletionResourceContext,
     PostgresPrincipalDataCleaner,
     PrincipalDataCleaner,

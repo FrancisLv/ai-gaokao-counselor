@@ -690,9 +690,31 @@ class PreviewGateLifecycleTests(RunLifecyclePostgresTest):
         self.assertEqual(second.state, "SUCCEEDED")
         self.assertEqual(first.result.result_kind, "V1_FORMAL")
         self.assertEqual(second.result.result_kind, "V1_FORMAL")
+
+        def stable_report(report):
+            # EvidenceRef hashes bind the run-specific profile_version; the
+            # user-visible facts and source identities remain reproducible.
+            normalized = {
+                **report,
+                "sections": [
+                    {
+                        **section,
+                        "citations": [
+                            {
+                                **citation,
+                                "content_sha256": "",
+                            }
+                            for citation in section.get("citations", ())
+                        ],
+                    }
+                    for section in report["sections"]
+                ],
+            }
+            return normalized
+
         self.assertEqual(
-            first.formal_result.report,
-            second.formal_result.report,
+            stable_report(first.formal_result.report),
+            stable_report(second.formal_result.report),
         )
         self.assertEqual(
             first.formal_result.verification_report,

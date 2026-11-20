@@ -150,23 +150,56 @@ class FormalReportLifecycleTests(RunLifecyclePostgresTest):
                 section["section_key"]
                 for section in completed.formal_result.report["sections"]
             ],
-            ["plan", "candidate:U001|01", "qualification", "risk"],
+            [
+                "plan",
+                "candidate:U001|01",
+                "qualification",
+                "risk",
+                "data_gaps",
+            ],
         )
         candidate_section = completed.formal_result.report["sections"][1]
         self.assertIn("测试大学", candidate_section["body"])
         self.assertIn("测试专业（M01）", candidate_section["body"])
         self.assertIn("67%", candidate_section["body"])
+        self.assertIn("策略分档：稳", candidate_section["body"])
+        self.assertIn("招生计划数：UNKNOWN", candidate_section["body"])
         self.assertIn("2022、2023、2024", candidate_section["body"])
+        self.assertTrue(candidate_section["citations"])
+        self.assertTrue(
+            all(
+                citation["evidence_id"]
+                and citation["content_sha256"]
+                and citation["release_id"] == release_id
+                for citation in candidate_section["citations"]
+            )
+        )
         major_claim_id = "claim:candidate:U001|01:major:M01:major_code"
+        tuition_claim_id = "claim:candidate:U001|01:major:M01:tuition"
+        strategy_claim_id = "claim:candidate:U001|01:strategy_tier"
         self.assertIn(
             major_claim_id,
             completed.formal_result.report["claim_ids"],
+        )
+        self.assertIn(
+            tuition_claim_id,
+            completed.formal_result.report["claim_ids"],
+        )
+        self.assertIn(
+            strategy_claim_id,
+            completed.formal_result.report["claim_ids"],
+        )
+        self.assertIn(
+            "candidate:U001|01:plan_count=UNKNOWN",
+            completed.formal_result.report["unverified_facts"],
         )
         claims = {
             claim["claim_id"]: claim
             for claim in completed.formal_result.verification_report["claims"]
         }
         self.assertEqual(claims[major_claim_id]["status"], "VERIFIED")
+        self.assertEqual(claims[tuition_claim_id]["status"], "VERIFIED")
+        self.assertEqual(claims[strategy_claim_id]["status"], "VERIFIED")
         self.assertIn("15860", completed.formal_result.report["sections"][0]["body"])
         self.assertEqual(
             completed.formal_result.disclaimer,
@@ -226,7 +259,20 @@ class FormalReportLifecycleTests(RunLifecyclePostgresTest):
                 section.section_key
                 for section in reply.formal_result.report.sections
             ],
-            ["plan", "candidate:U001|01", "qualification", "risk"],
+            [
+                "plan",
+                "candidate:U001|01",
+                "qualification",
+                "risk",
+                "data_gaps",
+            ],
+        )
+        self.assertTrue(
+            reply.formal_result.report.sections[1].citations
+        )
+        self.assertIn(
+            "candidate:U001|01:plan_count=UNKNOWN",
+            reply.formal_result.report.unverified_facts,
         )
 
     async def test_formal_report_uses_the_confirmed_profile_scope(self):
@@ -1003,5 +1049,11 @@ class FormalReportWireCompatibilityTests(unittest.TestCase):
                 "generation_mode": 2,
                 "sections": 3,
                 "claim_ids": 4,
+                "unverified_facts": 5,
             },
         )
+        section_fields = {
+            field.name: field.number
+            for field in pb.FormalReportSection.DESCRIPTOR.fields
+        }
+        self.assertEqual(section_fields["citations"], 4)

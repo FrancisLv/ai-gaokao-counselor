@@ -2767,8 +2767,8 @@ case runner、最终 Claims 指标与不可变 EvalRun；不实现 #44 的质量
 
 - 联合 EvalDataset 仍是 `PENDING_SIGNOFF`；门禁实现可以验收，但不能宣称正式质量
   PASS。Francis 签字后仍需在固定环境运行真实检索 baseline 和 100+ 样本性能评测。
-- 本票没有新增 EvalRun 专用数据库表；当前 EvalRun 是确定性的不可变身份与
-  JSON payload，持久化/发布聚合由 #49 决定。
+- 本票当时只交付确定性的 EvalRun 身份与 JSON payload；后续 code-review 收口新增
+  insert-only `eval_run_record`，见 §78。
 - 实际生产性能环境、数据库数据量和并发信息由调用方显式提供，不得用单次热库
   耗时猜测。
 
@@ -2780,7 +2780,7 @@ Francis 对 EvalDataset 的签字，也不关闭或改写父 issue。
 
 ### 行为与实现
 
-- `eval.release_gate` 新增 `SecurityGateEvidence`、`M5bReleaseGateDecision` 与
+- `eval.release_gate` 新增 `SecurityGateEvidence`、`ReleaseGateDecision` 与
   `evaluate_m5b_release_gate`。发布结论固定包含 `QUALITY_SLO_BUDGET`、
   `CRITICAL_FACTS`、`CONSENT`、`DELETION`、`RETENTION`、`RESTORE` 六类 gate。
 - `QUALITY_SLO_BUDGET` 直接消费既有签字数据、质量回归、P99、token/成本、预算违规
@@ -2808,3 +2808,31 @@ Francis 对 EvalDataset 的签字，也不关闭或改写父 issue。
   宣称正式质量通过。Francis 签字后仍需在固定环境产生真实检索 baseline、真实
   provider 结果和 100+ 样本性能 EvalRun。
 - 本票只提供可复现的聚合判定与 artifact，不实现新的运营面板或自动签字流程。
+
+## 78. M5b code-review 收口：权威 EvalRun、报告证据与模块职责
+
+**日期与范围**：2026-11-20。对 M5b 集成分支执行 Standards + Spec 两轴 review 后，
+统一修复发布入口、权威 EvalRun、报告证据/关键事实、模块重复与文档状态问题。
+
+### 行为与实现
+
+- 新增 insert-only `eval_run_record`。`result_sha256` 从去掉
+  `generated_at/result_sha256/eval_run_id` 的规范 JSON 计算；数据库拒绝更新和删除。
+- 聚合门禁改为消费 `EvalRunRecord`，逐项核对 payload hash、dataset version/hash、
+  release、EvalRun gate 与 `SIGNED_OFF` 状态；临时构造的 PASS 或篡改 payload
+  fail closed。
+- 新增 `make m5b-release-gate` 和可执行 CLI，从 PostgreSQL 权威 EvalRun、签字
+  EvalDataset 与安全证据文件执行门禁；非 PASS 退出码为 2。
+- 正式报告先从算法 wishlist 规范化为 `ReportCandidate/ReportMajor`，再生成候选、
+  分档、专业代码与学费 Claims。section 返回同 release 的 EvidenceRef
+  citations；当前数据无当前招生计划数时在 `unverified_facts` 明确标为 UNKNOWN。
+- 将删除与保留共用的正式结果链/官方 checkpoint 清理抽到数据生命周期资源模块；
+  principal cleaner 与删除状态机拆分。聚合 decision 与质量 metrics 拆分为独立模块。
+- Evaluation/SLO 与 Security/Retention runtime contract 从“待确认”更新为已确认。
+
+### 验证
+
+- EvalRun 持久化/重放/数据库不可变、门禁篡改与未签字阻断、CLI 非零退出均有测试。
+- 正式报告主 seam 校验 citations、专业学费 Claim、策略分档 Claim、字段级 additive
+  Proto 与 UNKNOWN 计划数。
+- 删除、保留、恢复测试在共享清理重构后继续通过。

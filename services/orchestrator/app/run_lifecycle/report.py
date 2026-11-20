@@ -43,6 +43,30 @@ REQUIRED_NOTICE_TEXTS = {
 
 
 @dataclass(frozen=True, slots=True)
+class ReportMajor:
+    major_code: str
+    major_name: str
+    tuition: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReportCandidate:
+    identity: str
+    university_code: str
+    university_name: str
+    major_group: str
+    final_rank: int
+    probability: float
+    strategy_tier: str
+    majors: tuple[ReportMajor, ...]
+    plan_count: int | None
+
+    @property
+    def subject(self) -> str:
+        return f"{self.university_name} {self.major_group}专业组".strip()
+
+
+@dataclass(frozen=True, slots=True)
 class ReportNarrativeRequest:
     principal_id: str
     session_id: str
@@ -397,6 +421,7 @@ def _algorithm_claims(
 
     claims: list[Claim] = []
     refs: list[EvidenceRef] = []
+    candidates = _normalize_report_candidates(preview)
 
     def add_derived(
         *,
@@ -504,18 +529,10 @@ def _algorithm_claims(
         algorithm_name="rank_conversion",
     )
 
-    wishlist_candidates = preview["wishlist"]["candidates"]
-    for item in wishlist_candidates:
-        candidate = item["cwp"]["candidate"]
-        probability = item["cwp"]["prob"]["probability"]
-        identity = (
-            f"{candidate.get('university_code', '')}|"
-            f"{candidate.get('major_group', '')}"
-        )
-        subject = (
-            f"{candidate.get('university_name', '')} "
-            f"{candidate.get('major_group', '')}专业组"
-        ).strip()
+    for candidate in candidates:
+        identity = candidate.identity
+        subject = candidate.subject
+        probability = candidate.probability
         years_text = "、".join(str(year) for year in sample_years)
         add_derived(
             operation_id=f"candidate:{identity}:probability",
@@ -533,11 +550,11 @@ def _algorithm_claims(
             operation_id=f"candidate:{identity}:final_rank",
             subject=subject,
             predicate="final_rank",
-            value=int(item["final_rank"]),
+            value=candidate.final_rank,
             unit="位",
             precision=0,
             rendered_text=(
-                f"{subject}最终排名为 {int(item['final_rank'])} 位，"
+                f"{subject}最终排名为 {candidate.final_rank} 位，"
                 f"样本年份为 {years_text}。"
             ),
             algorithm_name="wishlist_optimization",
@@ -555,11 +572,43 @@ def _algorithm_claims(
             ),
             algorithm_name="weighted_hit",
         )
-        for major in candidate.get("majors", ()):
-            major_code = str(major.get("major_code") or "").strip()
+        tier_ordinal = {"冲": 1, "稳": 2, "保": 3}.get(
+            candidate.strategy_tier
+        )
+        if tier_ordinal is not None:
+            add_derived(
+                operation_id=f"candidate:{identity}:strategy_tier",
+                subject=subject,
+                predicate="strategy_tier",
+                value=tier_ordinal,
+                unit="档序",
+                precision=0,
+                rendered_text=(
+                    f"{subject}策略分档档序为 {tier_ordinal} 档序"
+                    f"（{candidate.strategy_tier}），"
+                    f"样本年份为 {years_text}。"
+                ),
+                algorithm_name="weighted_hit",
+            )
+        if candidate.plan_count is not None:
+            add_derived(
+                operation_id=f"candidate:{identity}:plan_count",
+                subject=subject,
+                predicate="plan_count",
+                value=candidate.plan_count,
+                unit="人",
+                precision=0,
+                rendered_text=(
+                    f"{subject}招生计划数为 {candidate.plan_count} 人，"
+                    f"样本年份为 {years_text}。"
+                ),
+                algorithm_name="weighted_hit",
+            )
+        for major in candidate.majors:
+            major_code = major.major_code
             if not major_code:
                 raise ValueError("正式报告缺少专业代码")
-            major_name = str(major.get("major_name") or major_code).strip()
+            major_name = major.major_name or major_code
             add_derived(
                 operation_id=(
                     f"candidate:{identity}:major:{major_code}:major_code"
@@ -575,6 +624,23 @@ def _algorithm_claims(
                 ),
                 algorithm_name="weighted_hit",
             )
+            if major.tuition is not None:
+                add_derived(
+                    operation_id=(
+                        f"candidate:{identity}:major:{major_code}:tuition"
+                    ),
+                    subject=f"{subject} {major_name}",
+                    predicate="tuition",
+                    value=major.tuition,
+                    unit="元/年",
+                    precision=2,
+                    rendered_text=(
+                        f"{subject}的{major_name}学费为 "
+                        f"{render_derived_value(major.tuition, 2)} 元/年，"
+                        f"样本年份为 {years_text}。"
+                    ),
+                    algorithm_name="weighted_hit",
+                )
 
     for group in artifact["qualification"]["groups"]:
         subject = str(group["group_key"])
@@ -699,40 +765,49 @@ def _report_payload(
         str(int(year))
         for year in preview["audit_basis"].get("sample_years", ())
     )
+    candidates = _normalize_report_candidates(preview)
     candidate_sections = []
-    for item in preview["wishlist"]["candidates"]:
-        candidate = item["cwp"]["candidate"]
-        probability = item["cwp"]["prob"]["probability"]
-        identity = (
-            f"{candidate.get('university_code', '')}|"
-            f"{candidate.get('major_group', '')}"
-        )
+    unverified_facts = []
+    for candidate in candidates:
+        identity = candidate.identity
+        probability = candidate.probability
         majors = "、".join(
             (
-                f"{major.get('major_name')}（{major.get('major_code')}）"
-                if major.get("major_name") and major.get("major_code")
-                else major.get("major_name")
-                or major.get("major_code")
+                f"{major.major_name}（{major.major_code}）"
+                if major.major_name and major.major_code
+                else major.major_name
+                or major.major_code
                 or ""
             )
-            for major in candidate.get("majors", ())
+            for major in candidate.majors
         )
+        if candidate.plan_count is None:
+            unverified_facts.append(
+                f"candidate:{identity}:plan_count=UNKNOWN"
+            )
         candidate_sections.append(
             {
                 "section_key": f"candidate:{identity}",
                 "title": (
-                    f"{item['final_rank']}. "
-                    f"{candidate.get('university_name', '')} "
-                    f"{candidate.get('major_group', '')}专业组"
+                    f"{candidate.final_rank}. "
+                    f"{candidate.university_name} "
+                    f"{candidate.major_group}专业组"
                 ),
                 "body": (
-                    f"院校：{candidate.get('university_name', '')} "
-                    f"{candidate.get('major_group', '')}专业组，"
-                    f"院校代码 {candidate.get('university_code', '')}。"
+                    f"院校：{candidate.university_name} "
+                    f"{candidate.major_group}专业组，"
+                    f"院校代码 {candidate.university_code}。"
                     f"专业：{majors or '见院校专业组'}。"
                     f"录取概率约 {probability * 100:.0f}%，"
+                    f"策略分档：{candidate.strategy_tier}，"
+                    f"招生计划数："
+                    f"{candidate.plan_count if candidate.plan_count is not None else 'UNKNOWN'}，"
                     f"样本年份为 {sample_years}。"
                     "概率为历史估计，不构成录取保证。"
+                ),
+                "citations": _section_citations(
+                    claims,
+                    prefix=f"claim:candidate:{identity}:",
                 ),
             }
         )
@@ -757,12 +832,20 @@ def _report_payload(
                     f"{preview['percentile']:.4f}，"
                     f"共 {len(preview['wishlist']['candidates'])} 个院校专业组。"
                 ),
+                "citations": _section_citations(
+                    claims,
+                    claim_ids=("claim:rank",),
+                ),
             },
             *candidate_sections,
             {
                 "section_key": "qualification",
                 "title": "资格核验",
                 "body": qualification_text or "资格状态未知。",
+                "citations": _section_citations(
+                    claims,
+                    prefix="claim:qualification:",
+                ),
             },
             {
                 "section_key": "risk",
@@ -772,7 +855,145 @@ def _report_payload(
                     f"{notice_by_type['DISCLAIMER']}"
                     f"{notice_by_type['NO_ADMISSION_GUARANTEE']}"
                 ),
+                "citations": _notice_citations(notices),
+            },
+            {
+                "section_key": "data_gaps",
+                "title": "待核验数据",
+                "body": (
+                    "；".join(unverified_facts)
+                    if unverified_facts
+                    else "无。"
+                ),
+                "citations": [],
             },
         ],
         "claim_ids": [claim.claim_id for claim in claims],
+        "unverified_facts": unverified_facts,
+    }
+
+
+def _normalize_report_candidates(
+    preview: dict[str, Any],
+) -> tuple[ReportCandidate, ...]:
+    raw_candidates = preview.get("wishlist", {}).get("candidates")
+    if not isinstance(raw_candidates, list) or not raw_candidates:
+        raise ValueError("正式报告缺少候选")
+    candidates = []
+    for item in raw_candidates:
+        cwp = item.get("cwp")
+        if not isinstance(cwp, dict):
+            raise ValueError("正式报告候选结构不完整")
+        candidate = cwp.get("candidate")
+        probability = cwp.get("prob")
+        if not isinstance(candidate, dict) or not isinstance(probability, dict):
+            raise ValueError("正式报告候选身份或概率缺失")
+        identity = (
+            f"{candidate.get('university_code', '')}|"
+            f"{candidate.get('major_group', '')}"
+        )
+        majors = []
+        for major in candidate.get("majors", ()):
+            major_code = str(major.get("major_code") or "").strip()
+            tuition = major.get("tuition")
+            majors.append(
+                ReportMajor(
+                    major_code=major_code,
+                    major_name=str(
+                        major.get("major_name") or major_code
+                    ).strip(),
+                    tuition=(
+                        float(tuition)
+                        if isinstance(tuition, (int, float))
+                        and not isinstance(tuition, bool)
+                        and tuition > 0
+                        else None
+                    ),
+                )
+            )
+        plan_count = item.get("plan_count", candidate.get("plan_count"))
+        candidates.append(
+            ReportCandidate(
+                identity=identity,
+                university_code=str(candidate.get("university_code") or ""),
+                university_name=str(candidate.get("university_name") or ""),
+                major_group=str(candidate.get("major_group") or ""),
+                final_rank=int(item["final_rank"]),
+                probability=float(probability["probability"]),
+                strategy_tier=str(probability.get("category") or "UNKNOWN"),
+                majors=tuple(majors),
+                plan_count=(
+                    int(plan_count)
+                    if isinstance(plan_count, int)
+                    and not isinstance(plan_count, bool)
+                    and plan_count >= 0
+                    else None
+                ),
+            )
+        )
+    return tuple(
+        sorted(
+            candidates,
+            key=lambda candidate: (candidate.final_rank, candidate.identity),
+        )
+    )
+
+
+def _section_citations(
+    claims: tuple[Claim, ...],
+    *,
+    prefix: str = "",
+    claim_ids: tuple[str, ...] = (),
+) -> list[dict[str, str]]:
+    selected = [
+        claim
+        for claim in claims
+        if claim.claim_id in claim_ids
+        or (prefix and claim.claim_id.startswith(prefix))
+    ]
+    citations = {}
+    for claim in selected:
+        for ref in claim.evidence_refs:
+            citations[(ref.evidence_id, claim.rendered_text)] = (
+                _citation_payload(ref, claim.rendered_text)
+            )
+    return [
+        citations[key]
+        for key in sorted(citations)
+    ]
+
+
+def _notice_citations(
+    notices: tuple[RequiredNotice, ...],
+) -> list[dict[str, str]]:
+    citations = {}
+    for notice in notices:
+        for ref in notice.evidence_refs:
+            citations[(ref.evidence_id, notice.normalized_text)] = (
+                _citation_payload(ref, notice.normalized_text)
+            )
+    return [citations[key] for key in sorted(citations)]
+
+
+def _citation_payload(
+    ref: EvidenceRef,
+    label: str,
+) -> dict[str, str]:
+    source_uri = ""
+    section_path = ""
+    if ref.document is not None:
+        source_uri = ref.document.source_uri
+        section_path = ref.document.section_path
+    elif ref.derived is not None:
+        section_path = ref.derived.operation_id
+    elif ref.structured is not None:
+        section_path = ref.structured.field_path
+    return {
+        "evidence_id": ref.evidence_id,
+        "evidence_type": ref.evidence_type,
+        "content_sha256": ref.content_sha256,
+        "label": label,
+        "source_uri": source_uri,
+        "section_path": section_path,
+        "release_id": ref.release_id,
     }

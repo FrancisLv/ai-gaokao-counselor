@@ -3,7 +3,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 版本 | v1.0 |
-| 状态 | 待确认；确认后作为 M4/M5 评测与发布门禁基线 |
+| 状态 | 已确认；作为 M4/M5 评测与发布门禁基线 |
 | 上游 | [PRD v1.3 §3、§7、§9、§12、§13](../prd.md)、[ADR-0005](../adr/0005-golden-set-human-labeled.md) |
 | 关联 | [Evidence Contract](./evidence-contract.md)、[LLM Gateway Contract](./llm-gateway-contract.md)、[Run Lifecycle Contract](./run-lifecycle.md) |
 
@@ -137,6 +137,11 @@ EvalRun
 ```
 
 同一 `eval_run_id` 的指标和原始结果不可变。
+
+运行时把完成计算的 EvalRun 写入 insert-only `eval_run_record`；记录保存
+`eval_run_id`、`result_sha256`、dataset/release/code 身份和完整 payload，并由数据库
+触发器拒绝 UPDATE/DELETE。发布门禁只从该权威记录读取结果，不接受调用方临时构造的
+`gate_status=PASS`。
 
 ## 4. 检索指标
 
@@ -359,6 +364,10 @@ baseline_eval_run_id
 - golden set 门禁。
 
 CI 不调用真实付费模型，不下载外部数据。
+
+聚合发布门禁通过 `make m5b-release-gate` 执行。该目标读取已持久化的 EvalRun、
+签字 EvalDataset 和四类安全证据文件；任何身份不一致、缺失证据或非 PASS EvalRun
+均以非零状态退出，不得由调用脚本把失败改写为通过。
 
 ### 9.2 人工/定时评测
 
