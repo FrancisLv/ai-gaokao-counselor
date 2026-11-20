@@ -75,7 +75,7 @@ build-llm-gateway: ## 编译 svc-llm-gateway
 build-algo: ## 编译 svc-algo
 	go build -o bin/algo ./cmd/algo
 
-.PHONY: test-integration test-race coverage bench test-fuzz py-test tcp-smoke perf check compose-check docker-build
+.PHONY: test-integration test-integration-llmgw test-race coverage bench test-fuzz py-test tcp-smoke perf check compose-check docker-build
 
 test: ## Go 默认单测（不依赖数据库）
 	go test ./... -count=1
@@ -83,6 +83,10 @@ test: ## Go 默认单测（不依赖数据库）
 test-integration: ## 真实库测试；必须显式设置只读 ALGO_TEST_DSN
 	@test -n "$$ALGO_TEST_DSN" || (echo '需设置 ALGO_TEST_DSN'; exit 1)
 	go test -tags integration ./internal/algo/... ./cmd/algo -count=1
+
+test-integration-llmgw: ## LLM 治理真实库测试；必须显式设置隔离可写 LLMGW_TEST_DSN
+	@test -n "$$LLMGW_TEST_DSN" || (echo '需设置 LLMGW_TEST_DSN'; exit 1)
+	go test -tags integration ./internal/llmgw/... ./cmd/llm-gateway -count=1
 
 test-race: ## 真实库并发/竞态三轮 shuffle 回归
 	@test -n "$$ALGO_TEST_DSN" || (echo '需设置 ALGO_TEST_DSN'; exit 1)
@@ -145,11 +149,10 @@ run-orchestrator: ## 本地直跑 svc-orchestrator
 	$(PY) -m app.main
 
 ## ---- compose ----
-compose-check: ## 仅校验 Compose 配置，不构建、不启动；占位 key 只用于变量展开
-	OPENAI_API_KEY=config-validation-only $(COMPOSE) config --quiet
+compose-check: ## 仅校验 Compose 配置，不构建、不启动
+	$(COMPOSE) config --quiet
 
 docker-build: compose-check ## 仅构建业务镜像；可选 IMAGE_MIRROR=m.daocloud.io/，不启动服务
-	OPENAI_API_KEY=config-validation-only \
 	GO_IMAGE="$(GO_IMAGE)" GO_RUNTIME_IMAGE="$(GO_RUNTIME_IMAGE)" PYTHON_IMAGE="$(PYTHON_IMAGE)" \
 	BUILD_GOPROXY="$(BUILD_GOPROXY)" TORCH_INDEX_URL="$(TORCH_INDEX_URL)" \
 	$(COMPOSE) --progress plain build $(DOCKER_SERVICES)

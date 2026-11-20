@@ -1,21 +1,13 @@
-# svc-llm-gateway 配置
+# svc-llm-gateway 启动约束
+#
+# route / model allowlist / price table 均从 release 绑定的 PostgreSQL
+# 治理记录读取，不在此文件覆盖。LLMGW_DSN 由运行环境注入。
 server:
   grpc:
     addr: 0.0.0.0:9001
     timeout: 120s
 llm:
-  # role → model 路由表：Go 侧唯一决策点
-  routing:
-    profile:  gpt-4o-mini
-    strategy: gpt-4o
-    critic:   gpt-4o
-    report:   gpt-4o
-    verify:   gpt-4o-mini
-  budget:
-    session_token_limit: 80000     # Budget Guard：调用前裁决
-  cache:
-    redis_addr: redis:6379
-  providers:
-    openai:
-      base_url: https://api.openai.com/v1
-      api_key_env: OPENAI_API_KEY  # key 只存在于此服务
+  database:
+    dsn_env: LLMGW_DSN
+  provider:
+    mode: fail_closed # M5a-01 只有测试替身，真实 provider 在后续增量接线
