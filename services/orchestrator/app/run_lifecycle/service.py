@@ -60,7 +60,17 @@ from app.run_lifecycle.models import (
 )
 from app.run_lifecycle.profile import ProfileRuntime, build_profile_fields
 from app.run_lifecycle.profile_graph import build_profile_graph
-from app.run_lifecycle.report import build_formal_report
+from app.run_lifecycle.report import (
+    ReportNarrativeRequest,
+    ReportNarrativeRewriteRequired,
+    ReportNarrativeUnavailable,
+    ReportNarrativeViolation,
+    ReportNarrativeWriter,
+    apply_report_fallback,
+    apply_report_narrative,
+    build_formal_report,
+    filter_stripped_report_claims,
+)
 from evidence import (
     DerivedEvidenceRecomputer,
     EntailmentVerifier,
@@ -113,6 +123,7 @@ class RunLifecycle:
         formal_verifier_version: str = "evidence-verifier-v1",
         formal_publish_guard: FormalPublishGuard | None = None,
         consent_policy_version: str = CONSENT_POLICY_VERSION,
+        report_narrative_writer: ReportNarrativeWriter | None = None,
     ) -> None:
         if not dsn:
             raise ValueError("RunLifecycle 需要 PostgreSQL DSN")
@@ -128,6 +139,7 @@ class RunLifecycle:
         self._derived_evidence_recomputer = derived_evidence_recomputer
         self._formal_verifier_version = formal_verifier_version
         self._formal_publish_guard = formal_publish_guard
+        self._report_narrative_writer = report_narrative_writer
         if not consent_policy_version.strip():
             raise ValueError("consent_policy_version 不能为空")
         self._consent_policy_version = consent_policy_version
@@ -584,6 +596,10 @@ class RunLifecycle:
         package_sha256 = payload_sha256(published_package)
         report_payload = verification_report_payload(report)
         report_sha256 = payload_sha256(report)
+        published_report = filter_stripped_report_claims(
+            command.report or {},
+            report.stripped_claim_ids,
+        )
         notice_texts = {
             notice.notice_type: notice.normalized_text
             for notice in command.package.gate_context.required_notices
@@ -596,7 +612,7 @@ class RunLifecycle:
             "evidence_package_sha256": package_sha256,
             "verification_report_sha256": report_sha256,
             "verification_report": report_payload,
-            "report": command.report or {},
+            "report": published_report,
             "risk_notice": notice_texts["RISK_NOTICE"],
             "disclaimer": notice_texts["DISCLAIMER"],
             "no_admission_guarantee": notice_texts[
@@ -2304,6 +2320,54 @@ class RunLifecycle:
                 applicable_as_of=row["created_at"].date(),
                 created_at=row["created_at"],
             )
+            if self._report_narrative_writer is not None:
+                narrative_request = ReportNarrativeRequest(
+                    principal_id=row["principal_id"],
+                    session_id=str(row["session_id"]),
+                    run_id=str(row["run_id"]),
+                    release_id=artifact["release_id"],
+                    profile_version=artifact["profile_version"],
+                    result_version=preview["result_version"],
+                    candidate_count=len(
+                        preview["wishlist"]["candidates"]
+                    ),
+                    scope_label=(
+                        f"{fields['province']['value']}"
+                        f"{fields['category']['value']}"
+                    ),
+                    forbidden_fragments=self._report_forbidden_fragments(
+                        preview
+                    ),
+                )
+                for rewrite_attempt in range(2):
+                    try:
+                        narrative = await self._report_narrative_writer.compose(
+                            narrative_request
+                        )
+                        package, report_payload = apply_report_narrative(
+                            package=package,
+                            report=report_payload,
+                            request=narrative_request,
+                            narrative=narrative,
+                        )
+                        break
+                    except ReportNarrativeViolation as exc:
+                        raise RunLifecycleError(
+                            "VALIDATION_FAILED",
+                            "报告叙事越过确定性事实边界",
+                        ) from exc
+                    except ReportNarrativeUnavailable as exc:
+                        report_payload = apply_report_fallback(
+                            report_payload,
+                            reason=exc.reason,
+                        )
+                        break
+                    except ReportNarrativeRewriteRequired as exc:
+                        if rewrite_attempt == 1:
+                            report_payload = apply_report_fallback(
+                                report_payload,
+                                reason=exc.reason,
+                            )
         except (KeyError, TypeError, ValueError) as exc:
             raise RunLifecycleError(
                 "VALIDATION_FAILED",
@@ -2321,6 +2385,35 @@ class RunLifecycle:
         )
         if not publication.accepted:
             return
+
+    @staticmethod
+    def _report_forbidden_fragments(
+        preview: dict[str, Any],
+    ) -> tuple[str, ...]:
+        fragments: set[str] = set()
+        for item in preview["wishlist"]["candidates"]:
+            candidate = item["cwp"]["candidate"]
+            for value in (
+                candidate.get("university_name"),
+                candidate.get("university_code"),
+                candidate.get("major_group"),
+            ):
+                if value:
+                    fragments.add(str(value))
+            identity = (
+                f"{candidate.get('university_code', '')}|"
+                f"{candidate.get('major_group', '')}"
+            )
+            if identity.strip("|"):
+                fragments.add(identity)
+            for major in candidate.get("majors", ()):
+                for value in (
+                    major.get("major_name"),
+                    major.get("major_code"),
+                ):
+                    if value:
+                        fragments.add(str(value))
+        return tuple(sorted(fragments))
 
     async def _algorithm_preview_for_graph(
         self,

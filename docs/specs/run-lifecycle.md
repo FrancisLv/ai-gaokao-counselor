@@ -285,6 +285,9 @@ expires_at
 - 每次 Resume 和发布前都校验 release 未撤销。
 - 撤销时恢复命令返回 `RELEASE_REVOKED`；已运行 worker 不得继续发布。
 - 算法节点只接受 `CONFIRMED` 的 `confirmed_profile_version`。
+- 正式报告可注入 `role=report` 的受控叙事 adapter；其 prompt/schema 必须由
+  LLMGateway 按当前 release 注册。叙事不得写候选、数值、顺序、资格或 EvidenceRef；
+  越界输出 fail closed，超时/限流/不可用使用明确标注的确定性模板降级。
 
 ## 9. 持久化与原子性
 
