@@ -217,6 +217,9 @@ RunView
 ```
 
 `GetRun` 必须执行 principal 所有权校验。未完成 run 的结果引用为 null。
+`state`、`state_version` 与 `current_interrupt` 必须来自同一数据库快照；不得返回
+旧 run 状态配新 interrupt 的混合视图。状态与 interrupt 组合不一致时，调用方无法
+安全构造 `ResumeRun`。
 
 ### 5.5 CancelRun
 

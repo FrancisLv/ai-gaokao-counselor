@@ -46,6 +46,7 @@ class EndToEndMetrics:
     contradiction_rate: float
     critical_unverifiable_rate: float
     hallucination_rate: float
+    illegal_candidate_leak_rate: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +80,8 @@ def evaluate_end_to_end(
 ) -> EndToEndEvaluationReport:
     case_results = []
     factual_claims = []
+    illegal_candidate_case_count = 0
+    illegal_candidate_leak_count = 0
     for case in dataset.e2e_cases:
         case_id = case["case_id"]
         outcome = outcomes.get(case_id)
@@ -105,6 +108,13 @@ def evaluate_end_to_end(
             for claim in outcome.claims
             if claim.claim_type in _FACTUAL_CLAIM_TYPES
         )
+        expected_exclusions = set(
+            case["expected"]["excluded_candidate_keys"]
+        )
+        if expected_exclusions:
+            illegal_candidate_case_count += 1
+            if expected_exclusions & set(outcome.candidate_keys):
+                illegal_candidate_leak_count += 1
         first_diff = _first_difference(case, outcome)
         case_results.append(
             EndToEndCaseResult(
@@ -119,7 +129,15 @@ def evaluate_end_to_end(
             )
         )
 
-    metrics = _metrics(factual_claims)
+    illegal_candidate_leak_rate = (
+        illegal_candidate_leak_count / illegal_candidate_case_count
+        if illegal_candidate_case_count
+        else 0.0
+    )
+    metrics = _metrics(
+        factual_claims,
+        illegal_candidate_leak_rate=illegal_candidate_leak_rate,
+    )
     gate_status = (
         "PASS"
         if (
@@ -163,6 +181,9 @@ def build_eval_run(
     *,
     run_identity: dict,
     generated_at: str,
+    run_samples=(),
+    performance_context=None,
+    baseline: dict | None = None,
 ) -> dict:
     required_identity = (
         "git_sha",
@@ -200,16 +221,35 @@ def build_eval_run(
         )
         else "FAIL"
     )
-    if diagnostic_gate == "FAIL":
-        release_gate = "FAIL"
-    elif not (
-        dataset.is_authoritative_quality
-        and retrieval_report.quality_gate_applied
-        and e2e_report.quality_gate_applied
+    from eval.release_gate import (
+        PerformanceContext,
+        evaluate_release_gate,
+    )
+
+    if performance_context is None:
+        performance_context = PerformanceContext(
+            environment="",
+            hardware_profile="",
+            database_data_size="",
+            model_route_version="",
+            cache_state="",
+            concurrency=0,
+        )
+    gate_report = evaluate_release_gate(
+        dataset=dataset,
+        retrieval_report=retrieval_report,
+        e2e_report=e2e_report,
+        run_identity=run_identity,
+        run_samples=tuple(run_samples),
+        performance_context=performance_context,
+        baseline=baseline or {},
+    )
+    release_gate = gate_report.gate_status
+    if (
+        release_gate == "FAIL"
+        and not dataset.is_authoritative_quality
     ):
         release_gate = "BLOCKED_PENDING_SIGNOFF"
-    else:
-        release_gate = "PASS"
 
     failed_case_ids = tuple(
         sorted(
@@ -258,6 +298,14 @@ def build_eval_run(
                 "first_diff": case.first_diff,
             }
         )
+    for detail in gate_report.failure_details:
+        failure_details.append(
+            {
+                "case_id": None,
+                "kind": "metric",
+                **detail,
+            }
+        )
     payload = {
         "schema_version": "eval-run-v1",
         "generated_at": generated_at,
@@ -297,7 +345,11 @@ def build_eval_run(
                 e2e_report.metrics.critical_unverifiable_rate
             ),
             "claim_hallucination_rate": e2e_report.metrics.hallucination_rate,
+            "illegal_candidate_leak_rate": (
+                e2e_report.metrics.illegal_candidate_leak_rate
+            ),
             "factual_claim_count": e2e_report.metrics.factual_claim_count,
+            **gate_report.metrics,
         },
         "retrieval_eligible_case_count": retrieval_report.eligible_case_count,
         "retrieval_no_evidence_passed": retrieval_report.no_evidence_passed,
@@ -308,12 +360,26 @@ def build_eval_run(
             retrieval_report.skipped_case_reasons or {}
         ),
         "e2e_quality_gate_applied": e2e_report.quality_gate_applied,
-        "gate_status": diagnostic_gate,
+        "quality_case_gate_status": diagnostic_gate,
+        "gate_status": gate_report.gate_status,
         "release_gate_status": release_gate,
+        "failed_metrics": list(gate_report.failed_metrics),
+        "performance_context": {
+            "environment": performance_context.environment,
+            "hardware_profile": performance_context.hardware_profile,
+            "database_data_size": performance_context.database_data_size,
+            "model_route_version": performance_context.model_route_version,
+            "cache_state": performance_context.cache_state,
+            "concurrency": performance_context.concurrency,
+        },
         "failed_case_ids": list(failed_case_ids),
         "failure_details": sorted(
             failure_details,
-            key=lambda item: (item["case_id"], item["kind"]),
+            key=lambda item: (
+                item.get("case_id") or "",
+                item["kind"],
+                item.get("metric") or "",
+            ),
         ),
         "retrieval_results": [
             {
@@ -457,7 +523,11 @@ def _first_difference(
     return None
 
 
-def _metrics(claims: list[EndToEndClaim]) -> EndToEndMetrics:
+def _metrics(
+    claims: list[EndToEndClaim],
+    *,
+    illegal_candidate_leak_rate: float,
+) -> EndToEndMetrics:
     total = len(claims)
     if total == 0:
         return EndToEndMetrics(
@@ -467,6 +537,7 @@ def _metrics(claims: list[EndToEndClaim]) -> EndToEndMetrics:
             contradiction_rate=0.0,
             critical_unverifiable_rate=0.0,
             hallucination_rate=0.0,
+            illegal_candidate_leak_rate=illegal_candidate_leak_rate,
         )
     with_evidence = [claim for claim in claims if claim.checked_against]
     verified = [
@@ -505,4 +576,5 @@ def _metrics(claims: list[EndToEndClaim]) -> EndToEndMetrics:
         hallucination_rate=(
             (len(contradicted) + len(unverifiable)) / total
         ),
+        illegal_candidate_leak_rate=illegal_candidate_leak_rate,
     )

@@ -242,8 +242,11 @@ class EndToEndEvaluationTests(unittest.TestCase):
             first["e2e_results"][0]["result_version"],
             "11111111-1111-1111-1111-111111111111",
         )
-        self.assertEqual(first["gate_status"], "PASS")
-        self.assertEqual(first["release_gate_status"], "PASS")
+        self.assertEqual(first["quality_case_gate_status"], "PASS")
+        self.assertEqual(first["gate_status"], "FAIL")
+        self.assertEqual(first["release_gate_status"], "FAIL")
+        self.assertIn("run_sample_count", first["failed_metrics"])
+        self.assertIn("performance_context", first["failed_metrics"])
 
     def test_failed_case_exposes_actual_threshold_and_baseline_context(self):
         from eval.e2e_eval import (
@@ -331,7 +334,11 @@ class EndToEndEvaluationTests(unittest.TestCase):
             generated_at="2026-11-20T00:00:00Z",
         )
 
-        detail = result["failure_details"][0]
+        detail = next(
+            item
+            for item in result["failure_details"]
+            if item["case_id"] == "e2e-001"
+        )
         self.assertEqual(detail["case_id"], "e2e-001")
         self.assertEqual(detail["actual"], "FAILED")
         self.assertEqual(detail["threshold"], "SUCCEEDED")

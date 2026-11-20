@@ -147,20 +147,36 @@ class RunLifecycleCaseExecutor:
                 edited = True
             else:
                 answer = ConfirmProfileAnswer()
-            await self.lifecycle.ResumeRun(
-                ResumeRunCommand(
+            try:
+                await self.lifecycle.ResumeRun(
+                    ResumeRunCommand(
+                        principal_id=principal_id,
+                        run_id=view.run_id,
+                        interrupt_id=view.current_interrupt.interrupt_id,
+                        expected_state_version=view.state_version,
+                        profile_version=_profile_version(view),
+                        answer=answer,
+                        idempotency_key=(
+                            f"eval-resume-{case_id}-"
+                            f"{view.current_interrupt.interrupt_id}"
+                        ),
+                    )
+                )
+            except RunLifecycleError as exc:
+                current = await self.lifecycle.GetRun(
                     principal_id=principal_id,
                     run_id=view.run_id,
-                    interrupt_id=view.current_interrupt.interrupt_id,
-                    expected_state_version=view.state_version,
-                    profile_version=_profile_version(view),
-                    answer=answer,
-                    idempotency_key=(
-                        f"eval-resume-{case_id}-"
-                        f"{view.current_interrupt.interrupt_id}"
-                    ),
                 )
-            )
+                raise RunLifecycleError(
+                    exc.reason,
+                    (
+                        f"{case_id}: resume failed at observed state "
+                        f"{view.state}/{view.stage} v{view.state_version}, "
+                        f"current state {current.state}/{current.stage} "
+                        f"v{current.state_version}, "
+                        f"interrupt {view.current_interrupt.kind}"
+                    ),
+                ) from exc
             await asyncio.sleep(self.poll_interval)
 
         raise TimeoutError(

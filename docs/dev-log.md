@@ -2721,3 +2721,53 @@ case runner、最终 Claims 指标与不可变 EvalRun；不实现 #44 的质量
 - 本票只提供 case-level executor 与指标/EvalRun；100+ 样本 P99、质量回归与预算
   聚合由 #44 完成。
 - 真实政策检索 baseline 仍需绑定正式 release、embedding/index 身份独立运行。
+
+## 76. M5b-04 质量、P99 与预算发布门禁
+
+**日期与范围**：2026-11-20，issue #44。把联合 EvalRun 转换为可执行发布门禁，
+覆盖签字数据、质量回归、报告事实、可复现性、active execution P99、session token/
+成本与预算对账；不修改资格规则、检索器或报告 seam。
+
+### 行为与实现
+
+- 新增 release gate，只有 `owner_status=SIGNED_OFF` 且检索/端到端 case-level gate
+  通过时才可能 PASS。recall@5、MRR、scope leak、citation coverage/accuracy、
+  contradiction、关键 unverifiable、hallucination 与 illegal candidate leak 都逐项
+  判定，不能用平均召回抵消安全失败。
+- 质量仅允许相对同 dataset baseline 下降最多 2 个百分点；baseline dataset 不同时
+  直接失败并要求新 baseline。
+- P99 至少 100 个样本，采用 nearest-rank；全部样本的 active execution 不得超过
+  600000ms，P99 相对固定环境 baseline 增幅不得超过 10%。性能和模型路由、硬件、
+  数据库数据量、缓存状态、并发度必须完整且身份一致。
+- 合并审查补强两项身份门禁：每个 `RunSloSample` 从 run 读取不可变 `release_id`，
+  所有样本必须与 EvalDataset release 完全一致；baseline 必须携带完整
+  `performance_context`，并逐字段匹配当前固定环境，缺失或漂移均失败。
+- 全量测试发现 `GetRun` 原先分开查询 run 与 open interrupt，worker 恰好切换
+  `RUNNING → WAITING_HITL` 时会返回 `RUNNING + 新 interrupt` 的混合快照，导致
+  合法 Resume 使用旧 state_version 并冲突。现在 run、结果状态和当前 interrupt
+  在单条查询中读取，保证同一数据库快照。
+- token 与成本从 `principal + session` 的 LLMGateway budget scope 已结算值读取；
+  `BUDGET_OVERRUN` 计入预算违规，任何 `PENDING_RECONCILIATION` attempt 都表示预算
+  证据不完整，发布结论不得 PASS。
+- EvalRun 增加 gated metrics、failed_metrics、performance_context 和逐项
+  actual/threshold/baseline 明细；`generated_at` 仍不参与 identity hash。
+
+### 验证
+
+- 新增门禁测试覆盖 pending signoff、绝对检索阈值、2 个百分点回归、case-level
+  failure、非法候选、不可复现结果、样本不足、固定环境缺失、超时、P99 回归、
+  token/成本/预算超限与待对账，以及跨 release SLO 样本和 baseline 固定环境
+  缺失/不一致。
+- 真实 PostgreSQL telemetry 测试通过 RunLifecycle run 与 LLMGateway budget/
+  attempt 表验证 active execution、settled token/cost、overrun 与待对账采集。
+- `make py-check py-test` 通过；当前 commit 的完整真实 PostgreSQL 套件将在合并前
+  统一重跑。
+
+### 边界与风险
+
+- 联合 EvalDataset 仍是 `PENDING_SIGNOFF`；门禁实现可以验收，但不能宣称正式质量
+  PASS。Francis 签字后仍需在固定环境运行真实检索 baseline 和 100+ 样本性能评测。
+- 本票没有新增 EvalRun 专用数据库表；当前 EvalRun 是确定性的不可变身份与
+  JSON payload，持久化/发布聚合由 #49 决定。
+- 实际生产性能环境、数据库数据量和并发信息由调用方显式提供，不得用单次热库
+  耗时猜测。
