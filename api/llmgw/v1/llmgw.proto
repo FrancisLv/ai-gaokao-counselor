@@ -20,6 +20,17 @@ message Msg {
   string content = 2;
 }
 
+// 项目统一六类数据分类。SENSITIVE_ELIGIBILITY_DATA 与 SECRET 永不进入云模型。
+enum DataClassification {
+  DATA_CLASSIFICATION_UNSPECIFIED = 0;
+  PUBLIC_DATA                    = 1;
+  PRINCIPAL_DATA                 = 2;
+  INQUIRY_DATA                   = 3;
+  SENSITIVE_ELIGIBILITY_DATA     = 4;
+  OPERATIONAL_DATA               = 5;
+  SECRET                         = 6;
+}
+
 message ChatRequest {
   common.v1.Trace trace      = 1;
   string          role       = 2; // profile|strategy|critic|report|verify —— 据此路由模型
@@ -38,8 +49,9 @@ message ChatRequest {
   string prompt_template_version = 13;
   string response_schema_key     = 14; // 结构化调用必须引用已注册版本
   string response_schema_version = 15;
-  string data_classification     = 16;
+  string data_classification     = 16; // 旧 string wire；仅兼容此前的六类值及 PUBLIC/INTERNAL/SENSITIVE
   map<string, string> prompt_variables = 17;
+  DataClassification data_class = 18; // 新调用优先使用 typed enum；不得覆盖或放宽 route
 }
 
 message ChatResponse {

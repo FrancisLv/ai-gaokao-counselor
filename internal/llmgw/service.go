@@ -104,6 +104,7 @@ type routeConfig struct {
 	version                string
 	priceVersion           string
 	primaryModel           string
+	allowedDataClasses     []string
 	maxOutput              int32
 	timeoutMS              int32
 	maxAttempts            int32
@@ -194,6 +195,9 @@ func (s *Service) Chat(ctx context.Context, req *llmgwv1.ChatRequest) (*llmgwv1.
 	}
 	route, err := s.loadRoute(ctx, governed, binding)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateRouteDataClassification(route, governed.DataClassification); err != nil {
 		return nil, err
 	}
 	prompt, err := s.loadPromptTemplate(ctx, governed)
@@ -316,9 +320,14 @@ func normalizeRequest(principalID string, req *llmgwv1.ChatRequest) (governedReq
 	}
 	if strings.TrimSpace(req.GetRole()) == "" ||
 		strings.TrimSpace(req.GetReleaseId()) == "" ||
-		strings.TrimSpace(req.GetLogicalCallId()) == "" ||
-		strings.TrimSpace(req.GetDataClassification()) == "" {
+		strings.TrimSpace(req.GetLogicalCallId()) == "" {
 		return governedRequest{}, newStableError(codes.InvalidArgument, 400, ReasonRequestInvalid, "缺少必要的治理字段")
+	}
+	dataClass, err := resolveDataClassification(
+		req.GetDataClassification(), req.GetDataClass(),
+	)
+	if err != nil {
+		return governedRequest{}, err
 	}
 	if req.GetMaxTokens() < 0 || req.GetTimeoutMs() < 0 ||
 		math.IsNaN(req.GetTemperature()) || math.IsInf(req.GetTemperature(), 0) {
@@ -355,7 +364,7 @@ func normalizeRequest(principalID string, req *llmgwv1.ChatRequest) (governedReq
 		PromptVersion:      req.GetPromptTemplateVersion(),
 		SchemaKey:          req.GetResponseSchemaKey(),
 		SchemaVersion:      req.GetResponseSchemaVersion(),
-		DataClassification: req.GetDataClassification(),
+		DataClassification: dataClass,
 		Messages:           messages,
 		RawSchema:          req.GetJsonSchema(),
 		PromptVariables:    req.GetPromptVariables(),
@@ -410,6 +419,7 @@ func (s *Service) loadRoute(ctx context.Context, req governedRequest, binding ru
 		SELECT route.route_version,
 		       route.primary_model_id,
 		       route.fallback_model_ids,
+		       route.allowed_data_classes,
 		       route.max_output_tokens,
 		       route.timeout_ms,
 		       route.max_attempts,
@@ -426,6 +436,7 @@ func (s *Service) loadRoute(ctx context.Context, req governedRequest, binding ru
 		&route.version,
 		&route.primaryModel,
 		&fallbacks,
+		&route.allowedDataClasses,
 		&route.maxOutput,
 		&route.timeoutMS,
 		&route.maxAttempts,
@@ -799,19 +810,20 @@ func (s *Service) reserveCall(
 			logical_call_pk, ledger_entry_id, logical_call_id, principal_id,
 			session_id, run_id, role, release_id, route_version,
 			price_table_version, model_id, request_hash, budget_scope_id,
-			status, reserved_input_tokens, reserved_output_tokens,
+			status, data_classification, reserved_input_tokens, reserved_output_tokens,
 			reserved_cost_micro_usd, prompt_template_key,
 			prompt_template_version, prompt_template_sha256,
 			response_schema_key, response_schema_version,
 			response_schema_sha256
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-			'IN_PROGRESS', $14, $15, $16, $17, $18, $19, $20, $21, $22
+			'IN_PROGRESS', $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
 		)`,
 		prepared.logicalCallPK, prepared.ledgerEntryID, req.LogicalCallID,
 		req.PrincipalID, req.SessionID, req.RunID, req.Role, req.ReleaseID,
 		route.version, route.priceVersion, prepared.selected.modelID,
-		requestHash, budgetScopeID, inputBound, outputBound, reservedCost,
+		requestHash, budgetScopeID, req.DataClassification,
+		inputBound, outputBound, reservedCost,
 		prompt.key, prompt.version, prompt.digest,
 		nullableText(schemaKey(schema)), nullableText(schemaVersion(schema)),
 		nullableText(schemaDigest(schema)),
