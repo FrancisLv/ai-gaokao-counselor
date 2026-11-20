@@ -2187,7 +2187,7 @@ prompt/schema、敏感分类、缓存与流式能力。
 - 旧 `PUBLIC` 映射 `PUBLIC_DATA`，`INTERNAL` 映射 `PRINCIPAL_DATA`，
   `SENSITIVE` 映射 `SENSITIVE_ELIGIBILITY_DATA`。兼容不扩大权限：旧
   `INTERNAL` 不会变成公开数据，旧 `SENSITIVE` 始终拒绝。
-- `migrations/33_llm_data_classification.sql` 为每个 route 增加
+- `migrations/34_llm_data_classification.sql` 为每个 route 增加
   `allowed_data_classes`，默认只允许 `PUBLIC_DATA`；数据库拒绝空集合、NULL
   项、未知值和 `SENSITIVE_ELIGIBILITY_DATA / SECRET`。logical call 冻结规范化
   data class，便于审计。
@@ -2214,7 +2214,7 @@ prompt/schema、敏感分类、缓存与流式能力。
   拒绝、手机号（含分隔符）、身份证号、邮箱、model token、健康/色觉/视力/性别/
   户籍/学籍原文、trace/模板变量检测、脱敏结论输入与输出正向、供应商敏感回显
   不落库及稳定重放。
-- fresh schema 覆盖 `00/07 -> 33`，升级路径覆盖 `28 -> 29 -> ... -> 33`。
+- fresh schema 覆盖 `00/07 -> 34`，升级路径覆盖 `28 -> 29 -> ... -> 34`。
 
 ### 边界与风险
 

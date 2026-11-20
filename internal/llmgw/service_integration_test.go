@@ -199,7 +199,7 @@ func (f *llmTestFixture) seedBudget(t *testing.T, tokenLimit, costLimit int64) s
 
 func applyLLMGatewayMigrations(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	applyLLMGatewayMigrationsThrough(t, pool, 33)
+	applyLLMGatewayMigrationsThrough(t, pool, 34)
 }
 
 func applyLLMGatewayMigrationsThrough(t *testing.T, pool *pgxpool.Pool, last int) {
@@ -1526,7 +1526,7 @@ func TestLLMGatewayMigrationUpgradesExistingRunSchema(t *testing.T) {
 	applyLLMGatewayMigration(t, pool, "30_llm_budget_overrun.sql")
 	applyLLMGatewayMigration(t, pool, "31_llm_attempt_limit.sql")
 	applyLLMGatewayMigration(t, pool, "32_llm_prompt_schema_registry.sql")
-	applyLLMGatewayMigration(t, pool, "33_llm_data_classification.sql")
+	applyLLMGatewayMigration(t, pool, "34_llm_data_classification.sql")
 	var gotRun string
 	if err := pool.QueryRow(ctx, `SELECT run_id::text FROM run WHERE run_id = $1`, runID).Scan(&gotRun); err != nil {
 		t.Fatalf("upgrade 后读取旧 run: %v", err)
