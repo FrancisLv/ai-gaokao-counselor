@@ -345,6 +345,8 @@ expires_at
 | `APPLICABLE_DATE_MISMATCH` | package 与权威 artifact 的适用日期不一致 |
 | `PROFILE_VERSION_MISMATCH` | 正式证据包与 run 的确认 Profile 不一致 |
 | `RESULT_VERSION_CONFLICT` | `result_version` 已绑定不同输入摘要或其他 run |
+| `DELETION_IN_PROGRESS` | principal 删除处理中，禁止私有读取与新命令 |
+| `PRINCIPAL_DELETED` | principal 已完成删除，禁止私有读取与新命令 |
 | `PROFILE_NOT_CONFIRMED` | 数据依赖节点尝试读取未确认画像 |
 | `QUEUE_OVERLOADED` | 无可用执行容量 |
 | `EVENT_CURSOR_EXPIRED` | Watch 游标超出保留窗口 |
