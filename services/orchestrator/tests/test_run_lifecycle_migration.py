@@ -7,7 +7,7 @@ from run_lifecycle_support import RunLifecyclePostgresTest
 
 
 class FreshSchemaTests(RunLifecyclePostgresTest):
-    async def test_run_lifecycle_works_on_fresh_schema_from_00_to_27(self):
+    async def test_run_lifecycle_works_on_fresh_schema_from_00_to_28(self):
         from app.run_lifecycle import RunLifecycle, StructuredProfileInput, SubmitRunCommand
 
         await self.reset_to_fresh_schema()
@@ -109,6 +109,10 @@ class FreshSchemaTests(RunLifecyclePostgresTest):
                 conn,
                 "migrations/27_formal_evidence_results.sql",
             )
+            await self._apply_sql_file(
+                conn,
+                "migrations/28_authoritative_formal_gate.sql",
+            )
             tables = await (
                 await conn.execute(
                     """
@@ -116,6 +120,7 @@ class FreshSchemaTests(RunLifecyclePostgresTest):
                     FROM pg_tables
                     WHERE schemaname = 'public'
                       AND tablename IN (
+                          'run_formal_gate_artifact',
                           'run_evidence_package',
                           'run_verification_report',
                           'run_result_state_event'
@@ -135,6 +140,7 @@ class FreshSchemaTests(RunLifecyclePostgresTest):
             [row["tablename"] for row in tables],
             [
                 "run_evidence_package",
+                "run_formal_gate_artifact",
                 "run_result_state_event",
                 "run_verification_report",
             ],

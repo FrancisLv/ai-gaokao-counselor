@@ -9,7 +9,12 @@ import json
 from typing import Any
 from uuid import UUID
 
-from evidence import EvidencePackage, VerificationReport
+from evidence import (
+    EvidencePackage,
+    QualificationSummary,
+    VerificationReport,
+)
+from evidence.canonical import normalize_sample_years, sha256_payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +48,10 @@ class FormalResultView:
     confirmed_profile_version: UUID
     evidence_package_sha256: str
     verification_report_sha256: str
-    verification_summary: dict[str, Any]
+    verification_report: dict[str, Any]
+    risk_notice: str
+    disclaimer: str
+    no_admission_guarantee: str
     result_state: str
     stale_reason: str | None
 
@@ -106,7 +114,7 @@ def canonical_source_package(package: EvidencePackage) -> EvidencePackage:
                     ),
                     normalized=replace(
                         claim.normalized,
-                        sample_years=_canonical_sample_years(
+                        sample_years=normalize_sample_years(
                             claim.normalized.sample_years
                         ),
                     ),
@@ -207,17 +215,40 @@ def _canonical_evidence_ref(ref) -> Any:
         ref,
         derived=replace(
             ref.derived,
-            sample_years=_canonical_sample_years(ref.derived.sample_years),
+            sample_years=normalize_sample_years(ref.derived.sample_years),
         ),
     )
 
 
-def _canonical_sample_years(years: tuple[int, ...]) -> tuple[int, ...]:
-    return tuple(sorted(set(years)))
-
-
-def verification_summary(report: VerificationReport) -> dict[str, Any]:
+def verification_report_payload(
+    report: VerificationReport,
+) -> dict[str, Any]:
     return _json_ready(asdict(report))
+
+
+def formal_gate_artifact(
+    *,
+    release_id: str,
+    profile_version: str,
+    verifier_version: str,
+    applicable_as_of: date,
+    algorithm_config_version: str,
+    algorithm_config_sha256: str,
+    qualification: QualificationSummary,
+) -> dict[str, Any]:
+    return {
+        "release_id": release_id,
+        "profile_version": profile_version,
+        "verifier_version": verifier_version,
+        "applicable_as_of": applicable_as_of.isoformat(),
+        "algorithm_config_version": algorithm_config_version,
+        "algorithm_config_sha256": algorithm_config_sha256,
+        "qualification": canonical_payload(qualification),
+    }
+
+
+def formal_gate_artifact_sha256(artifact: dict[str, Any]) -> str:
+    return sha256_payload(artifact)
 
 
 def canonical_payload(value: Any) -> dict[str, Any]:

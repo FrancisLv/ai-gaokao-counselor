@@ -141,6 +141,29 @@ def formal_gate_context(
     qualification: QualificationSummary | None = None,
     notices: tuple[RequiredNotice, ...] | None = None,
 ) -> FormalGateContext:
+    qualification_value = qualification or QualificationSummary(
+        status="COMPLETE",
+        coverage=(
+            QualificationCoverage(
+                rule_type="ADMISSION_RULES",
+                status="FULL",
+            ),
+        ),
+        groups=(
+            QualificationGroup(
+                group_key="1001:01",
+                status="PASS",
+                majors=(
+                    QualificationMajor(
+                        major_code="080901",
+                        status="PASS",
+                    ),
+                ),
+            ),
+        ),
+        conflict_count=0,
+        unknown_count=0,
+    )
     return FormalGateContext(
         context_version="formal-gate-v1",
         release_id=release_id,
@@ -149,30 +172,8 @@ def formal_gate_context(
         algorithm_config_version=algorithm_config_version,
         algorithm_config_sha256=algorithm_config_sha256,
         verifier_version=verifier_version,
-        qualification=qualification
-        or QualificationSummary(
-            status="COMPLETE",
-            coverage=(
-                QualificationCoverage(
-                    rule_type="ADMISSION_RULES",
-                    status="FULL",
-                ),
-            ),
-            groups=(
-                QualificationGroup(
-                    group_key="1001:01",
-                    status="PASS",
-                    majors=(
-                        QualificationMajor(
-                            major_code="080901",
-                            status="PASS",
-                        ),
-                    ),
-                ),
-            ),
-            conflict_count=0,
-            unknown_count=0,
-        ),
+        applicable_as_of=date(2025, 6, 1),
+        qualification=qualification_value,
         required_notices=notices
         or (
             required_notice(
@@ -191,6 +192,20 @@ def formal_gate_context(
     )
 
 
+def registry_with_notices(
+    registry: tuple[EvidenceRef, ...],
+    context: FormalGateContext,
+) -> tuple[EvidenceRef, ...]:
+    return (
+        *registry,
+        *(
+            ref
+            for notice in context.required_notices
+            for ref in notice.evidence_refs
+        ),
+    )
+
+
 def document_package(
     document: DocumentEvidence | None = None,
     ref: EvidenceRef | None = None,
@@ -201,6 +216,8 @@ def document_package(
 ) -> EvidencePackage:
     document = document or document_evidence()
     ref = ref or document_ref(document)
+    context = formal_gate_context()
+    registry = registry if registry is not None else (ref,)
     return EvidencePackage(
         release_id="rel-2025",
         profile_version="profile-v1",
@@ -215,10 +232,9 @@ def document_package(
             school_id="1001",
         ),
         claims=claims or (document_claim(ref),),
-        evidence_registry=(
-            registry if registry is not None else (ref,)
-        ),
-        gate_context=formal_gate_context(),
+        evidence_registry=registry_with_notices(registry, context),
+        applicable_as_of=date(2025, 6, 1),
+        gate_context=context,
     )
 
 
@@ -303,6 +319,7 @@ def derived_package(
     evidence: DerivedEvidence,
     ref: EvidenceRef,
 ) -> EvidencePackage:
+    context = formal_gate_context()
     return EvidencePackage(
         release_id="rel-2025",
         profile_version="profile-v1",
@@ -316,13 +333,19 @@ def derived_package(
             school_id="1001",
         ),
         claims=(derived_claim(ref),),
-        evidence_registry=(ref,),
-        gate_context=formal_gate_context(),
+        evidence_registry=registry_with_notices((ref,), context),
+        applicable_as_of=date(2025, 6, 1),
+        gate_context=context,
     )
 
 
 class FixedEntailmentVerifier:
-    def __init__(self, result, *, verifier_version="entailment-v1"):
+    def __init__(
+        self,
+        result,
+        *,
+        verifier_version="evidence-verifier-v1",
+    ):
         self.result = result
         self.verifier_version = verifier_version
         self.calls = []
@@ -404,15 +427,35 @@ def structured_claim(ref: EvidenceRef) -> Claim:
         claim_type="STRUCTURED_FACT",
         criticality="CRITICAL",
         normalized=NormalizedFact(
-            subject="湖南测试大学 01 专业组",
+            subject=(
+                "湖南 2025年 物理类 本科批 "
+                "院校代码1001 01专业组 专业代码080901"
+            ),
             predicate="招生计划数",
             object=12,
             unit="人",
             source_year=2025,
         ),
-        rendered_text="该专业组计划招生 12 人，来源年份为 2025 年。",
+        rendered_text=(
+            "湖南 2025年 物理类 本科批 院校代码1001 "
+            "01专业组 专业代码080901 的招生计划数为 12 人，"
+            "来源年份为 2025 年。"
+        ),
         evidence_refs=(ref,),
         rendered_bindings=(
+            RenderedBinding(
+                fact_path="normalized.subject",
+                rendered_text=(
+                    "湖南 2025年 物理类 本科批 "
+                    "院校代码1001 01专业组 专业代码080901"
+                ),
+                evidence_id=ref.evidence_id,
+            ),
+            RenderedBinding(
+                fact_path="normalized.predicate",
+                rendered_text="招生计划数",
+                evidence_id=ref.evidence_id,
+            ),
             RenderedBinding(
                 fact_path="normalized.object",
                 rendered_text="12",
@@ -439,6 +482,8 @@ def structured_package(
     claims: tuple[Claim, ...] | None = None,
     registry: tuple[EvidenceRef, ...] | None = None,
 ) -> EvidencePackage:
+    context = formal_gate_context()
+    registry = registry if registry is not None else (ref,)
     return EvidencePackage(
         release_id="rel-2025",
         profile_version="profile-v1",
@@ -452,10 +497,9 @@ def structured_package(
             school_id="1001",
         ),
         claims=claims or (structured_claim(ref),),
-        evidence_registry=(
-            registry if registry is not None else (ref,)
-        ),
-        gate_context=formal_gate_context(),
+        evidence_registry=registry_with_notices(registry, context),
+        applicable_as_of=date(2025, 6, 1),
+        gate_context=context,
     )
 
 
@@ -465,7 +509,7 @@ class VerifyPackageDocumentTests(unittest.TestCase):
         ref = document_ref(document)
         package = document_package(document, ref)
 
-        report = VerifyPackage(package, today=date(2025, 6, 1))
+        report = VerifyPackage(package)
 
         self.assertEqual(report.status, "PASS")
         self.assertEqual(report.claims[0].claim_id, "claim-transfer-policy")
@@ -475,12 +519,110 @@ class VerifyPackageDocumentTests(unittest.TestCase):
         self.assertEqual(report.blocking_reasons, ())
         self.assertEqual(report.citation_coverage, 1.0)
 
+    def test_document_unit_and_source_year_must_be_bound_to_the_excerpt(self):
+        excerpt = "该专业学费为5000元，来源年份为2023年。"
+        document = document_evidence(excerpt=excerpt)
+        ref = document_ref(document)
+        claim = replace(
+            document_claim(ref),
+            normalized=replace(
+                document_claim(ref).normalized,
+                object=5000,
+                unit="万元",
+                source_year=2025,
+            ),
+            rendered_text="该专业学费为5000万元，来源年份为2025年。",
+            rendered_bindings=(
+                RenderedBinding(
+                    fact_path="normalized.object",
+                    rendered_text="5000",
+                    evidence_id=ref.evidence_id,
+                ),
+            ),
+        )
+
+        report = VerifyPackage(
+            document_package(document, ref, claims=(claim,)),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.claims[0].status, "CONTRADICTED")
+
+    def test_document_claim_cannot_splice_bindings_from_different_excerpts(self):
+        amount_document = document_evidence(
+            excerpt="该专业学费为5000。",
+        )
+        amount_ref = document_ref(
+            amount_document,
+            evidence_id="ev-tuition-amount",
+        )
+        unit_document = replace(
+            document_evidence(excerpt="学费单位为元。"),
+            chunk_id="chunk-tuition-unit",
+        )
+        unit_ref = document_ref(
+            unit_document,
+            evidence_id="ev-tuition-unit",
+        )
+        year_document = replace(
+            document_evidence(excerpt="来源年份为2023年。"),
+            chunk_id="chunk-tuition-year",
+        )
+        year_ref = document_ref(
+            year_document,
+            evidence_id="ev-tuition-year",
+        )
+        claim = Claim(
+            claim_id="claim-tuition",
+            claim_type="DOCUMENT_FACT",
+            criticality="CRITICAL",
+            normalized=NormalizedFact(
+                subject="湖南测试大学",
+                predicate="学费",
+                object=5000,
+                unit="元",
+                source_year=2023,
+            ),
+            rendered_text="该专业学费为5000元，来源年份为2023年。",
+            evidence_refs=(amount_ref, unit_ref, year_ref),
+            rendered_bindings=(
+                RenderedBinding(
+                    fact_path="normalized.object",
+                    rendered_text="5000",
+                    evidence_id=amount_ref.evidence_id,
+                ),
+                RenderedBinding(
+                    fact_path="normalized.unit",
+                    rendered_text="元",
+                    evidence_id=unit_ref.evidence_id,
+                ),
+                RenderedBinding(
+                    fact_path="normalized.source_year",
+                    rendered_text="2023",
+                    evidence_id=year_ref.evidence_id,
+                ),
+            ),
+        )
+
+        report = VerifyPackage(
+            document_package(
+                amount_document,
+                amount_ref,
+                registry=(amount_ref, unit_ref, year_ref),
+                claims=(claim,),
+            ),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.claims[0].status, "CONTRADICTED")
+        self.assertEqual(report.claims[0].reason, "CLAIM_RENDER_MISMATCH")
+
     def test_excerpt_hash_mismatch_is_contradicted(self):
         document = document_evidence()
         ref = replace(document_ref(document), content_sha256="b" * 64)
         package = document_package(document, ref)
 
-        report = VerifyPackage(package, today=date(2025, 6, 1))
+        report = VerifyPackage(package)
 
         self.assertEqual(report.status, "BLOCKED")
         self.assertEqual(report.claims[0].status, "CONTRADICTED")
@@ -506,7 +648,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
                 )
                 report = VerifyPackage(
                     package,
-                    today=date(2025, 6, 1),
                 )
                 self.assertEqual(report.claims[0].status, "CONTRADICTED")
                 self.assertEqual(
@@ -539,7 +680,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
                 ref = document_ref(invalid_document)
                 report = VerifyPackage(
                     document_package(invalid_document, ref),
-                    today=date(2025, 6, 1),
                 )
                 self.assertEqual(
                     report.claims[0].status,
@@ -553,7 +693,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
 
         report = VerifyPackage(
             document_package(invalid_document, ref),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.claims[0].status, "UNVERIFIABLE")
@@ -576,7 +715,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
 
         report = VerifyPackage(
             document_package(document, ref, claims=(claim,)),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.claims[0].status, "UNVERIFIABLE")
@@ -603,7 +741,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
                 )
                 report = VerifyPackage(
                     package,
-                    today=date(2025, 6, 1),
                 )
                 self.assertEqual(report.status, "BLOCKED")
                 self.assertEqual(report.claims[0].reason, reason)
@@ -623,7 +760,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
                 ref,
                 registry=(ref, other_ref),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -642,7 +778,7 @@ class VerifyPackageDocumentTests(unittest.TestCase):
         ref = document_ref(document)
         package = replace(document_package(document, ref), verifier_version="")
 
-        report = VerifyPackage(package, today=date(2025, 6, 1))
+        report = VerifyPackage(package)
 
         self.assertEqual(report.claims[0].status, "UNVERIFIABLE")
         self.assertEqual(
@@ -668,13 +804,44 @@ class VerifyPackageDocumentTests(unittest.TestCase):
 
         report = VerifyPackage(
             document_package(document, ref, claims=(claim,)),
-            today=date(2025, 6, 1),
             entailment_verifier=adapter,
         )
 
         self.assertEqual(report.claims[0].status, "VERIFIED")
         self.assertFalse(report.claims[0].deterministic)
         self.assertEqual(adapter.calls, [("claim-transfer-policy", "chunk-transfer")])
+
+    def test_entailment_adapter_version_must_match_the_package_verifier(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        claim = replace(
+            document_claim(ref),
+            normalized=NormalizedFact(
+                subject="湖南测试大学",
+                predicate="转专业政策",
+                object="允许学生转专业",
+                unit=None,
+            ),
+            rendered_text="允许学生转专业。",
+            rendered_bindings=(),
+        )
+        adapter = FixedEntailmentVerifier(
+            True,
+            verifier_version="entailment-v1",
+        )
+
+        report = VerifyPackage(
+            document_package(document, ref, claims=(claim,)),
+            entailment_verifier=adapter,
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.claims[0].status, "UNVERIFIABLE")
+        self.assertEqual(
+            report.claims[0].reason,
+            "VERIFIER_VERSION_MISMATCH",
+        )
+        self.assertEqual(adapter.calls, [])
 
     def test_entailment_uncertainty_is_unverifiable(self):
         document = document_evidence()
@@ -692,7 +859,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
 
         report = VerifyPackage(
             document_package(document, ref, claims=(claim,)),
-            today=date(2025, 6, 1),
             entailment_verifier=FixedEntailmentVerifier(None),
         )
 
@@ -722,7 +888,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
                 ref,
                 claims=(document_claim(ref), claim),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "PARTIAL")
@@ -748,7 +913,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
 
         report = VerifyPackage(
             document_package(document, ref, claims=(claim,)),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -784,7 +948,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
                 ref,
                 claims=(verified_claim, stripped_claim),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "PARTIAL")
@@ -809,7 +972,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
 
         report = VerifyPackage(
             document_package(document, ref, claims=(claim,)),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -849,7 +1011,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
                 ref,
                 claims=(contradicted_claim, unverifiable_claim),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -876,7 +1037,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
 
         report = VerifyPackage(
             document_package(document, ref, claims=(claim,)),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -893,10 +1053,32 @@ class VerifyPackageDocumentTests(unittest.TestCase):
         ref = document_ref(document)
         package = document_package(document, ref)
 
-        first = VerifyPackage(package, today=date(2025, 6, 1))
-        second = VerifyPackage(package, today=date(2025, 6, 1))
+        first = VerifyPackage(package)
+        second = VerifyPackage(package)
 
         self.assertEqual(first, second)
+
+    def test_applicability_uses_the_versioned_package_date(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        package = replace(
+            document_package(document, ref),
+            applicable_as_of=date(2025, 6, 1),
+        )
+
+        first = VerifyPackage(package)
+        second = VerifyPackage(package)
+        expired = VerifyPackage(
+            replace(package, applicable_as_of=date(2027, 1, 1))
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(first.status, "PASS")
+        self.assertEqual(expired.status, "BLOCKED")
+        self.assertIn(
+            "EVIDENCE_SCOPE_MISMATCH",
+            expired.blocking_reasons,
+        )
 
     def test_claim_and_evidence_output_order_is_stable(self):
         document = document_evidence()
@@ -915,7 +1097,7 @@ class VerifyPackageDocumentTests(unittest.TestCase):
             claims=(second_claim, first_claim),
         )
 
-        report = VerifyPackage(package, today=date(2025, 6, 1))
+        report = VerifyPackage(package)
 
         self.assertEqual(
             tuple(item.claim_id for item in report.claims),
@@ -932,7 +1114,7 @@ class VerifyPackageDocumentTests(unittest.TestCase):
             claims=(claim, claim),
         )
 
-        report = VerifyPackage(package, today=date(2025, 6, 1))
+        report = VerifyPackage(package)
 
         self.assertEqual(report.status, "BLOCKED")
         self.assertTrue(
@@ -954,7 +1136,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
                 ref,
                 claims=(claim, claim),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -976,7 +1157,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
                 ref,
                 claims=(document_claim(ref), malformed_claim),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -1016,7 +1196,6 @@ class VerifyPackageDocumentTests(unittest.TestCase):
                     normal_claim,
                 ),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -1031,13 +1210,51 @@ class VerifyPackageStructuredTests(unittest.TestCase):
 
         report = VerifyPackage(
             structured_package(authoritative, ref),
-            today=date(2025, 6, 1),
             structured_authority=FixedStructuredAuthority(authoritative),
         )
 
         self.assertEqual(report.status, "PASS")
         self.assertEqual(report.claims[0].status, "VERIFIED")
         self.assertEqual(report.claims[0].checked_against, ("ev-plan-count",))
+
+    def test_structured_claim_must_match_subject_and_predicate_semantics(self):
+        authoritative = structured_evidence()
+        ref = structured_ref(authoritative)
+        base_claim = structured_claim(ref)
+        cases = (
+            replace(
+                base_claim,
+                normalized=replace(
+                    base_claim.normalized,
+                    predicate="学费",
+                ),
+            ),
+            replace(
+                base_claim,
+                normalized=replace(
+                    base_claim.normalized,
+                    subject="湖南另一所大学 01 专业组",
+                ),
+            ),
+        )
+        for claim in cases:
+            with self.subTest(claim=claim):
+                report = VerifyPackage(
+                    structured_package(
+                        authoritative,
+                        ref,
+                        claims=(claim,),
+                    ),
+                    structured_authority=FixedStructuredAuthority(
+                        authoritative
+                    ),
+                )
+
+                self.assertEqual(report.status, "BLOCKED")
+                self.assertEqual(
+                    report.claims[0].status,
+                    "CONTRADICTED",
+                )
 
     def test_structured_value_type_unit_or_year_mismatch_is_contradicted(self):
         authoritative = structured_evidence()
@@ -1053,7 +1270,6 @@ class VerifyPackageStructuredTests(unittest.TestCase):
                 ref = structured_ref(candidate)
                 report = VerifyPackage(
                     structured_package(candidate, ref),
-                    today=date(2025, 6, 1),
                     structured_authority=FixedStructuredAuthority(
                         authoritative
                     ),
@@ -1082,7 +1298,6 @@ class VerifyPackageStructuredTests(unittest.TestCase):
 
         report = VerifyPackage(
             structured_package(candidate, ref),
-            today=date(2025, 6, 1),
             structured_authority=FixedStructuredAuthority(authoritative),
         )
 
@@ -1128,7 +1343,6 @@ class VerifyPackageStructuredTests(unittest.TestCase):
                 )
                 report = VerifyPackage(
                     structured_package(evidence, ref, claims=(claim,)),
-                    today=date(2025, 6, 1),
                     structured_authority=FixedStructuredAuthority(
                         evidence
                     ),
@@ -1177,7 +1391,6 @@ class VerifyPackageStructuredTests(unittest.TestCase):
                         ref,
                         claims=(invalid_claim,),
                     ),
-                    today=date(2025, 6, 1),
                     structured_authority=FixedStructuredAuthority(
                         authoritative
                     ),
@@ -1199,7 +1412,6 @@ class VerifyPackageStructuredTests(unittest.TestCase):
 
         report = VerifyPackage(
             structured_package(candidate, ref),
-            today=date(2025, 6, 1),
             structured_authority=FixedStructuredAuthority(authoritative),
         )
 
@@ -1220,7 +1432,6 @@ class VerifyPackageStructuredTests(unittest.TestCase):
 
         report = VerifyPackage(
             structured_package(candidate, ref),
-            today=date(2025, 6, 1),
             structured_authority=FixedStructuredAuthority(authoritative),
         )
 
@@ -1260,7 +1471,6 @@ class VerifyPackageStructuredTests(unittest.TestCase):
                         claims=(structured_claim(ref),),
                         registry=(invalid_ref,),
                     ),
-                    today=date(2025, 6, 1),
                     structured_authority=FixedStructuredAuthority(evidence),
                 )
                 self.assertEqual(report.status, "BLOCKED")
@@ -1279,7 +1489,6 @@ class VerifyPackageStructuredTests(unittest.TestCase):
 
         report = VerifyPackage(
             structured_package(evidence, ref),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -1301,7 +1510,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
                 invalid_ref = derived_ref(invalid_evidence)
                 report = VerifyPackage(
                     derived_package(invalid_evidence, invalid_ref),
-                    today=date(2025, 6, 1),
                 )
                 self.assertEqual(report.status, "BLOCKED")
                 self.assertEqual(
@@ -1324,7 +1532,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
                         derived_package(evidence, ref),
                         claims=(replace(claim, normalized=normalized),),
                     ),
-                    today=date(2025, 6, 1),
                 )
                 self.assertEqual(report.status, "BLOCKED")
                 self.assertEqual(
@@ -1379,7 +1586,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
 
         report = VerifyPackage(
             replace(derived_package(evidence, ref), claims=(claim,)),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "PASS")
@@ -1434,7 +1640,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
             with self.subTest(reason=reason):
                 report = VerifyPackage(
                     package,
-                    today=date(2025, 6, 1),
                 )
                 self.assertEqual(report.status, "BLOCKED")
                 self.assertEqual(
@@ -1482,7 +1687,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
                         derived_package(evidence, ref),
                         claims=(invalid_claim,),
                     ),
-                    today=date(2025, 6, 1),
                 )
                 self.assertEqual(report.status, "BLOCKED")
                 self.assertEqual(
@@ -1504,7 +1708,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
 
         report = VerifyPackage(
             replace(derived_package(evidence, ref), claims=(claim,)),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -1527,7 +1730,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
 
         report = VerifyPackage(
             replace(derived_package(evidence, ref), claims=(claim,)),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "PASS")
@@ -1541,12 +1743,10 @@ class VerifyPackageDerivedTests(unittest.TestCase):
 
         first = VerifyPackage(
             package,
-            today=date(2025, 6, 1),
             derived_recomputer=recomputer,
         )
         second = VerifyPackage(
             package,
-            today=date(2025, 6, 1),
             derived_recomputer=recomputer,
         )
 
@@ -1578,7 +1778,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
 
         report = VerifyPackage(
             replace(derived_package(evidence, ref), claims=(claim,)),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -1595,7 +1794,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
 
         report = VerifyPackage(
             derived_package(evidence, ref),
-            today=date(2025, 6, 1),
             derived_recomputer=recomputer,
         )
 
@@ -1612,7 +1810,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
 
         report = VerifyPackage(
             derived_package(saved, ref),
-            today=date(2025, 6, 1),
             derived_recomputer=recomputer,
         )
 
@@ -1664,7 +1861,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
 
         report = VerifyPackage(
             replace(derived_package(evidence, ref), claims=(claim,)),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "PASS")
@@ -1680,7 +1876,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
                 tampered,
                 replace(ref, derived=tampered),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -1735,7 +1930,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
 
         report = VerifyPackage(
             replace(derived_package(evidence, ref), claims=(claim,)),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -1769,7 +1963,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
 
         report = VerifyPackage(
             package,
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -1788,7 +1981,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
 
         report = VerifyPackage(
             derived_package(evidence, ref),
-            today=date(2025, 6, 1),
             derived_recomputer=recomputer,
         )
 
@@ -1806,7 +1998,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
 
         report = VerifyPackage(
             derived_package(evidence, ref),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "PASS")
@@ -1835,7 +2026,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
                         derived_package(evidence, ref),
                         claims=(replace(claim, normalized=normalized),),
                     ),
-                    today=date(2025, 6, 1),
                 )
                 self.assertEqual(report.status, "BLOCKED")
                 self.assertEqual(
@@ -1867,7 +2057,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
                 ref = derived_ref(invalid_evidence)
                 report = VerifyPackage(
                     derived_package(invalid_evidence, ref),
-                    today=date(2025, 6, 1),
                 )
                 self.assertEqual(report.status, "BLOCKED")
                 self.assertEqual(
@@ -1901,7 +2090,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
             with self.subTest(recomputed=recomputed):
                 report = VerifyPackage(
                     derived_package(evidence, ref),
-                    today=date(2025, 6, 1),
                     derived_recomputer=FixedDerivedRecomputer(recomputed),
                 )
                 self.assertEqual(report.status, "BLOCKED")
@@ -1923,7 +2111,6 @@ class VerifyPackageDerivedTests(unittest.TestCase):
 
         report = VerifyPackage(
             derived_package(evidence, ref),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "PASS")
@@ -1936,10 +2123,9 @@ class VerifyPackageAggregationTests(unittest.TestCase):
         ref = document_ref(document)
         package = document_package(document, ref)
 
-        passed = VerifyPackage(package, today=date(2025, 6, 1))
+        passed = VerifyPackage(package)
         blocked = VerifyPackage(
             replace(package, gate_context=None),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(passed.status, "PASS")
@@ -1993,7 +2179,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
             with self.subTest(label=label):
                 report = VerifyPackage(
                     replace(package, gate_context=invalid_context),
-                    today=date(2025, 6, 1),
                 )
 
                 self.assertEqual(report.status, "BLOCKED")
@@ -2014,7 +2199,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                     algorithm_config_sha256="b" * 64,
                 ),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -2082,7 +2266,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                             qualification=invalid_qualification,
                         ),
                     ),
-                    today=date(2025, 6, 1),
                 )
 
                 self.assertEqual(report.status, "BLOCKED")
@@ -2111,7 +2294,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                     ),
                 ),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -2201,7 +2383,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                             ),
                         ),
                     ),
-                    today=date(2025, 6, 1),
                 )
 
                 self.assertEqual(report.status, "BLOCKED")
@@ -2241,7 +2422,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                     qualification=qualification,
                 ),
             ),
-            today=date(2025, 6, 1),
         )
         missing_restriction = VerifyPackage(
             replace(
@@ -2256,7 +2436,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                     ),
                 ),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(allowed.status, "PASS")
@@ -2299,7 +2478,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                     ),
                 ),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -2346,7 +2524,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                             ),
                         ),
                     ),
-                    today=date(2025, 6, 1),
                 )
 
                 self.assertEqual(report.status, "BLOCKED")
@@ -2398,7 +2575,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                     ),
                 ),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -2469,7 +2645,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                             required_notices=invalid_notices,
                         ),
                     ),
-                    today=date(2025, 6, 1),
                 )
 
                 self.assertEqual(report.status, "BLOCKED")
@@ -2497,7 +2672,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                     ),
                 ),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(report.status, "BLOCKED")
@@ -2505,6 +2679,45 @@ class VerifyPackageAggregationTests(unittest.TestCase):
             report.blocking_reasons,
             ("REQUIRED_NOTICE_MISSING",),
         )
+
+    def test_required_notice_must_resolve_through_the_evidence_registry(self):
+        document = document_evidence()
+        ref = document_ref(document)
+        package = document_package(document, ref)
+        context = package.gate_context
+        self.assertIsNotNone(context)
+        notice = context.required_notices[0]
+        package = replace(
+            package,
+            evidence_registry=(
+                *package.evidence_registry,
+                *(
+                    evidence_ref
+                    for required in context.required_notices
+                    for evidence_ref in required.evidence_refs
+                ),
+            ),
+            gate_context=replace(
+                context,
+                required_notices=(
+                    replace(
+                        notice,
+                        evidence_refs=(
+                            replace(
+                                notice.evidence_refs[0],
+                                evidence_id="ev-unregistered-notice",
+                            ),
+                        ),
+                    ),
+                    *context.required_notices[1:],
+                ),
+            ),
+        )
+
+        report = VerifyPackage(package)
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertIn("REQUIRED_NOTICE_MISSING", report.blocking_reasons)
 
     def test_required_notice_rejects_unrelated_structured_evidence(self):
         document = document_evidence()
@@ -2536,7 +2749,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                     ),
                 ),
             ),
-            today=date(2025, 6, 1),
             structured_authority=FixedStructuredAuthority(unrelated),
         )
 
@@ -2568,9 +2780,12 @@ class VerifyPackageAggregationTests(unittest.TestCase):
         wrong_field_report = VerifyPackage(
             replace(
                 base_package,
-                evidence_registry=(
-                    document_ref_value,
-                    wrong_field_ref,
+                evidence_registry=registry_with_notices(
+                    (
+                        document_ref_value,
+                        wrong_field_ref,
+                    ),
+                    context,
                 ),
                 gate_context=replace(
                     context,
@@ -2583,7 +2798,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                     ),
                 ),
             ),
-            today=date(2025, 6, 1),
         )
 
         supported = replace(
@@ -2607,9 +2821,12 @@ class VerifyPackageAggregationTests(unittest.TestCase):
         supported_report = VerifyPackage(
             replace(
                 base_package,
-                evidence_registry=(
-                    document_ref_value,
-                    supported_ref,
+                evidence_registry=registry_with_notices(
+                    (
+                        document_ref_value,
+                        supported_ref,
+                    ),
+                    context,
                 ),
                 gate_context=replace(
                     context,
@@ -2622,7 +2839,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                     ),
                 ),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(wrong_field_report.status, "BLOCKED")
@@ -2661,7 +2877,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                         ref,
                         claims=(claim,),
                     ),
-                    today=date(2025, 6, 1),
                 )
 
                 self.assertEqual(report.status, "BLOCKED")
@@ -2720,7 +2935,7 @@ class VerifyPackageAggregationTests(unittest.TestCase):
             ),
         )
 
-        partial = VerifyPackage(package, today=date(2025, 6, 1))
+        partial = VerifyPackage(package)
         blocked = VerifyPackage(
             replace(
                 package,
@@ -2732,7 +2947,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                     ),
                 ),
             ),
-            today=date(2025, 6, 1),
         )
 
         self.assertEqual(partial.status, "PARTIAL")
@@ -2778,7 +2992,6 @@ class VerifyPackageAggregationTests(unittest.TestCase):
 
         report = VerifyPackage(
             package,
-            today=date(2025, 6, 1),
             structured_authority=FixedStructuredAuthority(structured),
         )
 
@@ -2813,8 +3026,8 @@ class VerifyPackageAggregationTests(unittest.TestCase):
             claims=(contradicted_claim, mismatched_claim),
         )
 
-        first = VerifyPackage(package, today=date(2025, 6, 1))
-        second = VerifyPackage(package, today=date(2025, 6, 1))
+        first = VerifyPackage(package)
+        second = VerifyPackage(package)
 
         self.assertEqual(first, second)
         self.assertEqual(first.status, "BLOCKED")
@@ -2866,6 +3079,7 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                 if binding.fact_path != "normalized.sample_years"
             ),
         )
+        context = formal_gate_context()
         package = EvidencePackage(
             release_id="rel-2025",
             profile_version="profile-v1",
@@ -2883,22 +3097,24 @@ class VerifyPackageAggregationTests(unittest.TestCase):
                 structured_claim_value,
                 document_claim_value,
             ),
-            evidence_registry=(
-                derived_ref_value,
-                structured_ref_value,
-                document_ref_value,
+            evidence_registry=registry_with_notices(
+                (
+                    derived_ref_value,
+                    structured_ref_value,
+                    document_ref_value,
+                ),
+                context,
             ),
-            gate_context=formal_gate_context(),
+            applicable_as_of=date(2025, 6, 1),
+            gate_context=context,
         )
 
         first = VerifyPackage(
             package,
-            today=date(2025, 6, 1),
             structured_authority=FixedStructuredAuthority(structured),
         )
         second = VerifyPackage(
             package,
-            today=date(2025, 6, 1),
             structured_authority=FixedStructuredAuthority(structured),
         )
 

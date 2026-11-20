@@ -1898,3 +1898,69 @@ LLM 规则生成。
 - `make py-check py-test PY=/Users/francis/miniconda3/envs/ai-gaokao-counselor/bin/python3`
   通过：284 tests OK，126 个依赖真实库/外部服务的用例按既有约定跳过。
 - `make build check test` 通过。
+
+## 58. M4c 最终 code review 修复：正式结果与 Verifier 深模块收口
+
+**日期与范围**：2026-11-20，固定点 `6647529`，审查对象
+`codex/m4c-integration` tip `ae6e535`。按 findings 全部 11 项施工，保持
+`VerifyPackage` 唯一事实校验 seam 和既有 RunLifecycle 状态机。
+
+### 实现
+
+- 正式结果 payload 原样保存 `disclaimer / risk_notice / no_admission_guarantee`，
+  GET、Watch、RESULT 与 gRPC 返回同一文本；proto 仅加法新增字段。完整报告字段从
+  误导性的 `verification_summary` 改名为 `verification_report`，读取旧 payload 时保留
+  `verification_summary` 兼容回退。
+- `verifier.py` 从 1481 行拆为包级状态机、`claims.py`、`formal_gate.py`、
+  `normalization.py`、`models.py`；唯一公开校验入口仍为 `VerifyPackage`。
+- 样本年份去重升序统一使用 `evidence.canonical.normalize_sample_years`；Formal
+  输入摘要与 Verifier 不再各自实现。
+- 删除仅测试覆写的 `_before_formal_publish_hook`，改为构造函数注入
+  `formal_publish_guard`；取消与 release 撤销竞态行为保持不变。
+- 新增迁移 `28_authoritative_formal_gate.sql`：RunLifecycle 在
+  `EvaluateEligibility` 后保存不可变 `run_formal_gate_artifact`。发布时复核 release、
+  Profile、Verifier、release manifest 配置、适用日期与资格摘要；伪造
+  `COMPLETE + PASS` 返回 `QUALIFICATION_ARTIFACT_MISMATCH`。
+- 文档事实要求单位/来源年份出现在同一原文和渲染绑定；结构化事实要求业务键生成的
+  subject、field path 对应的 predicate 及语义渲染绑定；必需说明引用统一经 registry
+  解析；entailment adapter 版本必须一致。
+- `applicable_as_of` 纳入 package 和 gate context，Verifier 不再读取系统当前日期。
+
+### 验证
+
+- 严格 TDD 逐项新增公开行为反例：文档单位/年份漂移、结构化 subject/predicate 错配、
+  未注册 notice、adapter 版本漂移、日期变化、伪造资格上下文、notice 不进入正式结果。
+- 真实 PostgreSQL：`test_run_lifecycle_formal.py` 14 tests OK，
+  `test_run_lifecycle_migration.py` 5 tests OK；fresh `00 → 28` 与 `26 → 28` 升级通过。
+- 全量 Python（显式真实测试库）：290 tests OK，2 个依赖外部 algo 地址/语料条件的用例
+  按既有约定跳过。
+- `make api PY=/Users/francis/miniconda3/envs/ai-gaokao-counselor/bin/python3`、
+  `make build check test` 均通过。
+
+## 59. M4c 最终 merger 修复：跨原文拼接与 artifact 日期漂移
+
+**日期与范围**：2026-11-20，分支 `codex/m4c-review-fixes`，修复 issue #30/M4c
+最终 merger 的两个 blocker。
+
+### 问题与实现
+
+- `VerifyPackage` 原先分别验证每个文档渲染绑定，可能把不同 excerpt 中的数值、单位
+  和来源年份拼成一条 `VERIFIED` 文档 Claim。现要求所有关键绑定共同解析到同一
+  `EvidenceRef`，跨原文组合返回 `CLAIM_RENDER_MISMATCH` 并阻断。
+- 权威正式 `run_formal_gate_artifact` 的 `applicable_as_of` 原取 worker 当前时钟
+  日期，导致同一 run 在跨日重试时产生不同摘要并冲突。现从 run 查询中携带持久化
+  `created_at`，固定使用其日期生成 artifact。
+
+### 验证
+
+- 严格 TDD 先新增三个独立 excerpt 的文档 Claim 跨原文拼接反例，修复前错误为
+  `PASS`，修复后为 `BLOCKED / CONTRADICTED / CLAIM_RENDER_MISMATCH`。
+- 真实 PostgreSQL 公开行为测试将 lifecycle 时钟固定在 2024-01-02，断言 artifact
+  日期等于 run 的持久创建日期；修复前为 `2024-01-02` 而 run 创建日为
+  `2026-11-20`，修复后一致。
+- 同一 run 在 2024-01-02 生成 artifact 后模拟 worker 中断，再由 2024-01-03 的
+  lifecycle 重试；重试成功且 artifact 日期与 SHA-256 均保持不变。
+- `test_evidence_verification.py` 77 tests OK；真实库
+  `test_run_lifecycle_algorithm_preview.py` 6 tests OK，1 个外部 algo 用例按既有
+  条件跳过；全量 Python 292 tests OK，2 个条件用例跳过。
+- `make api`、`make build`、`make check`、`make test` 与 `git diff --check` 通过。

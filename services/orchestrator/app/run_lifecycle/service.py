@@ -29,9 +29,11 @@ from app.run_lifecycle.formal import (
     PublishFormalResultCommand,
     canonical_payload,
     canonical_source_package,
+    formal_gate_artifact,
+    formal_gate_artifact_sha256,
     payload_sha256,
     retained_package,
-    verification_summary,
+    verification_report_payload,
 )
 from app.run_lifecycle.models import (
     AlgorithmPreviewPayload,
@@ -57,10 +59,15 @@ from evidence import (
     DerivedEvidenceRecomputer,
     EntailmentVerifier,
     EvidencePackage,
+    QualificationCoverage,
+    QualificationGroup,
+    QualificationMajor,
+    QualificationSummary,
     StructuredEvidenceAuthority,
     VerificationReport,
     VerifyPackage,
 )
+from evidence.canonical import sha256_payload
 from rag.policy_retrieval import (
     ApplicabilityScope,
     PolicyRetrievalError,
@@ -74,6 +81,10 @@ class PolicyRetriever(Protocol):
         self,
         query: PolicyRetrievalQuery,
     ) -> PolicyRetrievalResult: ...
+
+
+class FormalPublishGuard(Protocol):
+    async def before_publish(self, run_id: UUID) -> None: ...
 
 
 class RunLifecycle:
@@ -92,6 +103,8 @@ class RunLifecycle:
         entailment_verifier: EntailmentVerifier | None = None,
         structured_evidence_authority: StructuredEvidenceAuthority | None = None,
         derived_evidence_recomputer: DerivedEvidenceRecomputer | None = None,
+        formal_verifier_version: str = "evidence-verifier-v1",
+        formal_publish_guard: FormalPublishGuard | None = None,
     ) -> None:
         if not dsn:
             raise ValueError("RunLifecycle 需要 PostgreSQL DSN")
@@ -105,6 +118,8 @@ class RunLifecycle:
         self._entailment_verifier = entailment_verifier
         self._structured_evidence_authority = structured_evidence_authority
         self._derived_evidence_recomputer = derived_evidence_recomputer
+        self._formal_verifier_version = formal_verifier_version
+        self._formal_publish_guard = formal_publish_guard
         self._saver_cm = None
         self._saver: AsyncPostgresSaver | None = None
         self._profile_graph = None
@@ -113,9 +128,6 @@ class RunLifecycle:
 
     async def _after_claim_hook(self, run_id: UUID, lease_epoch: int) -> None:
         """测试 adapter 可覆写的执行点；生产默认无副作用。"""
-
-    async def _before_formal_publish_hook(self, run_id: UUID) -> None:
-        """测试 adapter 可覆写的验证完成、发布事务开始前执行点。"""
 
     def _checkpoint_persisted_hook(self, run_id: UUID) -> None:
         """测试 adapter 可覆写的崩溃注入点。"""
@@ -319,7 +331,21 @@ class RunLifecycle:
                     confirmed_profile_version=row["confirmed_profile_version"],
                     evidence_package_sha256=row["package_sha256"],
                     verification_report_sha256=row["report_sha256"],
-                    verification_summary=row["verification_report"],
+                    verification_report=row["verification_report"],
+                    risk_notice=(row["result_payload"] or {}).get(
+                        "risk_notice",
+                        "",
+                    ),
+                    disclaimer=(row["result_payload"] or {}).get(
+                        "disclaimer",
+                        "",
+                    ),
+                    no_admission_guarantee=(
+                        (row["result_payload"] or {}).get(
+                            "no_admission_guarantee",
+                            "",
+                        )
+                    ),
                     result_state=row["result_state"] or "ACTIVE",
                     stale_reason=row["stale_reason"],
                 )
@@ -515,13 +541,24 @@ class RunLifecycle:
                 source_package_sha256=source_package_sha256,
             )
 
+        artifact = await self._load_formal_gate_artifact(
+            principal_id=command.principal_id,
+            run_id=command.run_id,
+        )
+        self._require_formal_gate_artifact_match(
+            package=command.package,
+            artifact=artifact,
+        )
         report = VerifyPackage(
             command.package,
             entailment_verifier=self._entailment_verifier,
             structured_authority=self._structured_evidence_authority,
             derived_recomputer=self._derived_evidence_recomputer,
         )
-        await self._before_formal_publish_hook(command.run_id)
+        if self._formal_publish_guard is not None:
+            await self._formal_publish_guard.before_publish(
+                command.run_id
+            )
         if report.status == "BLOCKED":
             return await self._fail_blocked_formal_package(
                 command,
@@ -533,8 +570,12 @@ class RunLifecycle:
             retained_package(command.package, report)
         )
         package_sha256 = payload_sha256(published_package)
-        report_payload = verification_summary(report)
+        report_payload = verification_report_payload(report)
         report_sha256 = payload_sha256(report)
+        notice_texts = {
+            notice.notice_type: notice.normalized_text
+            for notice in command.package.gate_context.required_notices
+        }
         result_summary = {
             "result_version": str(result_version),
             "result_kind": "V1_FORMAL",
@@ -542,7 +583,12 @@ class RunLifecycle:
             "confirmed_profile_version": str(profile_version),
             "evidence_package_sha256": package_sha256,
             "verification_report_sha256": report_sha256,
-            "verification_summary": report_payload,
+            "verification_report": report_payload,
+            "risk_notice": notice_texts["RISK_NOTICE"],
+            "disclaimer": notice_texts["DISCLAIMER"],
+            "no_admission_guarantee": notice_texts[
+                "NO_ADMISSION_GUARANTEE"
+            ],
             "result_state": "ACTIVE",
             "stale_reason": None,
         }
@@ -859,6 +905,65 @@ class RunLifecycle:
             stripped_claim_ids=report.stripped_claim_ids,
         )
 
+    async def _load_formal_gate_artifact(
+        self,
+        *,
+        principal_id: str,
+        run_id: UUID,
+    ) -> dict[str, Any]:
+        conn = await self._connect()
+        try:
+            row = await (
+                await conn.execute(
+                    """
+                    SELECT artifact.artifact_sha256, artifact.artifact_json
+                    FROM run_formal_gate_artifact artifact
+                    JOIN run ON run.run_id = artifact.run_id
+                    WHERE artifact.run_id = %s
+                      AND run.principal_id = %s
+                    """,
+                    (run_id, principal_id),
+                )
+            ).fetchone()
+        finally:
+            await conn.close()
+        if row is None:
+            raise RunLifecycleError("FORMAL_GATE_ARTIFACT_MISSING")
+        artifact = row["artifact_json"]
+        if row["artifact_sha256"] != formal_gate_artifact_sha256(artifact):
+            raise RunLifecycleError("FORMAL_GATE_ARTIFACT_MISMATCH")
+        return artifact
+
+    @staticmethod
+    def _require_formal_gate_artifact_match(
+        *,
+        package: EvidencePackage,
+        artifact: dict[str, Any],
+    ) -> None:
+        context = package.gate_context
+        if context is None:
+            raise RunLifecycleError("FORMAL_GATE_CONTEXT_MISSING")
+        if artifact["release_id"] != package.release_id:
+            raise RunLifecycleError("RELEASE_MISMATCH")
+        if artifact["profile_version"] != package.profile_version:
+            raise RunLifecycleError("PROFILE_VERSION_MISMATCH")
+        if artifact["verifier_version"] != context.verifier_version:
+            raise RunLifecycleError("VERIFIER_VERSION_MISMATCH")
+        if artifact["applicable_as_of"] != context.applicable_as_of.isoformat():
+            raise RunLifecycleError("APPLICABLE_DATE_MISMATCH")
+        if (
+            artifact["algorithm_config_version"]
+            != context.algorithm_config_version
+            or artifact["algorithm_config_sha256"]
+            != context.algorithm_config_sha256
+        ):
+            raise RunLifecycleError("ALGORITHM_CONFIG_MISMATCH")
+        if (
+            artifact["qualification"]
+            != canonical_payload(context.qualification)
+        ):
+            raise RunLifecycleError("QUALIFICATION_ARTIFACT_MISMATCH")
+
     async def _require_formal_publish_binding(
         self,
         conn,
@@ -974,7 +1079,7 @@ class RunLifecycle:
         report: VerificationReport,
         result_version: UUID,
     ) -> FormalPublication:
-        report_payload = verification_summary(report)
+        report_payload = verification_report_payload(report)
         conn = await self._connect()
         try:
             async with conn.transaction():
@@ -1050,7 +1155,7 @@ class RunLifecycle:
                         "code": "VALIDATION_FAILED",
                         "message": "正式证据包未通过发布门禁",
                         "retryable": False,
-                        "verification_summary": report_payload,
+                        "verification_report": report_payload,
                     },
                     payload_version=2,
                 )
@@ -1458,7 +1563,7 @@ class RunLifecycle:
                            state_version, release_id, working_profile_version,
                            confirmed_profile_version, lease_owner, lease_epoch,
                            lease_expires_at, active_execution_remaining_ms,
-                           active_execution_started_at
+                           active_execution_started_at, created_at
                     FROM run
                     WHERE run_id = %s
                     FOR UPDATE
@@ -1517,7 +1622,7 @@ class RunLifecycle:
                               state_version, release_id, working_profile_version,
                               confirmed_profile_version, lease_owner, lease_epoch,
                               lease_expires_at, active_execution_remaining_ms,
-                              active_execution_started_at
+                              active_execution_started_at, created_at
                     """,
                     (
                         next_version,
@@ -2136,7 +2241,7 @@ class RunLifecycle:
                            state_version, release_id, working_profile_version,
                            confirmed_profile_version, lease_owner, lease_epoch,
                            lease_expires_at, active_execution_remaining_ms,
-                           active_execution_started_at
+                           active_execution_started_at, created_at
                     FROM run
                     WHERE run_id = %s
                     """,
@@ -2262,6 +2367,13 @@ class RunLifecycle:
                     ),
                 )
             )
+            await self._record_formal_gate_artifact(
+                conn,
+                row=row,
+                qualification=self._formal_qualification_summary(
+                    eligibility
+                ),
+            )
             eligibility_gate = self._validate_eligibility_result(
                 eligibility,
                 source_candidates=source_candidates,
@@ -2324,6 +2436,179 @@ class RunLifecycle:
             optimized=optimized,
         )
         return preview
+
+    async def _record_formal_gate_artifact(
+        self,
+        conn,
+        *,
+        row: dict[str, Any],
+        qualification: QualificationSummary,
+    ) -> None:
+        release = await (
+            await conn.execute(
+                """
+                SELECT manifest_sha256
+                FROM release
+                WHERE release_id = %s
+                """,
+                (row["release_id"],),
+            )
+        ).fetchone()
+        if release is None:
+            raise RunLifecycleError("RELEASE_UNAVAILABLE")
+        algorithm_config_sha256 = sha256_payload(
+            {
+                "release_id": row["release_id"],
+                "manifest_sha256": release["manifest_sha256"],
+            }
+        )
+        artifact = formal_gate_artifact(
+            release_id=row["release_id"],
+            profile_version=str(row["confirmed_profile_version"]),
+            verifier_version=self._formal_verifier_version,
+            applicable_as_of=row["created_at"].date(),
+            algorithm_config_version=row["release_id"],
+            algorithm_config_sha256=algorithm_config_sha256,
+            qualification=qualification,
+        )
+        artifact_sha256 = formal_gate_artifact_sha256(artifact)
+        inserted = await (
+            await conn.execute(
+                """
+                INSERT INTO run_formal_gate_artifact (
+                    run_id, release_id, confirmed_profile_version,
+                    verifier_version, applicable_as_of,
+                    algorithm_config_version, algorithm_config_sha256,
+                    artifact_sha256, artifact_json
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (run_id) DO NOTHING
+                RETURNING run_id
+                """,
+                (
+                    row["run_id"],
+                    row["release_id"],
+                    row["confirmed_profile_version"],
+                    artifact["verifier_version"],
+                    artifact["applicable_as_of"],
+                    artifact["algorithm_config_version"],
+                    artifact["algorithm_config_sha256"],
+                    artifact_sha256,
+                    Jsonb(artifact),
+                ),
+            )
+        ).fetchone()
+        if inserted is not None:
+            return
+        existing = await (
+            await conn.execute(
+                """
+                SELECT artifact_sha256
+                FROM run_formal_gate_artifact
+                WHERE run_id = %s
+                """,
+                (row["run_id"],),
+            )
+        ).fetchone()
+        if (
+            existing is None
+            or existing["artifact_sha256"] != artifact_sha256
+        ):
+            raise RunLifecycleError("FORMAL_GATE_ARTIFACT_CONFLICT")
+
+    @classmethod
+    def _formal_qualification_summary(cls, eligibility):
+        def status_name(enum_type, prefix, value):
+            return enum_type.Name(value).removeprefix(prefix)
+
+        coverage = tuple(
+            sorted(
+                (
+                    (
+                        declaration.rule_type,
+                        status_name(
+                            algo_pb2.RuleCoverageStatus,
+                            "RULE_COVERAGE_STATUS_",
+                            declaration.status,
+                        ),
+                    )
+                    for declaration in eligibility.coverage
+                ),
+                key=lambda item: item[0],
+            )
+        )
+        groups = []
+        for group in eligibility.groups:
+            majors = tuple(
+                sorted(
+                    (
+                        (
+                            major.major_code,
+                            status_name(
+                                algo_pb2.MajorEligibilityStatus,
+                                "MAJOR_ELIGIBILITY_STATUS_",
+                                major.status,
+                            ),
+                        )
+                        for major in group.majors
+                    ),
+                    key=lambda item: item[0],
+                )
+            )
+            restricted_codes = tuple(
+                code
+                for code, status in majors
+                if status in {"FAIL", "NOT_APPLICABLE"}
+            )
+            groups.append(
+                (
+                    group.group_key,
+                    status_name(
+                        algo_pb2.GroupEligibilityStatus,
+                        "GROUP_ELIGIBILITY_STATUS_",
+                        group.status,
+                    ),
+                    majors,
+                    tuple(
+                        f"受限专业：{code}"
+                        for code in restricted_codes
+                    ),
+                )
+            )
+        return QualificationSummary(
+            status=status_name(
+                algo_pb2.EligibilityResultStatus,
+                "ELIGIBILITY_RESULT_STATUS_",
+                eligibility.status,
+            ),
+            coverage=tuple(
+                QualificationCoverage(
+                    rule_type=rule_type,
+                    status=status,
+                )
+                for rule_type, status in coverage
+            ),
+            groups=tuple(
+                QualificationGroup(
+                    group_key=group_key,
+                    status=status,
+                    majors=tuple(
+                        QualificationMajor(
+                            major_code=code,
+                            status=major_status,
+                        )
+                        for code, major_status in majors
+                    ),
+                    restrictions=restrictions,
+                )
+                for group_key, status, majors, restrictions in sorted(
+                    groups,
+                    key=lambda item: item[0],
+                )
+            ),
+            conflict_count=eligibility.diagnostics.conflict_count,
+            unknown_count=eligibility.diagnostics.unknown_count,
+        )
 
     @staticmethod
     def _candidate_identity(candidate) -> tuple[str, str]:

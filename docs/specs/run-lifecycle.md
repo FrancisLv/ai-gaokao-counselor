@@ -13,7 +13,8 @@
 
 worker 的正式发布使用内部命令 `PublishFormalResult`。它不是新增客户端入口：
 调用方只提交绑定当前 run 的 `EvidencePackage`，`RunLifecycle` 通过唯一
-`VerifyPackage` seam 取得报告后决定发布或失败，不能自行声明报告已通过。
+`VerifyPackage` seam 取得报告后决定发布或失败，不能自行声明报告已通过。发布前还必须
+复核本 run 的不可变资格/配置 artifact；调用方提交的资格摘要不能作为通过依据。
 
 ```text
 SubmitRun(command)  -> RunReceipt
@@ -296,6 +297,7 @@ expires_at
 | `command_receipt` | 写命令幂等回执 |
 | `run_event` | 持久事件与单调 `event_seq` |
 | `profile_revision` | 不可变画像版本 |
+| `run_formal_gate_artifact` | EvaluateEligibility 结果、可信 release 配置、Verifier 版本与适用日期快照，insert-only |
 | `result_version` | 已通过门禁的不可变结果引用 |
 | `run_evidence_package` | `V1_FORMAL` 已剥离证据包正文与输入/发布摘要，insert-only |
 | `run_verification_report` | `V1_FORMAL` 完整 `VerificationReport` 与摘要，insert-only |
@@ -307,8 +309,14 @@ expires_at
 - 创建 interrupt 前，LangGraph checkpoint 必须已经持久化；若跨存储不能共事务，必须有幂等物化和恢复对账。
 - Resume receipt、interrupt 消费和 QUEUED 状态必须原子提交。
 - 结果发布必须同时校验 lease epoch、state_version、confirmed profile 和 release 有效性。
+- 正式发布必须从 `run_formal_gate_artifact` 复核资格摘要、release manifest 配置、
+  Verifier 版本和 `applicable_as_of`；缺失、摘要不一致或 artifact hash 冲突均 fail closed。
+- `applicable_as_of` 固定取持久化 `run.created_at` 的日期，不取 worker 当前时钟；
+  同一 run 在不同日期重建 artifact 时摘要必须稳定。
 - `V1_FORMAL` 必须在同一事务写入结果、证据包、验证报告、`run.state=SUCCEEDED`、
   `result_version`、ACTIVE 状态和 RESULT 事件；数据库触发器拒绝重写正文。
+- GET、Watch 与 RESULT 事件必须返回同一完整 `verification_report`，并原样返回
+  `disclaimer / risk_notice / no_admission_guarantee`。
 - 同一 `result_version` 只能映射一份规范化输入摘要；重试重放原结果与事件，摘要冲突
   返回 `RESULT_VERSION_CONFLICT`。发布与取消竞争只有一个终态提交成功。
 - Redis 仅作通知或可重建投影，不是权威状态。
@@ -328,6 +336,11 @@ expires_at
 | `RELEASE_REVOKED` | 绑定 release 已撤销 |
 | `RELEASE_UNAVAILABLE` | Submit 时没有可绑定的有效 release |
 | `RELEASE_MISMATCH` | 正式证据包与 run 绑定的 release 不一致 |
+| `FORMAL_GATE_ARTIFACT_MISSING` | 本 run 缺少权威资格/配置 artifact |
+| `FORMAL_GATE_ARTIFACT_MISMATCH` | 权威 artifact hash 不一致 |
+| `FORMAL_GATE_ARTIFACT_CONFLICT` | 同一 run 试图写入不同 artifact |
+| `QUALIFICATION_ARTIFACT_MISMATCH` | 调用方资格摘要与权威资格产物不一致 |
+| `APPLICABLE_DATE_MISMATCH` | package 与权威 artifact 的适用日期不一致 |
 | `PROFILE_VERSION_MISMATCH` | 正式证据包与 run 的确认 Profile 不一致 |
 | `RESULT_VERSION_CONFLICT` | `result_version` 已绑定不同输入摘要或其他 run |
 | `PROFILE_NOT_CONFIRMED` | 数据依赖节点尝试读取未确认画像 |

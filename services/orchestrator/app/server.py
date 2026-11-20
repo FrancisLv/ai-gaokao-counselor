@@ -535,14 +535,23 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             "verification_report_sha256": (
                 formal_result.verification_report_sha256
             ),
-            "verification_summary": formal_result.verification_summary,
+            "verification_report": formal_result.verification_report,
+            "risk_notice": formal_result.risk_notice,
+            "disclaimer": formal_result.disclaimer,
+            "no_admission_guarantee": (
+                formal_result.no_admission_guarantee
+            ),
             "result_state": formal_result.result_state,
             "stale_reason": formal_result.stale_reason,
         }
 
     @staticmethod
     def _formal_result_message(payload: dict):
-        summary = payload.get("verification_summary") or {}
+        report = (
+            payload.get("verification_report")
+            or payload.get("verification_summary")
+            or {}
+        )
         message = orchestrator_pb2.FormalResultSummary()
         json_format.ParseDict(
             {
@@ -561,13 +570,19 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
                     "verification_report_sha256",
                     "",
                 ),
-                "verificationStatus": summary.get("status", ""),
-                "claims": summary.get("claims", []),
-                "blockingReasons": summary.get("blocking_reasons", []),
-                "strippedClaimIds": summary.get("stripped_claim_ids", []),
-                "citationCoverage": summary.get("citation_coverage", 0.0),
+                "verificationStatus": report.get("status", ""),
+                "claims": report.get("claims", []),
+                "blockingReasons": report.get("blocking_reasons", []),
+                "strippedClaimIds": report.get("stripped_claim_ids", []),
+                "citationCoverage": report.get("citation_coverage", 0.0),
                 "resultState": payload.get("result_state", "ACTIVE"),
                 "staleReason": payload.get("stale_reason") or "",
+                "disclaimer": payload.get("disclaimer", ""),
+                "riskNotice": payload.get("risk_notice", ""),
+                "noAdmissionGuarantee": payload.get(
+                    "no_admission_guarantee",
+                    "",
+                ),
             },
             message,
         )
