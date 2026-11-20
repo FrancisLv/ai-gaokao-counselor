@@ -179,8 +179,15 @@ type providerResult struct {
 	FinishReason      string         `json:"finish_reason"`
 }
 
-// Chat is the sole public behavior seam for one governed logical model call.
 func (s *Service) Chat(ctx context.Context, req *llmgwv1.ChatRequest) (*llmgwv1.ChatResponse, error) {
+	return s.executeGovernedCall(ctx, req, nil)
+}
+
+func (s *Service) executeGovernedCall(
+	ctx context.Context,
+	req *llmgwv1.ChatRequest,
+	observer callObserver,
+) (*llmgwv1.ChatResponse, error) {
 	principalID, err := requirePrincipal(ctx)
 	if err != nil {
 		return nil, err
@@ -243,9 +250,16 @@ func (s *Service) Chat(ctx context.Context, req *llmgwv1.ChatRequest) (*llmgwv1.
 			return nil, err
 		}
 		if cached != nil {
-			return s.recordResultCacheHit(
+			response, err := s.recordResultCacheHit(
 				ctx, governed, route, prompt, requestHash, identity.keyHash, cached,
 			)
+			if err != nil {
+				return nil, err
+			}
+			if err := observeResult(ctx, observer, response); err != nil {
+				return nil, err
+			}
+			return response, nil
 		}
 	}
 
@@ -262,21 +276,38 @@ func (s *Service) Chat(ctx context.Context, req *llmgwv1.ChatRequest) (*llmgwv1.
 		if cacheClaim != nil {
 			s.failResultCache(cacheClaim)
 		}
+		if replayed != nil {
+			if err := observeResult(ctx, observer, replayed); err != nil {
+				return nil, err
+			}
+		}
 		return replayed, nil
 	}
 	prepared.cacheKeyHash = cacheKeyHash
 	if cacheClaim != nil {
 		prepared.cacheClaimToken = cacheClaim.token
 	}
+	if err := observeReservation(ctx, observer, prepared); err != nil {
+		return nil, err
+	}
 
-	response, err := s.executeProviderAttempts(ctx, prepared)
+	response, err := s.executeProviderAttempts(ctx, prepared, observer)
 	if err != nil && cacheClaim != nil {
 		s.failResultCache(cacheClaim)
+	}
+	if err == nil {
+		if observeErr := observeResult(ctx, observer, response); observeErr != nil {
+			return nil, observeErr
+		}
 	}
 	return response, err
 }
 
-func (s *Service) executeProviderAttempts(ctx context.Context, prepared *preparedCall) (*llmgwv1.ChatResponse, error) {
+func (s *Service) executeProviderAttempts(
+	ctx context.Context,
+	prepared *preparedCall,
+	observer callObserver,
+) (*llmgwv1.ChatResponse, error) {
 	candidateCount := len(prepared.route.models)
 	if int64(candidateCount) > int64(effectiveAttemptLimit(prepared.route)) {
 		candidateCount = int(effectiveAttemptLimit(prepared.route))
@@ -292,6 +323,12 @@ func (s *Service) executeProviderAttempts(ctx context.Context, prepared *prepare
 		providerResponse, providerErr := s.provider.Chat(providerCtx, prepared.providerRequest)
 		cancel()
 		if providerErr != nil {
+			if observer != nil && ctx.Err() != nil &&
+				errors.Is(providerErr, context.Canceled) {
+				return nil, s.markProviderUnknownWithReason(
+					ctx, prepared, providerErr, ReasonStreamInterrupted,
+				)
+			}
 			var failure *ProviderFailure
 			if errors.As(providerErr, &failure) {
 				if failure.Retryable && candidateIndex+1 < candidateCount {
@@ -368,9 +405,19 @@ func (s *Service) executeProviderAttempts(ctx context.Context, prepared *prepare
 	return nil, newStableError(codes.Internal, 500, "INTERNAL", "route 未配置可用模型")
 }
 
-// StreamChat remains wire-compatible but is intentionally not implemented in M5a-01.
-func (s *Service) StreamChat(*llmgwv1.ChatRequest, llmgwv1.LLMGateway_StreamChatServer) error {
-	return newStableError(codes.Unimplemented, 501, "STREAM_NOT_IMPLEMENTED", "流式治理将在后续增量实现")
+func (s *Service) StreamChat(
+	req *llmgwv1.ChatRequest,
+	server llmgwv1.LLMGateway_StreamChatServer,
+) error {
+	observer := &grpcStreamObserver{server: server}
+	_, err := s.executeGovernedCall(server.Context(), req, observer)
+	if err == nil {
+		return nil
+	}
+	// The event is best-effort. A disconnected client cannot receive it, but the
+	// authoritative unknown-charge state was already persisted by the engine.
+	_ = observer.OnError(server.Context(), err)
+	return err
 }
 
 func normalizeRequest(principalID string, req *llmgwv1.ChatRequest) (governedRequest, error) {
@@ -1503,13 +1550,24 @@ func (s *Service) markProviderUnknown(ctx context.Context, prepared *preparedCal
 	if errors.Is(cause, context.DeadlineExceeded) {
 		errorCode = ReasonProviderTimeout
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	return s.markProviderUnknownWithReason(ctx, prepared, cause, errorCode)
+}
+
+func (s *Service) markProviderUnknownWithReason(
+	ctx context.Context,
+	prepared *preparedCall,
+	_ error,
+	errorCode string,
+) error {
+	persistenceCtx, cancel := persistenceContext(ctx)
+	defer cancel()
+	tx, err := s.pool.BeginTx(persistenceCtx, pgx.TxOptions{})
 	if err != nil {
 		return newStableError(codes.Internal, 500, "INTERNAL", "记录待对账状态失败")
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(persistenceCtx)
 	finishedAt := s.now()
-	tag, err := tx.Exec(ctx, `
+	tag, err := tx.Exec(persistenceCtx, `
 		UPDATE llm_provider_attempt
 		SET status = 'PENDING_RECONCILIATION',
 		    error_code = $1,
@@ -1523,7 +1581,7 @@ func (s *Service) markProviderUnknown(ctx context.Context, prepared *preparedCal
 	if tag.RowsAffected() != 1 {
 		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "attempt 状态不允许进入待对账")
 	}
-	tag, err = tx.Exec(ctx, `
+	tag, err = tx.Exec(persistenceCtx, `
 		UPDATE llm_logical_call
 		SET status = 'PARTIAL_UNKNOWN',
 		    error_reason = $1,
@@ -1537,17 +1595,26 @@ func (s *Service) markProviderUnknown(ctx context.Context, prepared *preparedCal
 	if tag.RowsAffected() != 1 {
 		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用状态不允许进入待对账")
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := tx.Commit(persistenceCtx); err != nil {
 		return newStableError(codes.Internal, 500, "INTERNAL", "提交待对账状态失败")
 	}
 	message := "供应商请求可能已计费，预算预留保持待对账"
 	if errorCode == ReasonProviderTimeout {
 		message = "供应商请求超时且费用未知，预算预留保持待对账"
+	} else if errorCode == ReasonStreamInterrupted {
+		message = "客户端断流且供应商费用未知，预算预留保持待对账"
 	}
 	return newStableErrorWithMetadata(
 		codes.Unavailable, 503, errorCode, message,
 		reconciliationMetadata(prepared.logicalCallID, prepared.attemptID, prepared.ledgerEntryID),
 	)
+}
+
+func persistenceContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx.Err() == nil {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(context.Background(), 5*time.Second)
 }
 
 func (s *Service) resolveExistingCall(

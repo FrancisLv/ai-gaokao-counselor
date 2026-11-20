@@ -34,6 +34,7 @@ const (
 	ReasonProviderAuthFailed      = "PROVIDER_AUTH_FAILED"
 	ReasonSchemaUnsupported       = "PROVIDER_SCHEMA_UNSUPPORTED"
 	ReasonProviderTimeout         = "PROVIDER_TIMEOUT"
+	ReasonStreamInterrupted       = "STREAM_INTERRUPTED"
 	ReasonReconciliation          = "RECONCILIATION_REQUIRED"
 )
 
