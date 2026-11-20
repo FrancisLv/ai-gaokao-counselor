@@ -2682,13 +2682,18 @@ case runner、最终 Claims 指标与不可变 EvalRun；不实现 #44 的质量
 
 ### 行为与实现
 
-- 新增不可变联合草稿 `evaluation-hunan-2025-v0.1.0-draft`：复用 v0.4 的 31 条
-  检索 case，新增 10 条端到端报告 case。manifest 同时固定 qa/cases 文件 hash、
-  两类 count、组合 dataset hash、owner 状态和必需场景集合。
+- 新增不可变 `evaluation-hunan-2025-v0.2.0-draft`：复用 v0.4 的 31 条检索
+  case 和 10 条端到端报告 case，并为每条 case 增加显式 driver；未合并分支中
+  缺少 driver 的中间草稿删除，避免留下不可装载版本。
+- manifest 同时固定 qa/cases 文件 hash、两类 count、合并 `case_count`、
+  组合 dataset hash、owner 状态和必需场景集合；缺少 `case_count` 即拒绝。
 - 联合 loader 只接受 `qa.jsonl + cases.jsonl + manifest.json` 结构，拒绝文件
   hash/dataset hash/count/immutable/owner 或必备场景被篡改。任一 Case 变化必须
   创建新版本和新 hash。
-- 端到端 executor 从 `SubmitRun → ResumeRun → GetRun` 驱动 case；读取最终
+- 端到端 executor 从 `SubmitRun → ResumeRun → GetRun` 驱动全部 10 条 case；
+  driver 明确声明正常、缺字段、资格拒绝、条件 UNKNOWN、无候选、事实篡改、
+  改分、预算耗尽、worker 恢复和发布/取消竞争动作。条件字段进入最终确认
+  Profile，预算失败、租约恢复和取消竞争均有独立 setup。读取最终
   `V1_FORMAL` 报告、候选专业组身份和 verification report，不直接调用报告节点、
   VerifyPackage 或 PublishFormalResult。
 - ClaimVerification 的序列化增加 `claim_type`，使评测能区分三类事实而不从
@@ -2706,8 +2711,8 @@ case runner、最终 Claims 指标与不可变 EvalRun；不实现 #44 的质量
 
 - 离线 loader/指标/EvalRun 测试覆盖正常装载、双文件或 manifest 篡改、count 与
   immutable 拒绝、最终 Claim 分母、pending signoff 阻断和 EvalRun 重放身份。
-- 真实 PostgreSQL 主 seam 测试使用 scripted LLM 替身执行 `e2e-001`，从
-  SubmitRun → ResumeRun → GetRun 取得正式报告并通过联合评测。
+- 真实 PostgreSQL 主 seam 测试使用 scripted LLM 替身逐条执行 10 条 case，
+  从 SubmitRun → ResumeRun → GetRun 取得对应终态，再统一计算联合评测指标。
 - `make py-check py-test` 通过；真实 PG 主 seam case executor 测试通过。
 
 ### 边界与风险

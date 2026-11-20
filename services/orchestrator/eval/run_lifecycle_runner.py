@@ -12,6 +12,7 @@ from app.run_lifecycle import (
     RejectOrEditProfileAnswer,
     ResumeRunCommand,
     RunLifecycle,
+    RunLifecycleError,
     StructuredProfileInput,
     SubmitRunCommand,
 )
@@ -37,6 +38,11 @@ class ScriptedReportNarrativeWriter:
     scripted_model_responses: dict
 
     async def compose(self, request) -> ReportNarrative:
+        run_lifecycle_reason = self.scripted_model_responses.get(
+            "run_lifecycle_reason"
+        )
+        if run_lifecycle_reason is not None:
+            raise RunLifecycleError(str(run_lifecycle_reason))
         if self.scripted_model_responses.get("violation"):
             raise ReportNarrativeViolation(
                 str(self.scripted_model_responses["violation"])
@@ -80,6 +86,7 @@ class RunLifecycleCaseExecutor:
 
     async def execute(self, case: dict) -> EndToEndCaseOutcome:
         case_id = case["case_id"]
+        driver = case["driver"]
         principal_id = f"eval:{case_id}"
         submitted = await self.lifecycle.SubmitRun(
             SubmitRunCommand(
@@ -119,8 +126,7 @@ class RunLifecycleCaseExecutor:
                 await asyncio.sleep(self.poll_interval)
                 continue
             if (
-                case["expected"]["terminal_status"] == "WAITING_HITL"
-                and "missing_global_required_field" in case["tags"]
+                driver["resume_action"] == "wait_for_interrupt"
             ):
                 return self._outcome(
                     case,
@@ -129,11 +135,14 @@ class RunLifecycleCaseExecutor:
                 )
 
             if (
-                "profile_score_edit" in case["tags"]
+                driver["resume_action"] == "edit_score_then_confirm"
                 and not edited
             ):
                 answer = RejectOrEditProfileAnswer(
-                    patch=self._edited_profile_patch(view)
+                    patch=self._edited_profile_patch(
+                        view,
+                        delta=driver.get("score_delta", 10),
+                    )
                 )
                 edited = True
             else:
@@ -168,60 +177,29 @@ class RunLifecycleCaseExecutor:
         principal_id: str,
         view,
     ) -> EndToEndCaseOutcome:
-        formal = view.formal_result
-        result_kind = view.result.result_kind if view.result else None
-        result_version = (
-            str(view.result.result_version) if view.result else None
-        )
-        report = formal.report if formal is not None else None
-        claims = ()
-        report_text = view.terminal_reason or ""
-        candidate_keys = ()
-        if formal is not None:
-            claims = tuple(
-                EndToEndClaim(
-                    claim_id=claim["claim_id"],
-                    claim_type=claim["claim_type"],
-                    criticality=claim["criticality"],
-                    status=claim["status"],
-                    checked_against=tuple(claim["checked_against"]),
-                )
-                for claim in formal.verification_report.get("claims", ())
-            )
-            report_text = json.dumps(report, ensure_ascii=False, sort_keys=True)
-            candidate_keys = tuple(
-                section["section_key"].split(":", 1)[1]
-                for section in report.get("sections", ())
-                if section.get("section_key", "").startswith("candidate:")
-            )
-        provider_cost = 0
-        if self.provider_cost_reader is not None:
-            provider_cost = self.provider_cost_reader(
-                principal_id,
-                str(view.session_id),
-            )
-        return EndToEndCaseOutcome(
+        return build_case_outcome(
             case_id=case["case_id"],
-            terminal_status=view.state,
-            result_kind=result_kind,
-            result_version=result_version,
-            run_id=str(view.run_id),
-            provider_cost_micro_usd=provider_cost,
-            report_text=report_text,
-            candidate_keys=candidate_keys,
-            claims=claims,
+            principal_id=principal_id,
+            view=view,
+            provider_cost_reader=self.provider_cost_reader,
         )
 
     @staticmethod
-    def _edited_profile_patch(view) -> dict:
+    def _edited_profile_patch(view, *, delta: int = 10) -> dict:
         fields = view.current_interrupt.payload["fields"]
         score = fields["score"]
         current = score.get("value")
         if isinstance(current, int):
-            revised = current + 10
+            revised = current + delta
         else:
             revised = 600
-        return {"score": {**score, "state": "KNOWN", "source": "USER", "value": revised}}
+        return {
+            "score": {
+                "state": "PROVIDED",
+                "source": "USER_FORM",
+                "value": revised,
+            }
+        }
 
 
 def _profile_input(payload: dict) -> StructuredProfileInput:
@@ -232,6 +210,7 @@ def _profile_input(payload: dict) -> StructuredProfileInput:
         batch=payload.get("batch"),
         score=payload.get("score"),
         subjects=tuple(payload.get("subjects") or ()),
+        conditional_fields=payload.get("conditional_fields"),
     )
 
 
@@ -242,3 +221,53 @@ def _profile_version(view):
     if value is None and view.confirmed_profile_version is not None:
         value = view.confirmed_profile_version
     return UUID(str(value))
+
+
+def build_case_outcome(
+    *,
+    case_id: str,
+    principal_id: str,
+    view,
+    provider_cost_reader: ProviderCostReader | None = None,
+) -> EndToEndCaseOutcome:
+    formal = view.formal_result
+    result_kind = view.result.result_kind if view.result else None
+    result_version = str(view.result.result_version) if view.result else None
+    report = formal.report if formal is not None else None
+    claims = ()
+    report_text = view.terminal_reason or ""
+    candidate_keys = ()
+    if formal is not None:
+        claims = tuple(
+            EndToEndClaim(
+                claim_id=claim["claim_id"],
+                claim_type=claim["claim_type"],
+                criticality=claim["criticality"],
+                status=claim["status"],
+                checked_against=tuple(claim["checked_against"]),
+            )
+            for claim in formal.verification_report.get("claims", ())
+        )
+        report_text = json.dumps(report, ensure_ascii=False, sort_keys=True)
+        candidate_keys = tuple(
+            section["section_key"].split(":", 1)[1]
+            for section in report.get("sections", ())
+            if section.get("section_key", "").startswith("candidate:")
+        )
+    provider_cost = 0
+    if provider_cost_reader is not None:
+        provider_cost = provider_cost_reader(
+            principal_id,
+            str(view.session_id),
+        )
+    return EndToEndCaseOutcome(
+        case_id=case_id,
+        terminal_status=view.state,
+        result_kind=result_kind,
+        result_version=result_version,
+        run_id=str(view.run_id),
+        provider_cost_micro_usd=provider_cost,
+        report_text=report_text,
+        candidate_keys=candidate_keys,
+        claims=claims,
+    )

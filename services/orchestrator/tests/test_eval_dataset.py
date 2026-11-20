@@ -9,7 +9,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[3]
-DATASET = ROOT / "data" / "golden" / "evaluation-hunan-2025-v0.1.0-draft"
+DATASET = ROOT / "data" / "golden" / "evaluation-hunan-2025-v0.2.0-draft"
 
 
 class JointEvalDatasetTests(unittest.TestCase):
@@ -20,7 +20,7 @@ class JointEvalDatasetTests(unittest.TestCase):
 
         self.assertEqual(
             dataset.manifest["dataset_version"],
-            "evaluation-hunan-2025-v0.1.0-draft",
+            "evaluation-hunan-2025-v0.2.0-draft",
         )
         self.assertGreaterEqual(len(dataset.retrieval_cases), 30)
         self.assertEqual(len(dataset.e2e_cases), 10)
@@ -97,6 +97,58 @@ class JointEvalDatasetTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "case_count"):
                 load_eval_dataset(copied)
+
+    def test_case_count_is_a_required_manifest_field(self):
+        from eval.eval_dataset import load_eval_dataset
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            copied = Path(temp_dir) / DATASET.name
+            shutil.copytree(DATASET, copied)
+            manifest_path = copied / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest.pop("case_count")
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "case_count",
+            ):
+                load_eval_dataset(copied)
+
+    def test_each_end_to_end_case_declares_its_execution_driver(self):
+        from eval.eval_dataset import load_eval_dataset
+
+        dataset = load_eval_dataset(DATASET)
+
+        for case in dataset.e2e_cases:
+            with self.subTest(case_id=case["case_id"]):
+                self.assertIn("driver", case)
+                self.assertIn(
+                    case["driver"]["resume_action"],
+                    {
+                        "confirm",
+                        "wait_for_interrupt",
+                        "edit_score_then_confirm",
+                    },
+                )
+                self.assertIn(
+                    case["driver"]["scenario"],
+                    {
+                        "normal",
+                        "missing_required_field",
+                        "eligibility_rejected",
+                        "conditional_unknown",
+                        "no_reliable_data",
+                        "fact_tamper",
+                        "profile_score_edit",
+                        "budget_exhausted",
+                        "worker_recovery",
+                        "cancel_publish_race",
+                    },
+                )
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ _REQUIRED_MANIFEST_FIELDS = (
     "e2e_cases_file",
     "e2e_cases_sha256",
     "e2e_case_count",
+    "case_count",
     "created_at",
     "release_id",
     "owner",
@@ -41,9 +42,31 @@ _REQUIRED_E2E_FIELDS = (
     "case_id",
     "input_profile",
     "scripted_model_responses",
+    "driver",
     "expected",
     "tags",
     "criticality",
+)
+_E2E_SCENARIOS = frozenset(
+    {
+        "normal",
+        "missing_required_field",
+        "eligibility_rejected",
+        "conditional_unknown",
+        "no_reliable_data",
+        "fact_tamper",
+        "profile_score_edit",
+        "budget_exhausted",
+        "worker_recovery",
+        "cancel_publish_race",
+    }
+)
+_E2E_RESUME_ACTIONS = frozenset(
+    {
+        "confirm",
+        "wait_for_interrupt",
+        "edit_score_then_confirm",
+    }
 )
 _REQUIRED_EXPECTED_FIELDS = (
     "result_kind",
@@ -101,7 +124,7 @@ def load_eval_dataset(dataset_dir: str | Path) -> JointEvalDataset:
         raise ValueError(
             "e2e_case_count does not match the end-to-end cases file"
         )
-    if "case_count" in manifest and manifest["case_count"] != (
+    if manifest["case_count"] != (
         len(retrieval_cases) + len(e2e_cases)
     ):
         raise ValueError("manifest.case_count does not match component counts")
@@ -195,7 +218,11 @@ def _validate_manifest(
         "e2e_cases_sha256",
     ):
         _validate_sha256(manifest[field], field)
-    for field in ("retrieval_case_count", "e2e_case_count"):
+    for field in (
+        "retrieval_case_count",
+        "e2e_case_count",
+        "case_count",
+    ):
         value = manifest[field]
         if (
             isinstance(value, bool)
@@ -256,6 +283,22 @@ def _validate_e2e_case(case: dict, manifest: dict) -> None:
         raise ValueError(
             f"{case_id}: scripted_model_responses must be an object"
         )
+    driver = case["driver"]
+    if not isinstance(driver, dict):
+        raise ValueError(f"{case_id}: driver must be an object")
+    if driver.get("scenario") not in _E2E_SCENARIOS:
+        raise ValueError(f"{case_id}: driver.scenario is unsupported")
+    if driver.get("resume_action") not in _E2E_RESUME_ACTIONS:
+        raise ValueError(f"{case_id}: driver.resume_action is unsupported")
+    if (
+        "score_delta" in driver
+        and (
+            isinstance(driver["score_delta"], bool)
+            or not isinstance(driver["score_delta"], int)
+            or driver["score_delta"] == 0
+        )
+    ):
+        raise ValueError(f"{case_id}: driver.score_delta is invalid")
     expected = case["expected"]
     if not isinstance(expected, dict):
         raise ValueError(f"{case_id}: expected must be an object")
@@ -290,6 +333,16 @@ def _validate_e2e_case(case: dict, manifest: dict) -> None:
         if not expected["required_claim_types"]:
             raise ValueError(
                 f"{case_id}: successful cases require factual Claim types"
+            )
+    elif expected["terminal_status"] == "CANCELLED_OR_SUCCEEDED":
+        result_kinds = expected["result_kind"]
+        if (
+            not isinstance(result_kinds, list)
+            or set(result_kinds) != {None, "V1_FORMAL"}
+        ):
+            raise ValueError(
+                f"{case_id}: cancellation race must allow "
+                "CANCELLED and V1_FORMAL"
             )
     elif expected["result_kind"] is not None:
         raise ValueError(

@@ -13,7 +13,7 @@ retrieval-hunan-2025-v0.4.0-draft/
 当前联合检索 + 端到端草稿：
 
 ```text
-evaluation-hunan-2025-v0.1.0-draft/
+evaluation-hunan-2025-v0.2.0-draft/
   qa.jsonl
   cases.jsonl
   manifest.json
@@ -28,7 +28,7 @@ evaluation-hunan-2025-v0.1.0-draft/
 - `manifest.json`：记录 `dataset_version`、dataset/Case 文件 SHA256、case count、release、标注人、owner 状态和创建时间
 
 只有包含端到端评测的版本才额外要求 `cases.jsonl`，至少包含
-`case_id / input_profile / scripted_model_responses / expected / tags / criticality`。
+`case_id / input_profile / scripted_model_responses / driver / expected / tags / criticality`。
 
 当前检索草稿的 `owner_status` 为 `PENDING_SIGNOFF`。在 Francis 完成定标前，只能用于
 harness 冒烟、diff 和待审阅基线，不能宣称正式检索质量门禁。全国/省级长期政策用例
@@ -43,13 +43,19 @@ v0.4 绑定真实 2025 release，并把 6 条暂不可评测的 case 用 `evalua
 判断。非 ACTIVE case 不调用 `RetrievePolicy`，不进入 recall/MRR/precision 分母，
 但会在 baseline 的 `skipped_case_count` 和 `skipped_case_reasons` 中逐类报告。
 
-联合草稿 `evaluation-hunan-2025-v0.1.0-draft` 复用 v0.4 的 31 条检索 case，
-并新增首批 10 条端到端报告 case。端到端 case 覆盖正常冲稳保、缺全局字段、
+联合草稿 `evaluation-hunan-2025-v0.2.0-draft` 复用 v0.4 的 31 条检索 case，
+并新增首批 10 条端到端报告 case。v0.2 为显式 driver、条件字段和取消竞争终局
+的不可变版本。端到端 case 覆盖正常冲稳保、缺全局字段、
 选科拒绝、条件 UNKNOWN、无可靠数据、事实篡改、画像改分、预算耗尽、worker
 恢复和取消/发布竞争。
 
+每条端到端 case 的 `driver` 必须声明 `scenario` 与 `resume_action`；画像改分等
+动作由 case 数据给出，不由 tag 隐式决定。loader 要求 manifest `case_count`，
+并校验总数为检索与端到端 count 之和。
+
 联合 loader 同时校验 `retrieval_cases_sha256`、`e2e_cases_sha256`、
-`dataset_sha256`、两类 case count、`immutable=true` 和必备场景标签。当前
+`dataset_sha256`、两类 case count、合并 `case_count`、`immutable=true`
+和必备场景标签。当前
 `owner_status` 仍为 `PENDING_SIGNOFF`，只能生成诊断与待审阅 EvalRun；
 `release_gate_status` 保持 `BLOCKED_PENDING_SIGNOFF`。
 

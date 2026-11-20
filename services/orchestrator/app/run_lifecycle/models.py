@@ -189,6 +189,7 @@ class StructuredProfileInput:
     batch: str | None = None
     score: int | None = None
     subjects: tuple[str, ...] = ()
+    conditional_fields: dict[str, dict[str, Any]] | None = None
     rank: int | None = None
     school_ids: tuple[str, ...] = ()
     document_types: tuple[str, ...] = ()

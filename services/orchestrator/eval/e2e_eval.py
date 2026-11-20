@@ -370,10 +370,13 @@ def _first_difference(
             "expected": terminal_status,
             "actual": outcome.terminal_status,
         }
-    if outcome.result_kind != expected["result_kind"]:
+    expected_result_kinds = expected["result_kind"]
+    if not isinstance(expected_result_kinds, list):
+        expected_result_kinds = [expected_result_kinds]
+    if outcome.result_kind not in expected_result_kinds:
         return {
             "field": "result_kind",
-            "expected": expected["result_kind"],
+            "expected": expected_result_kinds,
             "actual": outcome.result_kind,
         }
     excluded = sorted(
