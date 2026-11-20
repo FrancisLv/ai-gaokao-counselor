@@ -2070,3 +2070,54 @@ fake provider、按实际 usage 结算和权威调用账本；不实现后续票
   幂等对账并决定超限费用的最终入账方式。
 - route 当前仍按最坏 `max_attempts` 预占但只执行首个 attempt；fallback 与可重试
   故障分类属于 #34。
+
+## 62. M5a-03 logical call 幂等、attempt 与主备切换
+
+**日期与范围**：2026-11-20，issue #34。按 TDD 从生成的
+`LLMGatewayClient.Chat` 补齐 logical call 幂等竞争、独立 provider attempt、
+可重试故障主备切换与逐 attempt 成本归属；不实现 #35 的未知计费对账或后续
+prompt/schema、敏感分类、缓存与流式能力。
+
+### 契约与实现
+
+- `ProviderFailure` 把供应商故障收窄为“adapter 已确认未受理且未计费”的类型化
+  结果。`Retryable=true` 才允许使用 route 的下一个模型；参数错误、认证失败和
+  schema 不支持返回不可重试稳定原因。未分类连接异常、超时与断流继续走
+  `PENDING_RECONCILIATION / PARTIAL_UNKNOWN`，不猜测为免费。
+- 每个 route 模型最多对应一次真实供应商请求；provider adapter 契约要求关闭 SDK
+  内部自动重试。`migrations/31_llm_attempt_limit.sql` 将 route
+  `max_attempts` 和 attempt 序号同时限制在 1–2，避免配置或 SDK 重试绕过上限。
+- 首次 attempt 与预算预占仍在同一事务提交。可重试失败先把当前 attempt 推进为
+  `FAILED_NO_CHARGE`，再为下一模型创建新的 `attempt_id` 和独立起止时间；备用
+  模型成功后只推进一个 logical call，按实际模型价格汇总 usage/cost、释放总预留
+  差额，并把两个 attempt 按顺序返回。
+- 两次 attempt 都明确未计费时，logical call 进入 `FAILED` 并释放全部预留；
+  不可重试故障只记录首个失败 attempt、不调用备用模型。成功请求的幂等重放从权威
+  attempt 表重建完整 attempt 摘要、最终实际模型和账本身份，不新增 provider 调用。
+- request hash 测试覆盖 messages、prompt/schema 版本、raw schema、数据分类、
+  temperature、token/timeout、release 与 route 模型顺序；同 hash 完成态重放，
+  异 hash 返回 `IDEMPOTENCY_CONFLICT`。真实 PostgreSQL 唯一约束负责同 ID 并发
+  仲裁，输家返回 `CALL_IN_PROGRESS`。
+- 复核实测补上终态失败重放：`FAILED / BUDGET_OVERRUN` 返回持久稳定原因，
+  `PARTIAL_UNKNOWN` 返回待对账原因，只有 `RESERVED / IN_PROGRESS` 返回
+  `CALL_IN_PROGRESS`；终态重放不会新增 provider attempt。
+
+### 验证
+
+- 主 seam 测试继续使用真实 PostgreSQL 临时 schema、Kratos gRPC + bufconn、生成的
+  `LLMGatewayClient` 与确定性 fake provider。
+- 覆盖主模型 429 后备用成功、两个 attempt 的不同 ID/模型/起止时间/provider
+  request id/usage/cost/error、两次 attempt 耗尽、不可重试参数/认证/schema
+  故障不降级、同 ID 在途并发只产生一次 provider 调用、完成态重放、request hash
+  维度、预算完整释放及 `00/07→31` / `28→29→30→31` 迁移。
+- `LLMGW_TEST_DSN=postgresql://.../ai_gaokao_ticket2_test \
+  go test -tags integration ./internal/llmgw/... -count=1` 通过。
+
+### 边界与风险
+
+- 生产入口仍只有 fail-closed provider；typed failure 的“确认未计费”责任在真实
+  adapter，未接线前不能视为供应商账单真相。
+- 未知计费、重复对账、预算超限最终入账仍由 #35 处理；本票只保证未知异常不进入
+  自动重试，并保留既有 logical/attempt/预留身份。
+- 核心硬限制为两次 attempt；若未来需要同模型网络重试或多级 fallback，必须发布
+  新契约与迁移，不能扩大现有 `max_attempts` 语义。

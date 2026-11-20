@@ -25,6 +25,10 @@ const (
 	ReasonIdempotencyConflict = "IDEMPOTENCY_CONFLICT"
 	ReasonCallInProgress      = "CALL_IN_PROGRESS"
 	ReasonProviderUnavailable = "PROVIDER_UNAVAILABLE"
+	ReasonProviderRateLimited = "PROVIDER_RATE_LIMITED"
+	ReasonProviderBadRequest  = "PROVIDER_BAD_REQUEST"
+	ReasonProviderAuthFailed  = "PROVIDER_AUTH_FAILED"
+	ReasonSchemaUnsupported   = "PROVIDER_SCHEMA_UNSUPPORTED"
 	ReasonReconciliation      = "RECONCILIATION_REQUIRED"
 )
 
