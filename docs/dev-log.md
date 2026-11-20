@@ -1964,3 +1964,61 @@ LLM 规则生成。
   `test_run_lifecycle_algorithm_preview.py` 6 tests OK，1 个外部 algo 用例按既有
   条件跳过；全量 Python 292 tests OK，2 个条件用例跳过。
 - `make api`、`make build`、`make check`、`make test` 与 `git diff --check` 通过。
+
+## 60. M5a-01 类型化 Chat 单次治理闭环
+
+**日期与范围**：2026-11-20，issue #32。按 TDD 从生成的
+`LLMGatewayClient.Chat` 纵向打通可信身份、release-bound 路由/价格、预算预占、
+fake provider、按实际 usage 结算和权威调用账本；不实现后续票的并发重试、对账
+用例、prompt/schema、敏感分类、缓存或完整流式接口。
+
+### 契约与实现
+
+- `ChatRequest` 保留 1–7 号旧字段，只加法新增 session/run/release/logical call、
+  prompt/schema 引用和数据分类；正文没有 principal、model、provider、URL 或重试
+  覆盖字段。`ChatResponse` 保留 1–5 号旧字段，新增 typed `Usage / Cost /
+  AttemptSummary`、structured output、route/price 版本、logical/ledger 身份及
+  finish reason。
+- gRPC handler 只解析 incoming `x-principal-id` 并映射稳定错误。私有 Chat 引擎在
+  provider 前校验 principal、session、run、release 状态与 run 剩余执行时间，随后
+  从 release 绑定的 `llm_role_route + llm_model_allowlist + llm_price_table`
+  解析唯一主模型；缺路由、禁用白名单、非 PUBLISHED/已生效价格均在 provider
+  零调用下失败。
+- 请求 hash 覆盖规范化 messages、prompt/schema 引用、role、route、模型顺序、
+  temperature、token/timeout、release 与数据分类。`logical_call_id` 在
+  `(principal_id, session_id)` 内唯一：已完成同 hash 重放持久结果和同一 attempt，
+  异 hash 返回 `IDEMPOTENCY_CONFLICT`，在途/待对账返回 `CALL_IN_PROGRESS`。
+- 预占事务先按唯一约束创建 logical call，再用单条条件 UPDATE 原子检查和增加
+  权威预算行，并创建首个 `RESERVED` attempt；provider 调用只在事务提交后发生。
+  成功结算事务以 logical call 行锁防止重复释放，扣减全部预留、增加实际 provider
+  tokens/cost，并将 logical call、attempt 与持久最终内容一起推进到 `SUCCEEDED`。
+  provider 不确定故障保留预留并进入 `PENDING_RECONCILIATION / PARTIAL_UNKNOWN`；
+  `llm_call_log` 仅作 best-effort 查询投影，不参与余额裁决。
+- `migrations/29_llm_gateway_chat.sql` 只增新建价格版本/条目、release 模型白名单与
+  role route、预算作用域、逻辑调用和 provider attempt，并补 `llm_call_log`
+  查询身份列。价格表在 `published_at` 前允许补齐条目，发布后条目禁止原地
+  UPDATE/DELETE；预算行 CHECK 与条件 UPDATE 同时守住 token/cost 双上限。
+- `cmd/llm-gateway` 读取本服务 YAML 和 `LLMGW_DSN`，未接线真实 provider 时注入
+  fail-closed provider；Compose 改为依赖 PostgreSQL、挂载只读 configs 并暴露
+  9001。Makefile 新增 `test-integration-llmgw`，只接受显式可写
+  `LLMGW_TEST_DSN`。
+
+### 验证
+
+- 主 seam 测试使用真实 PostgreSQL 临时 schema、Kratos gRPC + bufconn 和生成的
+  `LLMGatewayClient`，直接查询账本仅用于证明预占/结算和唯一约束。
+- 覆盖：成功原子预占/结算、可信 metadata 替代 Trace/正文、跨 principal 与非法
+  run、未知角色、禁用模型、缺失价格、release 撤销、预算不足零 attempt、请求上限
+  不能放宽、完成态重放/异请求冲突、旧 proto 字段号、fresh 结构 schema `00/07→29`、`28→29`
+  升级及价格/预算/logical call 唯一性。
+- `LLMGW_TEST_DSN=postgresql://.../ai_gaokao_ticket2_test?sslmode=disable \
+  go test -tags integration ./internal/llmgw ./cmd/llm-gateway -count=1` 通过。
+
+### 边界与风险
+
+- 生产入口当前只有 fail-closed provider；没有真实模型、真实费用或供应商 SDK
+  重试。`StreamChat` 明确返回 `STREAM_NOT_IMPLEMENTED`。
+- 未实现多 attempt fallback/并发幂等竞争、未知费用对账用例、prompt/schema 注册
+  与验证、六类敏感数据分类及缓存；这些是 #33 起的后续 M5a 增量。
+- request hash 当前对规范化请求做 SHA-256，数据分类与直接标识检测尚未接入；
+  在 #37 完成前不得把该入口视为完整隐私边界。
