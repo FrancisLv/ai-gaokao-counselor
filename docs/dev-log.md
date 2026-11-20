@@ -2552,3 +2552,48 @@ adapter；不实现保留清理（#47）或备份恢复重放（#48），不新�
   与投影重建仍须在 #48 验证。
 - 确认签发与重新认证服务不在本票范围；控制面通过
   `DeletionConfirmationAuthority` 注入，生产未接线时不能放行删除。
+
+## 72. M5b-02 受控报告叙事、剥离与降级
+
+**日期与范围**：2026-11-20，issue #42。为确定性正式报告增加受
+`role=report` 约束的 LLMGateway 叙事 adapter；不新增公开 seam，不修改检索器、
+资格规则、EvalDataset 或删除流程。
+
+### 行为与实现
+
+- RunLifecycle 在确定性报告和 Claims 已构造后，可选调用报告叙事 writer。
+  writer 只能返回 `overview / candidate_reasons / note`；总述与逐候选说明按稳定
+  顺序合并，候选身份、概率、单位、年份、资格和最终顺序仍由既有模板渲染。
+- 叙事在进入报告前执行确定性边界检查：拒绝数字、已知学校/代码/专业身份、
+  EvidenceRef、未知字段、控制字符、模板控制符、资格结论和录取承诺；
+  `录取稳了` 等等价承诺也与既有 Verifier 词边界一并阻断。越界输出进入
+  `FAILED / VALIDATION_FAILED`，不回退后静默发布。
+- 模型超时、限流、不可用或缺失结构化输出时退回同事实集的确定性模板，并在风险
+  区明确记录“生成质量降级”；NARRATIVE_RETRY 最多重写 2 次，超限同样降级。
+- 模型可选补充说明若没有证据，作为 NORMAL Claim 进入 VerifyPackage；由既有规则
+  剥离并从最终 `claim_ids` 与报告正文移除，完整验证报告保留
+  `stripped_claim_ids`。
+- 新增内部 `GrpcReportNarrativeWriter`，只调用 M5a `LLMGateway.Chat`，固定
+  `PUBLIC_DATA`、`temperature=0`、注册 prompt/schema key/version 和稳定
+  `logical_call_id`；orchestrator 仅在设置 `LLM_GATEWAY_ADDR` 时启用。模型 key
+  与 provider 访问仍只在 llmgw 侧。
+- Compose 为 orchestrator 增加 llm-gateway 地址和启动依赖；未配置地址时保留
+  M5b-01 的纯确定性模式。
+
+### 验证
+
+- 新增主 seam 测试覆盖 LLM 叙事成功、事实/数值篡改、schema 污染、资格越权、
+  录取承诺、非关键未知剥离、超时降级和两次重写上限；全部从
+  `SubmitRun → ResumeRun → GetRun` 观察。
+- `test_run_lifecycle_report` 共 12 项通过；真实 PostgreSQL `test_run*.py`
+  共 111 项通过、1 项因未配置真实算法地址跳过。
+- `make py-check py-test`、`make build check test`、`make compose-check`
+  与 `git diff --check` 通过。
+
+### 边界与风险
+
+- 真实 release 仍需发布 `m5b_report_narrative/v1` prompt template、
+  `m5b_report_narrative_v1/v1` response schema、report role route 和价格配置；
+  缺失时 LLMGateway 拒绝，orchestrator 使用明确标记的确定性降级。
+- 本票不证明真实模型质量；golden set、citation/hallucination、P99 和预算门禁由
+  M5b-03/M5b-04 完成。

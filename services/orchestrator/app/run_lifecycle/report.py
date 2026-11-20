@@ -1,8 +1,10 @@
 """确定性正式报告：把已验证的算法产物转换为最终 Claims 与证据包。"""
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from datetime import date, datetime
-from typing import Any
+import re
+from typing import Any, Protocol
 
 from evidence import (
     Claim,
@@ -22,17 +24,283 @@ from evidence import (
     VerificationScope,
 )
 from evidence.canonical import normalize_sample_years
-from evidence.normalization import render_derived_value, sha256_text
+from evidence.normalization import (
+    render_derived_value,
+    sha256_text,
+    text_exceeds_admission_boundary,
+)
 from app.run_lifecycle.formal import payload_sha256
 
 
 REPORT_VERSION = "m5b-report-v1"
 REPORT_PRODUCER_VERSION = "report-renderer-v1"
+REPORT_NARRATIVE_NOTE_CLAIM_ID = "claim:report-narrative-note"
 REQUIRED_NOTICE_TEXTS = {
     "DISCLAIMER": "本方案仅供志愿参考，不构成录取保证。",
     "RISK_NOTICE": "录取概率为历史估计，存在滑档风险；请结合当年招生计划谨慎决策。",
     "NO_ADMISSION_GUARANTEE": "不保证录取。",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class ReportNarrativeRequest:
+    principal_id: str
+    session_id: str
+    run_id: str
+    release_id: str
+    profile_version: str
+    result_version: str
+    candidate_count: int
+    scope_label: str
+    forbidden_fragments: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReportNarrative:
+    overview: str
+    candidate_reasons: tuple[str, ...]
+    note: str | None = None
+
+
+class ReportNarrativeWriter(Protocol):
+    async def compose(
+        self,
+        request: ReportNarrativeRequest,
+    ) -> ReportNarrative: ...
+
+
+class ReportNarrativeViolation(ValueError):
+    """模型返回了可能改变确定性事实或协议边界的叙事。"""
+
+
+class ReportNarrativeUnavailable(RuntimeError):
+    """报告模型暂时不可用，可以退回确定性叙事。"""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+class ReportNarrativeRewriteRequired(RuntimeError):
+    """叙事内容格式不合格，但未越过事实边界，可在上限内重写。"""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+_DIGIT = re.compile(r"[0-9０-９]")
+_TEMPLATE_TOKENS = ("{{", "}}", "${")
+_GUARANTEE_PATTERNS = (
+    "保证录取",
+    "包录取",
+    "一定录取",
+    "必录取",
+    "100%录取",
+    "100％录取",
+)
+_ELIGIBILITY_ASSERTION_PATTERNS = (
+    "可以报考",
+    "可报考",
+    "能够报考",
+    "符合报考条件",
+    "不能报考",
+    "不可报考",
+    "不予报考",
+    "不符合报考条件",
+    "资格通过",
+    "资格合格",
+    "资格不合格",
+    "资格状态为PASS",
+    "资格状态为FAIL",
+    "资格状态为UNKNOWN",
+)
+
+
+def apply_report_narrative(
+    *,
+    package: EvidencePackage,
+    report: dict[str, Any],
+    request: ReportNarrativeRequest,
+    narrative: ReportNarrative,
+) -> tuple[EvidencePackage, dict[str, Any]]:
+    validate_report_narrative(
+        package=package,
+        report=report,
+        request=request,
+        narrative=narrative,
+    )
+    candidate_sections = [
+        section
+        for section in report["sections"]
+        if section["section_key"].startswith("candidate:")
+    ]
+    reason_by_key = {
+        section["section_key"]: reason
+        for section, reason in zip(
+            candidate_sections,
+            narrative.candidate_reasons,
+            strict=True,
+        )
+    }
+    if narrative.note is not None:
+        package = replace(
+            package,
+            claims=tuple(
+                sorted(
+                    (
+                        *package.claims,
+                        Claim(
+                            claim_id=REPORT_NARRATIVE_NOTE_CLAIM_ID,
+                            claim_type="DOCUMENT_FACT",
+                            criticality="NORMAL",
+                            normalized=NormalizedFact(
+                                subject="报告叙事",
+                                predicate="supplementary_note",
+                                object=narrative.note,
+                                unit=None,
+                            ),
+                            rendered_text=narrative.note,
+                            evidence_refs=(),
+                            rendered_bindings=(),
+                        ),
+                    ),
+                    key=lambda claim: claim.claim_id,
+                )
+            ),
+        )
+    sections = []
+    for section in report["sections"]:
+        current = dict(section)
+        if current["section_key"] == "plan":
+            sections.append(
+                {
+                    "section_key": "narrative",
+                    "title": "方案说明",
+                    "body": narrative.overview,
+                }
+            )
+        if current["section_key"].startswith("candidate:"):
+            current["body"] = (
+                f"{current['body']}"
+                f"{reason_by_key[current['section_key']]}"
+            )
+        sections.append(current)
+    return package, {
+        **report,
+        "generation_mode": "LLM_ASSISTED",
+        "sections": sections,
+    }
+
+
+def filter_stripped_report_claims(
+    report: dict[str, Any],
+    stripped_claim_ids: tuple[str, ...],
+) -> dict[str, Any]:
+    stripped = set(stripped_claim_ids)
+    return {
+        **report,
+        "claim_ids": [
+            claim_id
+            for claim_id in report.get("claim_ids", ())
+            if claim_id not in stripped
+        ],
+    }
+
+
+def validate_report_narrative(
+    *,
+    package: EvidencePackage,
+    report: dict[str, Any],
+    request: ReportNarrativeRequest,
+    narrative: ReportNarrative,
+) -> None:
+    if type(narrative) is not ReportNarrative:
+        raise ReportNarrativeViolation("报告模型返回了未注册的响应结构")
+    if (
+        not isinstance(narrative.overview, str)
+        or not isinstance(narrative.candidate_reasons, tuple)
+        or not all(isinstance(reason, str) for reason in narrative.candidate_reasons)
+        or (
+            narrative.note is not None
+            and not isinstance(narrative.note, str)
+        )
+    ):
+        raise ReportNarrativeViolation("报告模型响应字段类型无效")
+    candidate_sections = [
+        section
+        for section in report["sections"]
+        if section["section_key"].startswith("candidate:")
+    ]
+    if len(candidate_sections) != request.candidate_count:
+        raise ReportNarrativeViolation("报告叙事候选数量不一致")
+    if len(narrative.candidate_reasons) != request.candidate_count:
+        raise ReportNarrativeViolation("报告叙事候选数量不一致")
+    evidence_ids = {
+        ref.evidence_id
+        for claim in package.claims
+        for ref in claim.evidence_refs
+    }
+    forbidden_fragments = tuple(
+        sorted(
+            {
+                *(
+                    fragment.strip()
+                    for fragment in request.forbidden_fragments
+                    if fragment and fragment.strip()
+                ),
+                *evidence_ids,
+            },
+            key=lambda item: (-len(item), item),
+        )
+    )
+    texts = (narrative.overview, *narrative.candidate_reasons)
+    if narrative.note is not None:
+        texts = (*texts, narrative.note)
+    for text in texts:
+        normalized = text.strip()
+        if not normalized or len(normalized) > 500:
+            raise ReportNarrativeViolation("报告叙事长度无效")
+        if any(character in normalized for character in ("\x00", "\r", "\n")):
+            raise ReportNarrativeViolation("报告叙事包含控制字符")
+        if any(token in normalized for token in _TEMPLATE_TOKENS):
+            raise ReportNarrativeViolation("报告叙事包含模板控制符")
+        if _DIGIT.search(normalized):
+            raise ReportNarrativeViolation("报告叙事不得包含数值")
+        if (
+            any(pattern in normalized for pattern in _GUARANTEE_PATTERNS)
+            or text_exceeds_admission_boundary(normalized)
+        ):
+            raise ReportNarrativeViolation("报告叙事不得承诺录取")
+        if any(
+            pattern in normalized
+            for pattern in _ELIGIBILITY_ASSERTION_PATTERNS
+        ):
+            raise ReportNarrativeViolation("报告叙事不得决定资格状态")
+        if any(fragment in normalized for fragment in forbidden_fragments):
+            raise ReportNarrativeViolation("报告叙事不得改写候选或证据身份")
+
+
+def apply_report_fallback(
+    report: dict[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    sections = []
+    for section in report["sections"]:
+        current = dict(section)
+        if current["section_key"] == "risk":
+            current["body"] = (
+                "生成质量降级：报告模型暂不可用，以下事实均由确定性模板生成。"
+                f"{current['body']}"
+            )
+        sections.append(current)
+    return {
+        **report,
+        "generation_mode": "DETERMINISTIC_FALLBACK",
+        "degradation_reason": reason,
+        "sections": sections,
+    }
 
 
 def build_formal_report(
