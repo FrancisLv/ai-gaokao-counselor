@@ -55,12 +55,30 @@ func rejectUnsafeInput(req governedRequest) error {
 	for _, key := range keys {
 		values = append(values, key, req.PromptVariables[key])
 	}
-	for _, value := range values {
-		if containsDirectIdentifier(value) || containsRawSensitiveFact(value) {
-			return sensitiveInputNotAllowed()
-		}
+	if containsUnsafeStringValues(values) {
+		return sensitiveInputNotAllowed()
 	}
 	return nil
+}
+
+func rejectUnsafeRenderedMessages(messages []ProviderMessage) error {
+	values := make([]string, 0, len(messages))
+	for _, message := range messages {
+		values = append(values, message.Content)
+	}
+	if containsUnsafeStringValues(values) {
+		return sensitiveInputNotAllowed()
+	}
+	return nil
+}
+
+func containsUnsafeStringValues(values []string) bool {
+	for _, value := range values {
+		if containsDirectIdentifier(value) || containsRawSensitiveFact(value) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsDirectIdentifier(value string) bool {
@@ -89,13 +107,32 @@ func containsRawSensitiveFact(value string) bool {
 }
 
 func containsUnsafeProviderOutput(result providerResult) bool {
-	for _, value := range []string{
+	if containsUnsafeStringValues([]string{
 		result.Content,
 		result.ProviderRequestID,
 		result.FinishReason,
-	} {
-		if containsDirectIdentifier(value) || containsRawSensitiveFact(value) {
-			return true
+	}) {
+		return true
+	}
+	return containsUnsafeStructuredValue(result.StructuredOutput)
+}
+
+func containsUnsafeStructuredValue(value any) bool {
+	switch typed := value.(type) {
+	case string:
+		return containsDirectIdentifier(typed) || containsRawSensitiveFact(typed)
+	case []any:
+		for _, item := range typed {
+			if containsUnsafeStructuredValue(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for key, item := range typed {
+			if containsDirectIdentifier(key) || containsRawSensitiveFact(key) ||
+				containsUnsafeStructuredValue(item) {
+				return true
+			}
 		}
 	}
 	return false

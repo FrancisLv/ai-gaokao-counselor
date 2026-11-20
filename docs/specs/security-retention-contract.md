@@ -90,14 +90,16 @@ ConsentRecord
 - 旧 string 字段的 `PUBLIC / INTERNAL / SENSITIVE` 只作显式兼容：分别映射为
   `PUBLIC_DATA`、`PRINCIPAL_DATA`、`SENSITIVE_ELIGIBILITY_DATA`。`INTERNAL`
   不会扩大为公开数据；`SENSITIVE` 始终返回 `SENSITIVE_DATA_NOT_ALLOWED`；
-- 网关在持久化、request hash 和 provider 调用前检测中国大陆手机号、18 位身份证
-  号、邮箱、常见 key/token 形态及健康/色觉/视力/性别/户籍/学籍原始事实。当前
-  不尝试对自然语言做不完全可靠的自动改写，命中即拒绝；
+- 网关在持久化、request hash 和 provider 调用前检测原始消息、模板变量及模板
+  渲染后的完整消息，覆盖中国大陆手机号、18 位身份证号、邮箱、常见 key/token
+  形态及健康/色觉/视力/性别/户籍/学籍原始事实。当前不尝试对自然语言做不完全
+  可靠的自动改写，命中即拒绝；
 - 只包含字段名与 `PASS/FAIL/UNKNOWN` 的脱敏规则结论可以参与生成；原始敏感
   描述与规则结论同时出现仍按原文拒绝；
-- provider 输出返回前执行同一直接标识与敏感事实检查。不安全的模型内容不写入
-  response、`response_payload`、投影或错误文本；若已产生费用，按真实 usage
-  结算后返回 `SENSITIVE_DATA_NOT_ALLOWED`；
+- provider 输出返回前执行同一直接标识与敏感事实检查；结构化输出通过 schema
+  后还会递归检查解码后的键和值。不安全模型内容不写入 response、
+  `response_payload`、投影或错误文本；若已产生费用，按真实 usage 结算后返回
+  `SENSITIVE_DATA_NOT_ALLOWED`；
 - 共享缓存不得保存敏感 prompt 或敏感模型响应；
 - trace、错误消息和业务事件不得包含健康明细。
 

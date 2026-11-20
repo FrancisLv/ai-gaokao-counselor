@@ -3851,3 +3851,75 @@ func TestChatAllowsSanitizedEligibilityRuleConclusions(t *testing.T) {
 		}
 	}
 }
+
+func TestChatRejectsDirectIdentifierFormedByPromptRendering(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	fixture.seedPromptVersion(t, "v2", "请处理{{candidate_name}}{{topic}}", "")
+	provider := &fakeProvider{}
+	client := fixture.chatClient(t, provider)
+	req := fixture.chatRequest("logical-rendered-identifier")
+	req.PromptTemplateVersion = "v2"
+	req.PromptVariables["candidate_name"] = "1380013"
+	req.PromptVariables["topic"] = "8000"
+
+	_, err := client.Chat(trustedChatContext(fixture.principal), req)
+	assertStableError(t, err, codes.FailedPrecondition, llmgw.ReasonSensitiveDataNotAllowed)
+	if calls := provider.callsSnapshot(); len(calls) != 0 {
+		t.Fatalf("模板渲染后形成的直接标识触发 provider %d 次", len(calls))
+	}
+	var logicalCount int
+	if err := fixture.pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM llm_logical_call WHERE logical_call_id = $1`,
+		req.LogicalCallId,
+	).Scan(&logicalCount); err != nil {
+		t.Fatalf("检查模板渲染拒绝持久化: %v", err)
+	}
+	if logicalCount != 0 {
+		t.Fatalf("模板渲染后形成的直接标识仍写入 logical call %d 条", logicalCount)
+	}
+}
+
+func TestChatDoesNotPersistEscapedSensitiveStructuredOutput(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	fixture.seedResponseSchema(t, `{
+		"type": "object",
+		"additionalProperties": false,
+		"required": ["summary"],
+		"properties": {"summary": {"type": "string"}}
+	}`)
+	provider := &fakeProvider{response: llmgw.ProviderResponse{
+		Content:     `{"summary":"\u0031\u0033\u0038\u0030\u0030\u0031\u0033\u0038\u0030\u0030\u0030"}`,
+		InputTokens: 4, OutputTokens: 2, FinishReason: "STOP",
+	}}
+	client := fixture.chatClient(t, provider)
+	req := fixture.chatRequest("logical-escaped-sensitive-output")
+	req.ResponseSchemaKey = "profile_explain_v1"
+	req.ResponseSchemaVersion = "v1"
+
+	resp, err := client.Chat(trustedChatContext(fixture.principal), req)
+	assertStableError(t, err, codes.FailedPrecondition, llmgw.ReasonSensitiveDataNotAllowed)
+	if resp != nil {
+		t.Fatalf("转义后的敏感结构化输出返回了响应: %+v", resp)
+	}
+	var (
+		logicalStatus string
+		payload       []byte
+	)
+	if err := fixture.pool.QueryRow(context.Background(), `
+		SELECT status, response_payload
+		FROM llm_logical_call
+		WHERE logical_call_id = $1`,
+		req.LogicalCallId,
+	).Scan(&logicalStatus, &payload); err != nil {
+		t.Fatalf("读取转义敏感输出账本: %v", err)
+	}
+	if logicalStatus != "FAILED" {
+		t.Fatalf("转义敏感输出 logical status = %q", logicalStatus)
+	}
+	if payload != nil {
+		t.Fatalf("转义敏感输出写入了 response_payload: %q", payload)
+	}
+	if calls := provider.callsSnapshot(); len(calls) != 1 {
+		t.Fatalf("转义敏感输出 provider calls = %d, want 1", len(calls))
+	}
+}

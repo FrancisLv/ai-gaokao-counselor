@@ -207,6 +207,9 @@ func (s *Service) Chat(ctx context.Context, req *llmgwv1.ChatRequest) (*llmgwv1.
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectUnsafeRenderedMessages(prompt.messages); err != nil {
+		return nil, err
+	}
 	schema, err := s.loadResponseSchema(ctx, governed, route)
 	if err != nil {
 		return nil, err
@@ -304,6 +307,11 @@ func (s *Service) executeProviderAttempts(ctx context.Context, prepared *prepare
 				)
 			}
 			result.StructuredOutput = structuredOutput
+			if containsUnsafeProviderOutput(result) {
+				return nil, s.settleSensitiveOutputFailure(
+					ctx, prepared, result, actualCostMicroUSD, actualTokens,
+				)
+			}
 		}
 
 		response, err := s.settleCall(ctx, prepared, result, actualCostMicroUSD, actualTokens)

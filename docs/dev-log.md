@@ -2240,17 +2240,20 @@ usage 缺失/不可信与可能已受理断连语义，以及不新增公共 RPC
   `allowed_data_classes`，默认只允许 `PUBLIC_DATA`；数据库拒绝空集合、NULL
   项、未知值和 `SENSITIVE_ELIGIBILITY_DATA / SECRET`。logical call 冻结规范化
   data class，便于审计。
-- `Chat` 在 run/route/prompt 持久化与 provider 调用前检测消息、模板变量和 trace：
-  中国大陆手机号、18 位身份证号、邮箱、常见 key/token/private-key 形态，以及
-  健康、色觉、视力、性别、户籍/学籍原始事实。命中返回
-  `SENSITIVE_DATA_NOT_ALLOWED`，不写 logical call/log 投影，provider 零调用。
+- `Chat` 在 run/route/prompt 持久化与 provider 调用前检测消息、模板变量、trace
+  及模板渲染后的完整消息：中国大陆手机号、18 位身份证号、邮箱、常见
+  key/token/private-key 形态，以及健康、色觉、视力、性别、户籍/学籍原始事实。
+  命中返回 `SENSITIVE_DATA_NOT_ALLOWED`，不写 logical call/log 投影，provider
+  零调用。模板渲染后的二次检测可拒绝多个安全变量片段拼成的直接标识。
 - 单一 `PASS / FAIL / UNKNOWN` 脱敏规则结论正向通过，包括“色觉要求结论：
   FAIL”“健康限制核验为 UNKNOWN”等上游常用表达；原文敏感描述与结论同时出现
   仍拒绝。
-- provider 输出在 schema 校验、持久化和响应前执行同一守卫。手机号、身份标识或
-  健康原文回显时不返回内容、不写 `response_payload`；真实 usage/cost 原子结算
-  后 logical call 稳定为 `FAILED / SENSITIVE_DATA_NOT_ALLOWED`，重放 provider
-  零新增调用。`BUDGET_OVERRUN` 也不再持久化原始模型内容。
+- provider 输出在 schema 校验、持久化和响应前执行同一守卫；结构化输出通过
+  schema 后还会递归检查解码后的键和值，避免 `\uXXXX` 转义绕过原始字符串扫描。
+  手机号、身份标识或健康原文回显时不返回内容、不写 `response_payload`；真实
+  usage/cost 原子结算后 logical call 稳定为
+  `FAILED / SENSITIVE_DATA_NOT_ALLOWED`，重放 provider 零新增调用。
+  `BUDGET_OVERRUN` 也不再持久化原始模型内容。
 - 请求 hash 只保存脱敏规范输入的 SHA-256；日志与错误仅包含稳定 reason，不保存
   model key、prompt 原文或未脱敏供应商响应。
 
@@ -2262,7 +2265,7 @@ usage 缺失/不可信与可能已受理断连语义，以及不新增公共 RPC
 - 覆盖六类 typed 分类、route 允许/拒绝、未知枚举、旧三类别名、敏感/机密永久
   拒绝、手机号（含分隔符）、身份证号、邮箱、model token、健康/色觉/视力/性别/
   户籍/学籍原文、trace/模板变量检测、脱敏结论输入与输出正向、供应商敏感回显
-  不落库及稳定重放。
+  不落库及稳定重放；merge 复核补测模板渲染拼接直接标识与结构化 JSON 转义回显。
 - fresh schema 覆盖 `00/07 -> 34`，升级路径覆盖 `28 -> 29 -> ... -> 34`。
 
 ### 边界与风险
