@@ -2170,3 +2170,58 @@ prompt/schema、敏感分类、缓存与流式能力。
   request hash，供 #38 直接扩展缓存键。
 - fake provider 把注册 schema 作为内部请求参数，但不代表真实供应商已接线；
   生产入口仍 fail closed，`StreamChat` 仍返回未实现。
+
+## 64. M5a-06 六类数据分类与敏感原文边界
+
+**日期与范围**：2026-11-20，issue #37。按 TDD 从生成的
+`LLMGatewayClient.Chat` 收紧云端数据准入与供应商输出；不实现 #38 缓存，
+不实现 #39 `StreamChat`，也不改变 run 的业务资格判断。
+
+### 契约与实现
+
+- `ChatRequest` 保留旧 `data_classification` string，加法新增 typed
+  `DataClassification data_class = 18`。六类为
+  `PUBLIC_DATA / PRINCIPAL_DATA / INQUIRY_DATA /
+  SENSITIVE_ELIGIBILITY_DATA / OPERATIONAL_DATA / SECRET`；未知枚举、未知旧值或
+  新旧字段映射冲突返回 `REQUEST_INVALID`。
+- 旧 `PUBLIC` 映射 `PUBLIC_DATA`，`INTERNAL` 映射 `PRINCIPAL_DATA`，
+  `SENSITIVE` 映射 `SENSITIVE_ELIGIBILITY_DATA`。兼容不扩大权限：旧
+  `INTERNAL` 不会变成公开数据，旧 `SENSITIVE` 始终拒绝。
+- `migrations/33_llm_data_classification.sql` 为每个 route 增加
+  `allowed_data_classes`，默认只允许 `PUBLIC_DATA`；数据库拒绝空集合、NULL
+  项、未知值和 `SENSITIVE_ELIGIBILITY_DATA / SECRET`。logical call 冻结规范化
+  data class，便于审计。
+- `Chat` 在 run/route/prompt 持久化与 provider 调用前检测消息、模板变量和 trace：
+  中国大陆手机号、18 位身份证号、邮箱、常见 key/token/private-key 形态，以及
+  健康、色觉、视力、性别、户籍/学籍原始事实。命中返回
+  `SENSITIVE_DATA_NOT_ALLOWED`，不写 logical call/log 投影，provider 零调用。
+- 单一 `PASS / FAIL / UNKNOWN` 脱敏规则结论正向通过，包括“色觉要求结论：
+  FAIL”“健康限制核验为 UNKNOWN”等上游常用表达；原文敏感描述与结论同时出现
+  仍拒绝。
+- provider 输出在 schema 校验、持久化和响应前执行同一守卫。手机号、身份标识或
+  健康原文回显时不返回内容、不写 `response_payload`；真实 usage/cost 原子结算
+  后 logical call 稳定为 `FAILED / SENSITIVE_DATA_NOT_ALLOWED`，重放 provider
+  零新增调用。`BUDGET_OVERRUN` 也不再持久化原始模型内容。
+- 请求 hash 只保存脱敏规范输入的 SHA-256；日志与错误仅包含稳定 reason，不保存
+  model key、prompt 原文或未脱敏供应商响应。
+
+### 验证
+
+- 主 seam 测试继续使用真实 PostgreSQL 临时 schema、Kratos gRPC + bufconn、生成
+  `LLMGatewayClient` 与 fake provider，直接 SQL 仅观察拒绝是否零持久化及实际
+  usage 结算。
+- 覆盖六类 typed 分类、route 允许/拒绝、未知枚举、旧三类别名、敏感/机密永久
+  拒绝、手机号（含分隔符）、身份证号、邮箱、model token、健康/色觉/视力/性别/
+  户籍/学籍原文、trace/模板变量检测、脱敏结论输入与输出正向、供应商敏感回显
+  不落库及稳定重放。
+- fresh schema 覆盖 `00/07 -> 33`，升级路径覆盖 `28 -> 29 -> ... -> 33`。
+
+### 边界与风险
+
+- 检测是针对已知高置信形态的横向安全边界，不是完整自然语言 DLP；未命中检测的
+  隐晦敏感表达仍需上游画像/规则层负责最小化。当前策略是命中即拒绝，不自动做
+  不可靠脱敏。
+- 真实 provider 仍未接线，生产入口 fail closed；敏感输出若实际 usage 同时超过
+  预算预留，仍需在后续对账流程中协调 `BUDGET_OVERRUN` 与
+  `SENSITIVE_DATA_NOT_ALLOWED` 的运营优先级。
+- 缓存与 `StreamChat` 未实现；本票只为未来缓存声明默认仅 `PUBLIC_DATA` 可共享。

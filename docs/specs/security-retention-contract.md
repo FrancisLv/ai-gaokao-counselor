@@ -81,7 +81,23 @@ ConsentRecord
 
 - 健康、色觉、视力等原始字段不进入云模型；
 - 规则层只向报告模型提供脱敏后的 `PASS/FAIL/UNKNOWN` 和限制原因；
-- `LLM Gateway` 遇到 `data_classification=SENSITIVE` 返回 `SENSITIVE_DATA_NOT_ALLOWED`；
+- `ChatRequest.data_class` 使用 `PUBLIC_DATA / PRINCIPAL_DATA / INQUIRY_DATA /
+  SENSITIVE_ELIGIBILITY_DATA / OPERATIONAL_DATA / SECRET` 六类枚举；未知枚举值
+  fail closed；
+- 每个 `llm_role_route.allowed_data_classes` 明确声明可进入云模型的安全子集；
+  `SENSITIVE_ELIGIBILITY_DATA` 与 `SECRET` 永远不能出现在 route 允许集合，
+  数据库约束与服务端检查双重拒绝；
+- 旧 string 字段的 `PUBLIC / INTERNAL / SENSITIVE` 只作显式兼容：分别映射为
+  `PUBLIC_DATA`、`PRINCIPAL_DATA`、`SENSITIVE_ELIGIBILITY_DATA`。`INTERNAL`
+  不会扩大为公开数据；`SENSITIVE` 始终返回 `SENSITIVE_DATA_NOT_ALLOWED`；
+- 网关在持久化、request hash 和 provider 调用前检测中国大陆手机号、18 位身份证
+  号、邮箱、常见 key/token 形态及健康/色觉/视力/性别/户籍/学籍原始事实。当前
+  不尝试对自然语言做不完全可靠的自动改写，命中即拒绝；
+- 只包含字段名与 `PASS/FAIL/UNKNOWN` 的脱敏规则结论可以参与生成；原始敏感
+  描述与规则结论同时出现仍按原文拒绝；
+- provider 输出返回前执行同一直接标识与敏感事实检查。不安全的模型内容不写入
+  response、`response_payload`、投影或错误文本；若已产生费用，按真实 usage
+  结算后返回 `SENSITIVE_DATA_NOT_ALLOWED`；
 - 共享缓存不得保存敏感 prompt 或敏感模型响应；
 - trace、错误消息和业务事件不得包含健康明细。
 
@@ -91,7 +107,8 @@ ConsentRecord
 - PostgreSQL 和对象存储使用磁盘加密或等价基础设施控制；
 - 敏感字段使用列级加密或字段级 envelope encryption；
 - 日志只记录 trace、结构化错误码、版本、耗时和非敏感计数；
-- 不记录完整 prompt、完整模型响应、手机号、身份证号或健康原文；
+- 不记录完整 prompt、原始 provider 响应、未通过敏感守卫的模型内容、手机号、
+  身份证号或健康原文；
 - 错误响应不得回显 DSN、key、原始 SQL 或内部堆栈；
 - 浏览器 SSE 不在 URL 放长期 token；
 - 模型 key 只存在于 LLM Gateway secrets 环境。
