@@ -94,6 +94,7 @@ def build_formal_report(
     )
     return package, _report_payload(
         preview=preview,
+        scope=scope,
         qualification=qualification,
         notices=notices,
         claims=claims,
@@ -286,6 +287,26 @@ def _algorithm_claims(
             ),
             algorithm_name="weighted_hit",
         )
+        for major in candidate.get("majors", ()):
+            major_code = str(major.get("major_code") or "").strip()
+            if not major_code:
+                raise ValueError("正式报告缺少专业代码")
+            major_name = str(major.get("major_name") or major_code).strip()
+            add_derived(
+                operation_id=(
+                    f"candidate:{identity}:major:{major_code}:major_code"
+                ),
+                subject=f"{subject} {major_name}",
+                predicate="major_code",
+                value=major_code,
+                unit="专业代码",
+                precision=0,
+                rendered_text=(
+                    f"{subject}的{major_name}专业代码为 {major_code}，"
+                    f"样本年份为 {years_text}。"
+                ),
+                algorithm_name="weighted_hit",
+            )
 
     for group in artifact["qualification"]["groups"]:
         subject = str(group["group_key"])
@@ -401,6 +422,7 @@ def _qualification_from_artifact(
 def _report_payload(
     *,
     preview: dict[str, Any],
+    scope: VerificationScope,
     qualification: QualificationSummary,
     notices: tuple[RequiredNotice, ...],
     claims: tuple[Claim, ...],
@@ -418,7 +440,13 @@ def _report_payload(
             f"{candidate.get('major_group', '')}"
         )
         majors = "、".join(
-            major.get("major_name") or major.get("major_code") or ""
+            (
+                f"{major.get('major_name')}（{major.get('major_code')}）"
+                if major.get("major_name") and major.get("major_code")
+                else major.get("major_name")
+                or major.get("major_code")
+                or ""
+            )
             for major in candidate.get("majors", ())
         )
         candidate_sections.append(
@@ -456,7 +484,8 @@ def _report_payload(
                 "section_key": "plan",
                 "title": "方案概况",
                 "body": (
-                    f"位次 {preview['rank']} 名，百分位 "
+                    f"{scope.province}{scope.category}考生位次 "
+                    f"{preview['rank']} 名，百分位 "
                     f"{preview['percentile']:.4f}，"
                     f"共 {len(preview['wishlist']['candidates'])} 个院校专业组。"
                 ),
