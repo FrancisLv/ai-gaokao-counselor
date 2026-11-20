@@ -55,8 +55,32 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             if "test" not in database.lower():
                 self.fail(f"拒绝清理非测试数据库: {database}")
             await conn.execute(
+                "DROP INDEX IF EXISTS idx_llm_call_log_logical_call"
+            )
+            await conn.execute(
+                """
+                DROP FUNCTION IF EXISTS reject_llm_prompt_template_mutation() CASCADE;
+                DROP FUNCTION IF EXISTS reject_llm_response_schema_mutation() CASCADE;
+                DROP FUNCTION IF EXISTS invalidate_llm_result_cache_on_release_revoke() CASCADE;
+                """
+            )
+            await conn.execute(
                 """
                 DROP TABLE IF EXISTS
+                    data_retention_ledger,
+                    data_retention_sweep,
+                    data_retention_policy,
+                    llm_attempt_reconciliation,
+                    llm_provider_attempt,
+                    llm_logical_call,
+                    llm_budget_scope,
+                    llm_result_cache,
+                    llm_role_route,
+                    llm_model_allowlist,
+                    llm_price_entry,
+                    llm_price_table,
+                    llm_prompt_template,
+                    llm_response_schema,
                     principal_deletion_ledger,
                     principal_deletion_tombstone,
                     principal_deletion_request,
@@ -174,9 +198,22 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await conn.execute(migration.read_text(encoding="utf-8"))
             migration = ROOT / "migrations" / "28_authoritative_formal_gate.sql"
             await conn.execute(migration.read_text(encoding="utf-8"))
+            for filename in (
+                "29_llm_gateway_chat.sql",
+                "30_llm_budget_overrun.sql",
+                "31_llm_attempt_limit.sql",
+                "32_llm_prompt_schema_registry.sql",
+                "33_llm_attempt_reconciliation.sql",
+                "34_llm_data_classification.sql",
+                "35_llm_result_cache.sql",
+            ):
+                migration = ROOT / "migrations" / filename
+                await conn.execute(migration.read_text(encoding="utf-8"))
             migration = ROOT / "migrations" / "36_principal_data_deletion.sql"
             await conn.execute(migration.read_text(encoding="utf-8"))
             migration = ROOT / "migrations" / "37_consent_record.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "38_data_retention.sql"
             await conn.execute(migration.read_text(encoding="utf-8"))
             await conn.execute(
                 """
@@ -241,6 +278,19 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                     conn,
                     "migrations/28_authoritative_formal_gate.sql",
                 )
+            for filename in (
+                "29_llm_gateway_chat.sql",
+                "30_llm_budget_overrun.sql",
+                "31_llm_attempt_limit.sql",
+                "32_llm_prompt_schema_registry.sql",
+                "33_llm_attempt_reconciliation.sql",
+                "34_llm_data_classification.sql",
+                "35_llm_result_cache.sql",
+            ):
+                await self._apply_sql_file(
+                    conn,
+                    f"migrations/{filename}",
+                )
             await self._apply_sql_file(
                 conn,
                 "migrations/36_principal_data_deletion.sql",
@@ -248,6 +298,10 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await self._apply_sql_file(
                 conn,
                 "migrations/37_consent_record.sql",
+            )
+            await self._apply_sql_file(
+                conn,
+                "migrations/38_data_retention.sql",
             )
         finally:
             await conn.close()

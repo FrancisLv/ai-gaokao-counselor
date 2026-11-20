@@ -302,6 +302,8 @@ expires_at
 | `run_evidence_package` | `V1_FORMAL` 已剥离证据包正文与输入/发布摘要，insert-only |
 | `run_verification_report` | `V1_FORMAL` 完整 `VerificationReport` 与摘要，insert-only |
 | `run_result_state_event` | 发布结果后的 `ACTIVE / STALE` 独立追加状态 |
+| `data_retention_policy` | 版本化 7/30/180 天保留策略与 DELETE/DEIDENTIFY 动作 |
+| `data_retention_sweep` / `data_retention_ledger` | 保留清理的非敏感审计、逐资源结果与行数 |
 
 事务要求：
 
@@ -322,6 +324,8 @@ expires_at
 - 同一 `result_version` 只能映射一份规范化输入摘要；重试重放原结果与事件，摘要冲突
   返回 `RESULT_VERSION_CONFLICT`。发布与取消竞争只有一个终态提交成功。
 - Redis 仅作通知或可重建投影，不是权威状态。
+- 保留清理只允许在显式 `app.retention_cleanup=on` 的事务中删除正式结果；普通业务
+  写入仍不可改写。30 天后 run/session 保留去标识化 stub，不返回原用户私有数据。
 
 ## 10. 稳定错误码
 

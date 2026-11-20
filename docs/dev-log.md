@@ -2552,3 +2552,45 @@ adapter；不实现保留清理（#47）或备份恢复重放（#48），不新�
   与投影重建仍须在 #48 验证。
 - 确认签发与重新认证服务不在本票范围；控制面通过
   `DeletionConfirmationAuthority` 注入，生产未接线时不能放行删除。
+
+## 72. M5b-07 终态数据保留清理
+
+**日期与范围**：2026-11-20，issue #47。实现版本化 7/30/180 天保留清理与
+非敏感审计；不实现备份恢复 tombstone 重放（#48）。
+
+### 行为与实现
+
+- 新增 `data_retention_policy`、`data_retention_sweep` 与
+  `data_retention_ledger`。策略按 `policy_version + resource_kind` 固化天数和
+  `DELETE/DEIDENTIFY` 动作；任一资源缺失时返回 `RETENTION_POLICY_INVALID`，
+  不创建 sweep。
+- 成功结果/证据包、Profile、run/session 元数据与成功检查点使用 30 天窗口；
+  事件、失败/过期检查点与命令 receipt 使用 7 天；provider 账本与安全审计使用
+  180 天去标识化。清理时间均以持久化记录时间和策略计算。
+- 30 天后正式结果/证据/验证报告按受控事务删除；Profile 先断开 run 引用再删除。
+  run/session 保留最小 stub 以维持 provider 账本外键，task input、Profile/result
+  引用和 interrupt 清空，原 principal 的 `GetRun` 返回 `RUN_NOT_FOUND`。
+- 7 天清理删除过期事件、失败/过期 checkpoint 与命令回执。180 天清理将 logical
+  call、budget scope 的主体改为 `retention:deidentified`，清空模型响应/错误文本、
+  provider request id 和兼容调用日志；usage/成本数值保留用于对账。
+- 删除审计 180 天后将 request id 改为 `retention-expired`，tombstone 原因改为
+  `RETENTION_EXPIRED`，删除旧删除请求记录，但保留最小 tombstone 和 DELETED 状态。
+  公开文档、release、规则与统计不被清理。
+- 每个资源独立执行并记录成功/失败；单资源失败不阻止其他资源清理，sweep 状态为
+  `RETENTION_FAILED_RETRYABLE`，重试成功后幂等收敛。正式结果触发器只新增
+  `app.retention_cleanup=on` 的受控 DELETE 通道。
+
+### 验证
+
+- 主 seam 测试验证 30 天后 `GetRun` 不再暴露结果/Profile，run/session 仅保留去标识化
+  stub，公开 release 仍为 PUBLISHED。
+- 覆盖 7 天事件/回执、成功与失败 checkpoint 窗口、180 天 provider 账本/安全审计
+  去标识化、缺失策略 fail closed、单资源部分失败后可重试、重复 sweep 幂等。
+- 独立测试库完整 `test_run*.py` 通过；`make py-check py-test` 通过。
+
+### 边界与风险
+
+- 兼容调用日志没有 principal 列，按旧 `session_id` 的 session 到期批次去标识化；
+  后续若增加 principal 归属需同步扩展。
+- Redis 投影清理与备份恢复重放不在本票；由 #48 使用 tombstone/ledger 验证。
+- 生产定时调度器尚未接线；本票交付可注入时钟的清理控制面 adapter。
