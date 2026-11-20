@@ -103,7 +103,44 @@ message AttemptSummary {
   string error_code          = 9;
 }
 
+enum ChatStreamEventType {
+  CHAT_STREAM_EVENT_TYPE_UNSPECIFIED = 0;
+  CHAT_STREAM_EVENT_START            = 1;
+  CHAT_STREAM_EVENT_DELTA            = 2;
+  CHAT_STREAM_EVENT_USAGE            = 3;
+  CHAT_STREAM_EVENT_DONE             = 4;
+  CHAT_STREAM_EVENT_ERROR            = 5;
+}
+
+// sequence is local to one StreamChat call and is never a run event_seq.
+message ChatStreamEvent {
+  int64                 sequence               = 1;
+  ChatStreamEventType   type                   = 2;
+  string                logical_call_id        = 3;
+  string                attempt_id             = 4;
+  string                model_id               = 5;
+  string                delta_text             = 6;
+  string                finish_reason          = 7;
+  Usage                 usage                  = 8;
+  Cost                  cost                   = 9;
+  string                ledger_entry_id        = 10;
+  string                error_code             = 11;
+  bool                  schema_validated       = 12;
+  google.protobuf.Struct structured_output     = 13;
+  string                content                = 14;
+  repeated AttemptSummary attempts             = 15;
+  string                route_version           = 16;
+  string                price_table_version     = 17;
+  string                release_id              = 18;
+  string                response_schema_key     = 19;
+  string                response_schema_version = 20;
+  bool                  cache_hit               = 21;
+  string                error_message           = 22;
+  map<string, string>   error_metadata          = 23;
+}
+
 message ChatDelta {
   string content = 1;
   bool   done    = 2;
+  ChatStreamEvent event = 3;
 }

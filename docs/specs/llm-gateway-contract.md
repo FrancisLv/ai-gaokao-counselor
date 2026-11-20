@@ -367,6 +367,33 @@ ChatStreamEvent
 - 流式缓存命中以后可以单个 `DELTA + DONE` 回放；
 - 事件序号由网关为本次流生成，不等同于 run 的 `event_seq`。
 
+### 8.1 M5a wire 与实现口径
+
+- 保留 `ChatDelta.content = 1` 与 `ChatDelta.done = 2`；加法新增
+  `ChatStreamEvent event = 3`。旧客户端继续从 `content/done` 读取增量与终止，
+  新客户端从 `event` 读取严格类型化字段。
+- `ChatStreamEvent` 固定包含 `sequence/type/logical_call_id/attempt_id/model_id/
+  delta_text/finish_reason/usage/cost/ledger_entry_id/error_code/
+  schema_validated/structured_output/content/attempts`，并携带 route、price、
+  release、response schema identity、cache hit 与安全错误 metadata。
+- 正常新调用发送 `START -> DELTA* -> USAGE -> DONE`。`START` 只在预算预占事务
+  提交后出现；`DONE` 只在最终输出通过敏感与 schema 守卫、预算结算并持久化结果后
+  出现。调用结果为缓存命中或已完成幂等重放时，不重新预占，按
+  `DELTA -> DONE` 回放；缓存命中不发送 `USAGE`，且 attempt 为零。
+- `Chat` 与 `StreamChat` 都调用同一个 `executeGovernedCall` 治理用例；流式 handler
+  只负责把同一个 `ChatResponse` 映射为事件，不复制路由、预算、缓存、重试或
+  结算逻辑。
+- 预占前拒绝发送单个 `ERROR`，不发送 `START` 且 provider 零调用。预占后发生的
+  供应商错误、schema 失败与敏感输出拒绝不再发送 `DELTA`，发送稳定 `ERROR` 后
+  以相同 gRPC 状态终止。
+- 客户端在 provider 请求可能已受理后断开时，服务端使用独立持久化上下文把 attempt
+  推进为 `PENDING_RECONCILIATION`、logical call 推进为 `PARTIAL_UNKNOWN`，
+  error code 为 `STREAM_INTERRUPTED`，预占保持待对账。断开后无法保证客户端收到
+  `ERROR` 事件。
+- 当前 `Provider` adapter 仍是一次请求返回最终结果的内部 seam，因此 `DELTA` 是
+  通过最终敏感/schema 守卫后的完整内容块，不宣称供应商 token 实时转发。接入
+  真实流式 adapter 时必须继续保持“流式片段仅展示、DONE 才可业务成功”的边界。
+
 ## 9. 调用账本
 
 ### 9.1 LogicalCall

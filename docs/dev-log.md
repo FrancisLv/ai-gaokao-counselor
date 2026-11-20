@@ -2330,3 +2330,54 @@ usage 缺失/不可信与可能已受理断连语义，以及不新增公共 RPC
   验证。
 - 共享缓存仅允许 `PUBLIC_DATA`。未来若开放 principal/session 作用域缓存，必须
   新增加固键和迁移，不能只放宽当前 data class 判断。
+
+## 67. M5a-08 类型化 StreamChat 与 Chat 共用治理
+
+**日期与范围**：2026-11-20，issue #39。按 TDD 从生成的
+`LLMGatewayClient.StreamChat` 接通既有 Chat 治理能力；不生成报告，不改
+RunLifecycle，不接真实付费 provider。
+
+### 契约与实现
+
+- `ChatDelta` 保留 `content=1`、`done=2`，加法新增 `event=3`。新
+  `ChatStreamEvent` 固定承载流内 `sequence`、事件类型、logical/attempt/model、
+  delta/final content、usage/cost、finish reason、schema 校验状态、structured
+  output、ledger、route/price/release、缓存命中和稳定错误 metadata。
+- `Chat` 与 `StreamChat` 都进入 `executeGovernedCall`；流式 handler 仅把同一个
+  `ChatResponse` 映射为事件。正常新调用为
+  `START -> DELTA -> USAGE -> DONE`，最终结果与普通 Chat 共用敏感守卫、schema
+  校验、结算事务、attempt 摘要和安全错误。
+- 预算、敏感数据、raw schema 等预占前拒绝只发送一个 `ERROR`，不发送 `START`，
+  provider 与 attempt 均为零。缓存命中或已完成幂等重放按 `DELTA -> DONE` 回放；
+  缓存 DONE 为 usage/cost 零、attempt 空、`CACHE_HIT`。
+- provider 与 schema 错误在 DONE 前发送稳定 `ERROR` 后以同一 gRPC 状态终止，不
+  发送成功内容。客户端在 provider 请求可能已受理后断开时，服务端用独立 5 秒
+  持久化上下文记录 attempt `PENDING_RECONCILIATION`、logical call
+  `PARTIAL_UNKNOWN`、error code `STREAM_INTERRUPTED`，原预算预占保持不改。
+- 流序号由 `grpcStreamObserver` 从 1 单调递增，仅属于本次 RPC；proto 描述符测试
+  明确禁止 `event_seq` 字段。#39 不需要新增数据库对象，现有 `29` 至 `35`
+  账本足以表达流式成功、失败和未知费用。
+
+### 验证
+
+- 主 seam 继续使用真实 PostgreSQL 临时 schema、生成的
+  `LLMGatewayClient` 与 fake provider。测试 server 改用原生 `grpc.NewServer`：
+  Kratos v2.7.3 的 `Server.Serve(bufconn)` 未初始化 endpoint，流式拦截器会发生
+  nil dereference；生产 Kratos 装配不受影响。
+- 覆盖正常事件顺序与旧 `content/done` 可读、预算/敏感/raw schema 预拒绝零
+  provider、缓存零 attempt 回放、主备两个 attempt 归属、schema 失败真实 usage
+  结算、provider 超时待对账、结构化 DONE、客户端断流待对账、`Chat/StreamChat`
+  成功与错误语义等价，以及 proto 旧字段号固定和新事件字段号。
+- `LLMGW_TEST_DSN=postgresql://.../ai_gaokao_ticket2_test \
+  go test -tags integration ./internal/llmgw -count=1` 全量通过；该套件同时回归
+  并发预算、幂等、release 缓存、敏感分类与 fresh/upgrade 迁移。
+
+### 边界与风险
+
+- `Provider` 当前仍是一次请求返回最终内容的内部 seam，因此 DELTA 是最终守卫后
+  的完整内容块；typed streaming wire 已稳定，但未宣称供应商 token 实时转发。
+  真实流式 adapter 接线后仍只能在 DONE 将结果视为业务成功。
+- 生产 provider 与账单 adapter 仍 fail closed；未执行真实付费模型调用，因此
+  provider request id、usage/cost 和断流账单仍只由确定性测试替身验证。
+- 客户端断开后无法接收 ERROR；可通过预占错误 metadata 或后续内部对账按
+  `logical_call_id + attempt_id` 定位。未实现自动账单拉取或人工对账 UI。
