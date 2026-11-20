@@ -127,15 +127,15 @@ py-check: api-py ## 语法与模块导入检查
 py-test: api-py ## Python 离线逻辑与导入测试，不下载模型、不入库
 	HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 $(PY) -m unittest discover -s $(PY_SVC)/tests -p 'test_*.py' -v
 
-m5b-release-gate: ## 执行不可变 EvalRun 的 M5b 聚合发布门禁；需 DSN / EVAL_RUN_ID / SECURITY_EVIDENCE
+m5b-release-gate: ## 执行安全测试、不可变 EvalRun 与 M5b 聚合发布门禁；需 DSN / SECURITY_TEST_DSN / EVAL_RUN_ID
 	@test -n "$(DSN)" || (echo '需设置 DSN'; exit 1)
+	@test -n "$(SECURITY_TEST_DSN)" || (echo '需设置 SECURITY_TEST_DSN'; exit 1)
 	@test -n "$(EVAL_RUN_ID)" || (echo '需设置 EVAL_RUN_ID'; exit 1)
-	@test -n "$(SECURITY_EVIDENCE)" || (echo '需设置 SECURITY_EVIDENCE'; exit 1)
 	$(PY) scripts/run_m5b_release_gate.py \
 		--dsn "$(DSN)" \
+		--security-test-dsn "$(SECURITY_TEST_DSN)" \
 		--dataset-dir "$(if $(DATASET_DIR),$(DATASET_DIR),data/golden/evaluation-hunan-2025-v0.2.0-draft)" \
-		--eval-run-id "$(EVAL_RUN_ID)" \
-		--security-evidence "$(SECURITY_EVIDENCE)"
+		--eval-run-id "$(EVAL_RUN_ID)"
 
 m4a-acceptance-seed: ## 为 M4a 前端验收 seed policy release；需 DSN
 	@test -n "$(DSN)" || (echo '需设置 DSN'; exit 1)

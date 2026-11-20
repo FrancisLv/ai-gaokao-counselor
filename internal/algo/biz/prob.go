@@ -84,10 +84,15 @@ func batchEstimateProb(candidates []Candidate, userPercentile float64,
 
 		// 计划修正：用「报考年 vs 报考年-1」的计划变化率统一修正各年百分位（近似，不逐年还原）
 		if plan, ok := planMap[key]; ok && plan.PrevPlanCount > 0 {
+			cand.PlanCount = plan.PlanCount
+			cand.PlanCountKnown = true
 			change := float64(plan.PlanCount-plan.PrevPlanCount) / float64(plan.PrevPlanCount)
 			for i := range history {
 				history[i].MinPercentile *= (1 + change*config.PlanAdjust)
 			}
+		} else if plan, ok := planMap[key]; ok {
+			cand.PlanCount = plan.PlanCount
+			cand.PlanCountKnown = true
 		}
 
 		prob := calculateProbability(userPercentile, history, config)

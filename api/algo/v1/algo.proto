@@ -83,6 +83,7 @@ message Candidate {
   int32 num_doctor = 12;            // 博士点数量
   int32 ruanke_rank = 13;           // 软科排名
   repeated AdmissionRecord history_data = 14; // 历史录取数据（service 层填充）
+  optional int32 plan_count = 15;   // 报考年该院校专业组招生计划数；缺失表示 UNKNOWN
 }
 
 // ProbEstimate 概率估计结果。

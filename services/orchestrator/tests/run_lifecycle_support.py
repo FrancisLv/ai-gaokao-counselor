@@ -63,11 +63,13 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                 DROP FUNCTION IF EXISTS reject_llm_response_schema_mutation() CASCADE;
                 DROP FUNCTION IF EXISTS invalidate_llm_result_cache_on_release_revoke() CASCADE;
                 DROP FUNCTION IF EXISTS reject_eval_run_record_mutation() CASCADE;
+                DROP FUNCTION IF EXISTS reject_release_gate_security_record_mutation() CASCADE;
                 """
             )
             await conn.execute(
                 """
                 DROP TABLE IF EXISTS
+                    release_gate_security_record,
                     eval_run_record,
                     data_lifecycle_restore_replay,
                     data_lifecycle_restore_state,
@@ -223,6 +225,8 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await conn.execute(migration.read_text(encoding="utf-8"))
             migration = ROOT / "migrations" / "40_immutable_eval_run.sql"
             await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "41_release_gate_security_attestation.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS release_component (
@@ -318,6 +322,10 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await self._apply_sql_file(
                 conn,
                 "migrations/40_immutable_eval_run.sql",
+            )
+            await self._apply_sql_file(
+                conn,
+                "migrations/41_release_gate_security_attestation.sql",
             )
         finally:
             await conn.close()

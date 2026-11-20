@@ -163,7 +163,7 @@ class FormalReportLifecycleTests(RunLifecyclePostgresTest):
         self.assertIn("测试专业（M01）", candidate_section["body"])
         self.assertIn("67%", candidate_section["body"])
         self.assertIn("策略分档：稳", candidate_section["body"])
-        self.assertIn("招生计划数：UNKNOWN", candidate_section["body"])
+        self.assertIn("招生计划数：120", candidate_section["body"])
         self.assertIn("2022、2023、2024", candidate_section["body"])
         self.assertTrue(candidate_section["citations"])
         self.assertTrue(
@@ -175,10 +175,15 @@ class FormalReportLifecycleTests(RunLifecyclePostgresTest):
             )
         )
         major_claim_id = "claim:candidate:U001|01:major:M01:major_code"
+        plan_count_claim_id = "claim:candidate:U001|01:plan_count"
         tuition_claim_id = "claim:candidate:U001|01:major:M01:tuition"
         strategy_claim_id = "claim:candidate:U001|01:strategy_tier"
         self.assertIn(
             major_claim_id,
+            completed.formal_result.report["claim_ids"],
+        )
+        self.assertIn(
+            plan_count_claim_id,
             completed.formal_result.report["claim_ids"],
         )
         self.assertIn(
@@ -189,15 +194,16 @@ class FormalReportLifecycleTests(RunLifecyclePostgresTest):
             strategy_claim_id,
             completed.formal_result.report["claim_ids"],
         )
-        self.assertIn(
-            "candidate:U001|01:plan_count=UNKNOWN",
+        self.assertEqual(
             completed.formal_result.report["unverified_facts"],
+            [],
         )
         claims = {
             claim["claim_id"]: claim
             for claim in completed.formal_result.verification_report["claims"]
         }
         self.assertEqual(claims[major_claim_id]["status"], "VERIFIED")
+        self.assertEqual(claims[plan_count_claim_id]["status"], "VERIFIED")
         self.assertEqual(claims[tuition_claim_id]["status"], "VERIFIED")
         self.assertEqual(claims[strategy_claim_id]["status"], "VERIFIED")
         self.assertIn("15860", completed.formal_result.report["sections"][0]["body"])
@@ -270,10 +276,76 @@ class FormalReportLifecycleTests(RunLifecyclePostgresTest):
         self.assertTrue(
             reply.formal_result.report.sections[1].citations
         )
-        self.assertIn(
-            "candidate:U001|01:plan_count=UNKNOWN",
-            reply.formal_result.report.unverified_facts,
+        self.assertEqual(
+            list(reply.formal_result.report.unverified_facts),
+            [],
         )
+
+    async def test_formal_report_blocks_when_plan_count_is_missing(self):
+        from app.run_lifecycle import (
+            ConfirmProfileAnswer,
+            ResumeRunCommand,
+            RunLifecycle,
+            StructuredProfileInput,
+            SubmitRunCommand,
+        )
+        from app.run_lifecycle.worker import RunLifecycleWorker
+
+        await self.seed_release()
+        lifecycle = RunLifecycle(
+            self.dsn,
+            auto_profile=True,
+            worker_owner="worker-plan-count-missing",
+            algo_client=FakeAlgoClient(plan_count=None),
+        )
+        self.addAsyncCleanup(lifecycle.close)
+        worker = RunLifecycleWorker(lifecycle, poll_interval=0.01)
+        await worker.start()
+        self.addAsyncCleanup(worker.stop)
+        submitted = await lifecycle.SubmitRun(
+            SubmitRunCommand(
+                principal_id="principal-plan-count",
+                session_id=None,
+                task_kind="GENERATE_PLAN",
+                input=StructuredProfileInput(
+                    province="湖南",
+                    application_year=2025,
+                    category="物理类",
+                    batch="本科批",
+                    score=600,
+                    subjects=("物理", "化学", "生物"),
+                ),
+                idempotency_key="formal-report-plan-count-submit",
+            )
+        )
+        waiting = await self._wait_for_interrupt(
+            lifecycle,
+            submitted.run_id,
+            principal_id="principal-plan-count",
+        )
+        await lifecycle.ResumeRun(
+            ResumeRunCommand(
+                principal_id="principal-plan-count",
+                run_id=submitted.run_id,
+                interrupt_id=waiting.current_interrupt.interrupt_id,
+                expected_state_version=waiting.state_version,
+                profile_version=UUID(
+                    waiting.current_interrupt.payload["profile_version"]
+                ),
+                answer=ConfirmProfileAnswer(),
+                idempotency_key="formal-report-plan-count-confirm",
+            )
+        )
+
+        completed = await self._wait_for_terminal(
+            lifecycle,
+            submitted.run_id,
+            principal_id="principal-plan-count",
+        )
+        self.assertEqual(completed.state, "FAILED")
+        self.assertEqual(completed.terminal_reason, "VALIDATION_FAILED")
+        self.assertIsNone(completed.result)
+        self.assertIsNone(completed.formal_result)
 
     async def test_formal_report_uses_the_confirmed_profile_scope(self):
         from app.run_lifecycle import (
@@ -988,10 +1060,16 @@ class FormalReportLifecycleTests(RunLifecyclePostgresTest):
         self.assertIsNone(completed.result)
         self.assertIsNone(completed.formal_result)
 
-    async def _wait_for_interrupt(self, lifecycle, run_id):
+    async def _wait_for_interrupt(
+        self,
+        lifecycle,
+        run_id,
+        *,
+        principal_id="principal-report",
+    ):
         for _ in range(300):
             view = await lifecycle.GetRun(
-                principal_id="principal-report",
+                principal_id=principal_id,
                 run_id=run_id,
             )
             if view.state == "WAITING_HITL" and view.current_interrupt is not None:
@@ -999,10 +1077,16 @@ class FormalReportLifecycleTests(RunLifecyclePostgresTest):
             await asyncio.sleep(0.01)
         self.fail("run did not expose a profile interrupt")
 
-    async def _wait_for_terminal(self, lifecycle, run_id):
+    async def _wait_for_terminal(
+        self,
+        lifecycle,
+        run_id,
+        *,
+        principal_id="principal-report",
+    ):
         for _ in range(300):
             view = await lifecycle.GetRun(
-                principal_id="principal-report",
+                principal_id=principal_id,
                 run_id=run_id,
             )
             if view.state in {

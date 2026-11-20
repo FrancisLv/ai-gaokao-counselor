@@ -59,6 +59,10 @@ class EndToEndCaseResult:
     run_id: str | None
     provider_cost_micro_usd: int
     first_diff: dict | None
+    claims: tuple[EndToEndClaim, ...] = ()
+    candidate_keys: tuple[str, ...] = ()
+    excluded_candidate_keys: tuple[str, ...] = ()
+    report_text: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +130,12 @@ def evaluate_end_to_end(
                 run_id=outcome.run_id,
                 provider_cost_micro_usd=outcome.provider_cost_micro_usd,
                 first_diff=first_diff,
+                claims=outcome.claims,
+                candidate_keys=outcome.candidate_keys,
+                excluded_candidate_keys=tuple(
+                    case["expected"]["excluded_candidate_keys"]
+                ),
+                report_text=outcome.report_text,
             )
         )
 
@@ -388,6 +398,9 @@ def build_eval_run(
                 "hit_at_5": case.hit_at_5,
                 "hit_at_20": case.hit_at_20,
                 "reciprocal_rank": case.reciprocal_rank,
+                "expected_chunk_ids": list(case.expected_chunk_ids),
+                "expected_doc_ids": list(case.expected_doc_ids),
+                "returned_evidence_count": len(case.actual_evidence),
                 "scope_leaks": list(case.scope_leaks),
                 "hard_negative_chunk_leaks": list(
                     case.hard_negative_chunk_leaks
@@ -400,6 +413,7 @@ def build_eval_run(
             asdict(case)
             for case in e2e_report.cases
         ],
+        "run_samples": [asdict(sample) for sample in run_samples],
     }
     return finalize_eval_run(payload)
 

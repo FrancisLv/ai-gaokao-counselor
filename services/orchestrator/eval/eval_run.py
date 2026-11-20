@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 from typing import Any
 
 import psycopg
@@ -209,6 +210,225 @@ def _validate_pass_payload(payload: dict[str, Any]) -> None:
         raise EvalRunIntegrityError("PASS EvalRun exceeded token budget")
     if metrics["session_cost_micro_usd_max"] > 150_000:
         raise EvalRunIntegrityError("PASS EvalRun exceeded cost budget")
+    recomputed = recompute_eval_metrics(payload)
+    comparable = (
+        "retrieval_recall_at_5",
+        "retrieval_recall_at_20",
+        "retrieval_mrr",
+        "retrieval_scope_leak_rate",
+        "factual_claim_count",
+        "claim_citation_coverage",
+        "claim_citation_accuracy",
+        "claim_contradiction_rate",
+        "claim_critical_unverifiable_rate",
+        "claim_hallucination_rate",
+        "illegal_candidate_leak_rate",
+        "run_sample_count",
+        "run_active_execution_p99_ms",
+        "run_active_execution_max_ms",
+        "session_token_count_max",
+        "session_cost_micro_usd_max",
+        "budget_violation_count",
+        "budget_reconciliation_pending_count",
+        "run_reproducibility_rate",
+    )
+    for metric in comparable:
+        if not _same_metric(metrics.get(metric), recomputed.get(metric)):
+            raise EvalRunIntegrityError(
+                f"PASS EvalRun metric does not match raw results: {metric}"
+            )
+
+
+def recompute_eval_metrics(payload: dict[str, Any]) -> dict[str, int | float]:
+    """从持久化原始结果重算发布门禁使用的汇总指标。"""
+    retrieval_results = payload.get("retrieval_results")
+    e2e_results = payload.get("e2e_results")
+    run_samples = payload.get("run_samples")
+    if not isinstance(retrieval_results, list):
+        raise EvalRunIntegrityError(
+            "PASS EvalRun requires retrieval_results"
+        )
+    if not isinstance(e2e_results, list):
+        raise EvalRunIntegrityError("PASS EvalRun requires e2e_results")
+    if not isinstance(run_samples, list):
+        raise EvalRunIntegrityError("PASS EvalRun requires run_samples")
+
+    eligible_retrieval = []
+    returned_retrieval = []
+    for result in retrieval_results:
+        if not isinstance(result, dict):
+            raise EvalRunIntegrityError(
+                "retrieval_results entries must be objects"
+            )
+        expected = bool(result.get("expected_chunk_ids")) or bool(
+            result.get("expected_doc_ids")
+        )
+        if expected and result.get("status") != "NO_EVIDENCE":
+            eligible_retrieval.append(result)
+        if (
+            isinstance(result.get("returned_evidence_count"), int)
+            and result["returned_evidence_count"] > 0
+        ):
+            returned_retrieval.append(result)
+    eligible_count = len(eligible_retrieval)
+    recall_at_5 = (
+        sum(int(bool(item.get("hit_at_5"))) for item in eligible_retrieval)
+        / eligible_count
+        if eligible_count
+        else 0.0
+    )
+    recall_at_20 = (
+        sum(int(bool(item.get("hit_at_20"))) for item in eligible_retrieval)
+        / eligible_count
+        if eligible_count
+        else 0.0
+    )
+    mrr = (
+        sum(float(item.get("reciprocal_rank") or 0.0) for item in eligible_retrieval)
+        / eligible_count
+        if eligible_count
+        else 0.0
+    )
+    scope_leak_rate = (
+        sum(int(bool(item.get("scope_leaks"))) for item in returned_retrieval)
+        / len(returned_retrieval)
+        if returned_retrieval
+        else 0.0
+    )
+
+    factual_claims = []
+    excluded_case_count = 0
+    illegal_candidate_leak_count = 0
+    for result in e2e_results:
+        if not isinstance(result, dict):
+            raise EvalRunIntegrityError("e2e_results entries must be objects")
+        claims = result.get("claims", ())
+        if not isinstance(claims, list):
+            raise EvalRunIntegrityError("e2e case claims must be an array")
+        for claim in claims:
+            if (
+                isinstance(claim, dict)
+                and claim.get("claim_type")
+                in {"DOCUMENT_FACT", "STRUCTURED_FACT", "DERIVED_FACT"}
+            ):
+                factual_claims.append(claim)
+        excluded = set(result.get("excluded_candidate_keys") or ())
+        if excluded:
+            excluded_case_count += 1
+            if excluded & set(result.get("candidate_keys") or ()):
+                illegal_candidate_leak_count += 1
+    factual_count = len(factual_claims)
+    with_evidence = [
+        claim for claim in factual_claims if claim.get("checked_against")
+    ]
+    verified = [
+        claim
+        for claim in with_evidence
+        if claim.get("status") == "VERIFIED"
+    ]
+    contradicted = [
+        claim
+        for claim in factual_claims
+        if claim.get("status") == "CONTRADICTED"
+    ]
+    unverifiable = [
+        claim
+        for claim in factual_claims
+        if claim.get("status") == "UNVERIFIABLE"
+    ]
+    critical = [
+        claim
+        for claim in factual_claims
+        if claim.get("criticality") == "CRITICAL"
+    ]
+    critical_unverifiable = [
+        claim
+        for claim in critical
+        if claim.get("status") == "UNVERIFIABLE"
+    ]
+
+    sample_durations = []
+    max_tokens = 0
+    max_cost = 0
+    budget_violations = 0
+    reconciliation_pending = 0
+    reproducible_count = 0
+    for sample in run_samples:
+        if not isinstance(sample, dict):
+            raise EvalRunIntegrityError("run_samples entries must be objects")
+        duration = sample.get("active_execution_ms")
+        if (
+            not isinstance(duration, int)
+            or isinstance(duration, bool)
+            or duration < 0
+        ):
+            raise EvalRunIntegrityError("run sample duration is invalid")
+        sample_durations.append(duration)
+        max_tokens = max(max_tokens, int(sample.get("provider_token_count") or 0))
+        max_cost = max(max_cost, int(sample.get("provider_cost_micro_usd") or 0))
+        budget_violations += int(sample.get("budget_violation_count") or 0)
+        reconciliation_pending += int(
+            bool(sample.get("reconciliation_pending"))
+        )
+        reproducible_count += int(bool(sample.get("reproducible")))
+    ordered = sorted(sample_durations)
+    p99 = (
+        ordered[max(1, math.ceil(0.99 * len(ordered))) - 1]
+        if ordered
+        else 0
+    )
+    return {
+        "retrieval_recall_at_5": recall_at_5,
+        "retrieval_recall_at_20": recall_at_20,
+        "retrieval_mrr": mrr,
+        "retrieval_scope_leak_rate": scope_leak_rate,
+        "factual_claim_count": factual_count,
+        "claim_citation_coverage": (
+            len(with_evidence) / factual_count if factual_count else 0.0
+        ),
+        "claim_citation_accuracy": (
+            len(verified) / len(with_evidence) if with_evidence else 0.0
+        ),
+        "claim_contradiction_rate": (
+            len(contradicted) / factual_count if factual_count else 0.0
+        ),
+        "claim_critical_unverifiable_rate": (
+            len(critical_unverifiable) / len(critical) if critical else 0.0
+        ),
+        "claim_hallucination_rate": (
+            (len(contradicted) + len(unverifiable)) / factual_count
+            if factual_count
+            else 0.0
+        ),
+        "illegal_candidate_leak_rate": (
+            illegal_candidate_leak_count / excluded_case_count
+            if excluded_case_count
+            else 0.0
+        ),
+        "run_sample_count": len(run_samples),
+        "run_active_execution_p99_ms": p99,
+        "run_active_execution_max_ms": (
+            max(sample_durations) if sample_durations else 0
+        ),
+        "session_token_count_max": max_tokens,
+        "session_cost_micro_usd_max": max_cost,
+        "budget_violation_count": budget_violations,
+        "budget_reconciliation_pending_count": reconciliation_pending,
+        "run_reproducibility_rate": (
+            reproducible_count / len(run_samples) if run_samples else 0.0
+        ),
+    }
+
+
+def _same_metric(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, (int, float)) and isinstance(expected, (int, float)):
+        return math.isclose(
+            float(actual),
+            float(expected),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    return actual == expected
 
 
 async def persist_eval_run(

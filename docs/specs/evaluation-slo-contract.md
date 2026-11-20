@@ -137,6 +137,8 @@ EvalRun
 ```
 
 同一 `eval_run_id` 的指标和原始结果不可变。
+PASS EvalRun 必须持久化 retrieval 逐例结果、E2E 最终 Claims/候选结果和 100+
+run samples；门禁从原始记录重算汇总指标，不能只信任提交的 metrics JSON。
 
 运行时把完成计算的 EvalRun 写入 insert-only `eval_run_record`；记录保存
 `eval_run_id`、`result_sha256`、dataset/release/code 身份和完整 payload，并由数据库
@@ -365,9 +367,12 @@ baseline_eval_run_id
 
 CI 不调用真实付费模型，不下载外部数据。
 
-聚合发布门禁通过 `make m5b-release-gate` 执行。该目标读取已持久化的 EvalRun、
-签字 EvalDataset 和四类安全证据文件；任何身份不一致、缺失证据或非 PASS EvalRun
-均以非零状态退出，不得由调用脚本把失败改写为通过。
+聚合发布门禁通过 `make m5b-release-gate` 执行。该目标只接受持久化
+`eval_run_id` 与当前发布候选 git SHA，从 PostgreSQL 加载 EvalRun 和原始
+retrieval/E2E/run samples 后重算汇总指标。四类安全测试在独立的
+`SECURITY_TEST_DSN` 中由服务端 runner 实际执行，结果先写入 insert-only
+attestation，再按 artifact identity 加载；不得从调用方 JSON 或内存 PASS 放行。
+任何身份不一致、缺失证据或非 PASS EvalRun 均以非零状态退出。
 
 ### 9.2 人工/定时评测
 

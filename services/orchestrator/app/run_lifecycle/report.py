@@ -590,20 +590,21 @@ def _algorithm_claims(
                 ),
                 algorithm_name="weighted_hit",
             )
-        if candidate.plan_count is not None:
-            add_derived(
-                operation_id=f"candidate:{identity}:plan_count",
-                subject=subject,
-                predicate="plan_count",
-                value=candidate.plan_count,
-                unit="人",
-                precision=0,
-                rendered_text=(
-                    f"{subject}招生计划数为 {candidate.plan_count} 人，"
-                    f"样本年份为 {years_text}。"
-                ),
-                algorithm_name="weighted_hit",
-            )
+        if candidate.plan_count is None:
+            raise ValueError("正式报告缺少招生计划数")
+        add_derived(
+            operation_id=f"candidate:{identity}:plan_count",
+            subject=subject,
+            predicate="plan_count",
+            value=candidate.plan_count,
+            unit="人",
+            precision=0,
+            rendered_text=(
+                f"{subject}招生计划数为 {candidate.plan_count} 人，"
+                f"样本年份为 {years_text}。"
+            ),
+            algorithm_name="weighted_hit",
+        )
         for major in candidate.majors:
             major_code = major.major_code
             if not major_code:
@@ -782,9 +783,7 @@ def _report_payload(
             for major in candidate.majors
         )
         if candidate.plan_count is None:
-            unverified_facts.append(
-                f"candidate:{identity}:plan_count=UNKNOWN"
-            )
+            raise ValueError("正式报告缺少招生计划数")
         candidate_sections.append(
             {
                 "section_key": f"candidate:{identity}",
@@ -800,8 +799,7 @@ def _report_payload(
                     f"专业：{majors or '见院校专业组'}。"
                     f"录取概率约 {probability * 100:.0f}%，"
                     f"策略分档：{candidate.strategy_tier}，"
-                    f"招生计划数："
-                    f"{candidate.plan_count if candidate.plan_count is not None else 'UNKNOWN'}，"
+                    f"招生计划数：{candidate.plan_count}，"
                     f"样本年份为 {sample_years}。"
                     "概率为历史估计，不构成录取保证。"
                 ),

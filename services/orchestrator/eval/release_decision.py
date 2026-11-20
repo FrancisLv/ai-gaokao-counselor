@@ -7,12 +7,13 @@ import json
 from typing import Any
 
 from eval.eval_dataset import JointEvalDataset
-from eval.eval_run import EvalRunRecord, verify_eval_run
+from eval.eval_run import EvalRunRecord, load_eval_run, verify_eval_run
 from eval.release_models import (
     ReleaseGateDecision,
     ReleaseGateReport,
     SecurityGateEvidence,
 )
+from eval.security_evidence import load_security_gate_evidence
 
 
 _REQUIRED_SECURITY_GATE_IDS = (
@@ -39,7 +40,53 @@ _CRITICAL_THRESHOLDS = {
 }
 
 
-def evaluate_m5b_release_gate(
+class ReleaseGateAuthorityError(ValueError):
+    """权威 EvalRun 或安全 attestation 的身份不满足发布要求。"""
+
+
+async def evaluate_m5b_release_gate(
+    *,
+    dsn: str,
+    dataset: JointEvalDataset,
+    eval_run_id: str,
+    security_artifact_ids: tuple[str, ...],
+    expected_git_sha: str,
+) -> ReleaseGateDecision:
+    """只从 PostgreSQL 权威记录构造发布结论。"""
+    eval_run = await load_eval_run(dsn, eval_run_id)
+    if eval_run.git_sha != expected_git_sha:
+        raise ReleaseGateAuthorityError(
+            "EvalRun git_sha does not match the release candidate"
+        )
+    security_evidence = await load_security_gate_evidence(
+        dsn,
+        security_artifact_ids,
+    )
+    if len(security_evidence) != len(_REQUIRED_SECURITY_GATE_IDS):
+        raise ReleaseGateAuthorityError(
+            "exactly one record per security gate is required"
+        )
+    for evidence in security_evidence:
+        if (
+            evidence.eval_run_id != eval_run.eval_run_id
+            or evidence.dataset_version
+            != dataset.manifest.get("dataset_version")
+            or evidence.dataset_sha256
+            != dataset.manifest.get("dataset_sha256")
+            or evidence.release_id != dataset.manifest.get("release_id")
+            or evidence.git_sha != expected_git_sha
+        ):
+            raise ReleaseGateAuthorityError(
+                "security evidence identity does not match the EvalRun"
+            )
+    return _evaluate_authoritative_records(
+        dataset=dataset,
+        eval_run=eval_run,
+        security_evidence=security_evidence,
+    )
+
+
+def _evaluate_authoritative_records(
     *,
     dataset: JointEvalDataset,
     eval_run: EvalRunRecord,

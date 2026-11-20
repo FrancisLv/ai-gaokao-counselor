@@ -45,6 +45,14 @@ class SecurityGateEvidence:
     baseline: Any = None
     failed_case_ids: tuple[str, ...] = ()
     resource_types: tuple[str, ...] = ()
+    artifact_id: str = ""
+    artifact_sha256: str = ""
+    eval_run_id: str = ""
+    dataset_version: str = ""
+    dataset_sha256: str = ""
+    release_id: str = ""
+    git_sha: str = ""
+    suite: str = ""
 
 
 @dataclass(frozen=True, slots=True)

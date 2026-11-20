@@ -9,10 +9,9 @@ def _quality_report(*, gate_status="PASS", failed_metrics=(), metrics=None):
     from eval.release_gate import ReleaseGateReport
 
     metric_values = {
-        "retrieval_recall_at_5": 0.9,
-        "retrieval_mrr": 0.8,
-        "retrieval_scope_leak_rate": 0.0,
-        "retrieval_mrr": 0.8,
+        "retrieval_recall_at_5": 1.0,
+        "retrieval_recall_at_20": 1.0,
+        "retrieval_mrr": 1.0,
         "retrieval_scope_leak_rate": 0.0,
         "factual_claim_count": 10,
         "claim_citation_coverage": 1.0,
@@ -71,7 +70,7 @@ def _dataset(owner_status="SIGNED_OFF"):
 
 def _evaluate(dataset, quality_report, security_evidence, *, identity=None):
     from eval.eval_run import EvalRunRecord, finalize_eval_run
-    from eval.release_gate import evaluate_m5b_release_gate
+    from eval.release_gate import _evaluate_authoritative_records
 
     identity = {
         "git_sha": "b" * 40,
@@ -81,6 +80,51 @@ def _evaluate(dataset, quality_report, security_evidence, *, identity=None):
         "model_route_version": "route-v1",
         **(identity or {}),
     }
+    metrics = quality_report.metrics
+    claims = []
+    contradiction_count = round(metrics["claim_contradiction_rate"] * 10)
+    unverifiable_count = max(
+        contradiction_count,
+        round(metrics["claim_hallucination_rate"] * 10),
+    )
+    for index in range(10):
+        status = (
+            "CONTRADICTED"
+            if index < contradiction_count
+            else "UNVERIFIABLE"
+            if index < unverifiable_count
+            else "VERIFIED"
+        )
+        claims.append(
+            {
+                "claim_id": f"claim-{index}",
+                "claim_type": "DERIVED_FACT",
+                "criticality": "CRITICAL",
+                "status": status,
+                "checked_against": [f"evidence-{index}"],
+            }
+        )
+    hit_count = round(metrics["retrieval_recall_at_5"] * 10)
+    run_samples = [
+        {
+            "run_id": f"run-{index}",
+            "session_id": "session-1",
+            "release_id": dataset.manifest["release_id"],
+            "active_execution_ms": int(
+                metrics["run_active_execution_p99_ms"]
+            ),
+            "provider_token_count": int(metrics["session_token_count_max"]),
+            "provider_cost_micro_usd": int(
+                metrics["session_cost_micro_usd_max"]
+            ),
+            "budget_violation_count": int(
+                metrics["budget_violation_count"]
+            ),
+            "reconciliation_pending": False,
+            "reproducible": True,
+        }
+        for index in range(100)
+    ]
     payload = finalize_eval_run(
         {
             "schema_version": "eval-run-v1",
@@ -111,6 +155,37 @@ def _evaluate(dataset, quality_report, security_evidence, *, identity=None):
             "failed_metrics": list(quality_report.failed_metrics),
             "failed_case_ids": [],
             "failure_details": list(quality_report.failure_details),
+            "retrieval_results": [
+                {
+                    "case_id": f"retrieval-{index}",
+                    "status": "FOUND",
+                    "hit_at_5": index < hit_count,
+                    "hit_at_20": index < hit_count,
+                    "reciprocal_rank": 1.0 if index < hit_count else 0.0,
+                    "expected_chunk_ids": [f"chunk-{index}"],
+                    "expected_doc_ids": [f"doc-{index}"],
+                    "returned_evidence_count": 1,
+                    "scope_leaks": [],
+                }
+                for index in range(10)
+            ],
+            "e2e_results": [
+                {
+                    "case_id": "e2e-1",
+                    "terminal_status": "SUCCEEDED",
+                    "result_kind": "V1_FORMAL",
+                    "result_version": "result-1",
+                    "run_id": "run-1",
+                    "provider_cost_micro_usd": 100,
+                    "report_text": "report",
+                    "candidate_keys": ["candidate-1"],
+                    "excluded_candidate_keys": [],
+                    "claims": claims,
+                    "passed": True,
+                    "first_diff": None,
+                }
+            ],
+            "run_samples": run_samples,
         }
     )
     record = EvalRunRecord(
@@ -123,7 +198,7 @@ def _evaluate(dataset, quality_report, security_evidence, *, identity=None):
         gate_status=quality_report.gate_status,
         payload=payload,
     )
-    return evaluate_m5b_release_gate(
+    return _evaluate_authoritative_records(
         dataset=dataset,
         eval_run=record,
         security_evidence=security_evidence,
@@ -132,7 +207,7 @@ def _evaluate(dataset, quality_report, security_evidence, *, identity=None):
 
 class M5bReleaseGateTests(unittest.TestCase):
     def test_all_quality_fact_and_security_gates_produce_a_publishable_decision(self):
-        from eval.release_gate import evaluate_m5b_release_gate
+        from eval.release_gate import _evaluate_authoritative_records
 
         dataset = _dataset()
         decision = _evaluate(
@@ -163,7 +238,7 @@ class M5bReleaseGateTests(unittest.TestCase):
             self.assertIn("baseline", gate)
 
     def test_budget_failure_blocks_release_without_misreporting_fact_failure(self):
-        from eval.release_gate import evaluate_m5b_release_gate
+        from eval.release_gate import _evaluate_authoritative_records
 
         dataset = _dataset()
         decision = _evaluate(
@@ -188,7 +263,7 @@ class M5bReleaseGateTests(unittest.TestCase):
         self.assertEqual(critical["status"], "PASS")
 
     def test_final_fact_contradiction_blocks_even_when_quality_gate_claims_pass(self):
-        from eval.release_gate import evaluate_m5b_release_gate
+        from eval.release_gate import _evaluate_authoritative_records
 
         dataset = _dataset()
         decision = _evaluate(
@@ -216,7 +291,7 @@ class M5bReleaseGateTests(unittest.TestCase):
     def test_duplicate_security_gate_evidence_fails_closed(self):
         from eval.release_gate import (
             SecurityGateEvidence,
-            evaluate_m5b_release_gate,
+            _evaluate_authoritative_records,
         )
 
         dataset = _dataset()
@@ -244,7 +319,7 @@ class M5bReleaseGateTests(unittest.TestCase):
         )
 
     def test_each_security_failure_blocks_release_and_preserves_context(self):
-        from eval.release_gate import evaluate_m5b_release_gate
+        from eval.release_gate import _evaluate_authoritative_records
 
         dataset = _dataset()
         for gate_id in ("CONSENT", "DELETION", "RETENTION", "RESTORE"):
@@ -289,7 +364,7 @@ class M5bReleaseGateTests(unittest.TestCase):
                 self.assertEqual(detail["resource_types"], ["PROFILE"])
 
     def test_missing_security_evidence_fails_closed(self):
-        from eval.release_gate import evaluate_m5b_release_gate
+        from eval.release_gate import _evaluate_authoritative_records
 
         dataset = _dataset()
         decision = _evaluate(
@@ -312,7 +387,7 @@ class M5bReleaseGateTests(unittest.TestCase):
     def test_unexpected_security_evidence_fails_closed(self):
         from eval.release_gate import (
             SecurityGateEvidence,
-            evaluate_m5b_release_gate,
+            _evaluate_authoritative_records,
         )
 
         dataset = _dataset()
@@ -337,7 +412,7 @@ class M5bReleaseGateTests(unittest.TestCase):
         )
 
     def test_pending_signoff_blocks_quality_gate_without_claiming_fact_failure(self):
-        from eval.release_gate import evaluate_m5b_release_gate
+        from eval.release_gate import _evaluate_authoritative_records
 
         dataset = _dataset("PENDING_SIGNOFF")
         decision = _evaluate(
@@ -360,7 +435,7 @@ class M5bReleaseGateTests(unittest.TestCase):
 
     def test_tampered_eval_run_content_cannot_supply_a_publishable_pass(self):
         from eval.eval_run import EvalRunRecord
-        from eval.release_gate import evaluate_m5b_release_gate
+        from eval.release_gate import _evaluate_authoritative_records
 
         dataset = _dataset()
         record = EvalRunRecord(
@@ -396,7 +471,7 @@ class M5bReleaseGateTests(unittest.TestCase):
             },
         )
 
-        decision = evaluate_m5b_release_gate(
+        decision = _evaluate_authoritative_records(
             dataset=dataset,
             eval_run=record,
             security_evidence=_passing_security_evidence(),
@@ -406,7 +481,7 @@ class M5bReleaseGateTests(unittest.TestCase):
         self.assertIn("eval_run_integrity", decision.failed_metrics)
 
     def test_reordered_security_evidence_keeps_a_stable_artifact_identity(self):
-        from eval.release_gate import evaluate_m5b_release_gate
+        from eval.release_gate import _evaluate_authoritative_records
 
         dataset = _dataset()
         identity = {

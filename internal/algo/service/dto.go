@@ -95,6 +95,10 @@ func toPbCandidate(c biz.Candidate) *algov1.Candidate {
 		NumDoctor:      i32(c.NumDoctor),
 		RuankeRank:     i32(c.RuankeRank),
 	}
+	if c.PlanCountKnown {
+		planCount := i32(c.PlanCount)
+		pb.PlanCount = &planCount
+	}
 	if len(c.Majors) > 0 {
 		pb.Majors = make([]*algov1.MajorDetail, 0, len(c.Majors))
 		for _, m := range c.Majors {
@@ -129,6 +133,10 @@ func fromPbCandidate(c *algov1.Candidate) biz.Candidate {
 		NumMaster:      toInt(c.GetNumMaster()),
 		NumDoctor:      toInt(c.GetNumDoctor()),
 		RuankeRank:     toInt(c.GetRuankeRank()),
+	}
+	if c.PlanCount != nil {
+		bc.PlanCount = toInt(c.GetPlanCount())
+		bc.PlanCountKnown = true
 	}
 	if ms := c.GetMajors(); len(ms) > 0 {
 		bc.Majors = make([]biz.MajorDetail, 0, len(ms))

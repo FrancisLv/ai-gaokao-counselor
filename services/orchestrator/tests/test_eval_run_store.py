@@ -6,7 +6,17 @@ import psycopg
 from run_lifecycle_support import RunLifecyclePostgresTest
 
 
-def _payload(*, gate_status="PASS", metric=0.9):
+def _payload(*, gate_status="PASS", metric=1.0):
+    claims = [
+        {
+            "claim_id": f"claim-{index}",
+            "claim_type": "DERIVED_FACT",
+            "criticality": "CRITICAL",
+            "status": "VERIFIED",
+            "checked_against": [f"evidence-{index}"],
+        }
+        for index in range(10)
+    ]
     return {
         "schema_version": "eval-run-v1",
         "generated_at": "2026-11-20T00:00:00+00:00",
@@ -20,7 +30,8 @@ def _payload(*, gate_status="PASS", metric=0.9):
         "baseline_eval_run_id": "eval_baseline",
         "metrics": {
             "retrieval_recall_at_5": metric,
-            "retrieval_mrr": 0.8,
+            "retrieval_recall_at_20": metric,
+            "retrieval_mrr": metric,
             "retrieval_scope_leak_rate": 0.0,
             "factual_claim_count": 10,
             "claim_citation_coverage": 1.0,
@@ -50,6 +61,49 @@ def _payload(*, gate_status="PASS", metric=0.9):
         },
         "failed_metrics": [],
         "failure_details": [],
+        "retrieval_results": [
+            {
+                "case_id": "retrieval-1",
+                "status": "FOUND",
+                "hit_at_5": True,
+                "hit_at_20": True,
+                "reciprocal_rank": 1.0,
+                "expected_chunk_ids": ["chunk-1"],
+                "expected_doc_ids": ["doc-1"],
+                "returned_evidence_count": 1,
+                "scope_leaks": [],
+            }
+        ],
+        "e2e_results": [
+            {
+                "case_id": "e2e-1",
+                "terminal_status": "SUCCEEDED",
+                "result_kind": "V1_FORMAL",
+                "result_version": "result-1",
+                "run_id": "run-1",
+                "provider_cost_micro_usd": 100,
+                "report_text": "report",
+                "candidate_keys": ["candidate-1"],
+                "excluded_candidate_keys": [],
+                "claims": claims,
+                "passed": True,
+                "first_diff": None,
+            }
+        ],
+        "run_samples": [
+            {
+                "run_id": f"run-{index}",
+                "session_id": "session-1",
+                "release_id": "rel-v1",
+                "active_execution_ms": 1000,
+                "provider_token_count": 100,
+                "provider_cost_micro_usd": 100,
+                "budget_violation_count": 0,
+                "reconciliation_pending": False,
+                "reproducible": True,
+            }
+            for index in range(100)
+        ],
     }
 
 
@@ -96,3 +150,21 @@ class EvalRunStoreTests(RunLifecyclePostgresTest):
                 self.dsn,
                 {**changed, "result_sha256": created.result_sha256},
             )
+
+    async def test_pass_summary_must_match_persisted_raw_results(self):
+        from eval.eval_run import EvalRunIntegrityError, persist_eval_run
+
+        payload = _payload()
+        payload["retrieval_results"][0]["hit_at_5"] = False
+
+        with self.assertRaises(EvalRunIntegrityError):
+            await persist_eval_run(self.dsn, payload)
+
+    async def test_pass_requires_persisted_raw_results(self):
+        from eval.eval_run import EvalRunIntegrityError, persist_eval_run
+
+        payload = _payload()
+        payload.pop("retrieval_results")
+
+        with self.assertRaises(EvalRunIntegrityError):
+            await persist_eval_run(self.dsn, payload)

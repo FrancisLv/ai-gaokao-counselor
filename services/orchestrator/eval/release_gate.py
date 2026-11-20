@@ -5,10 +5,12 @@ import math
 
 from eval.e2e_eval import EndToEndEvaluationReport
 from eval.eval_dataset import JointEvalDataset
-from eval.release_decision import evaluate_m5b_release_gate
+from eval.release_decision import (
+    _evaluate_authoritative_records,
+    evaluate_m5b_release_gate,
+)
 from eval.release_models import (
     PerformanceContext,
-    ReleaseGateDecision,
     ReleaseGateReport,
     RunSloSample,
     SecurityGateEvidence,
@@ -33,9 +35,6 @@ _SESSION_TOKEN_COUNT_MAX = 50_000
 _SESSION_COST_MICRO_USD_MAX = 150_000
 _BUDGET_VIOLATION_COUNT_MAX = 0
 _RUN_REPRODUCIBILITY_RATE_MIN = 1.0
-
-
-M5bReleaseGateDecision = ReleaseGateDecision
 
 
 def evaluate_release_gate(

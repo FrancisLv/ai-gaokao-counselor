@@ -2821,11 +2821,18 @@ Francis 对 EvalDataset 的签字，也不关闭或改写父 issue。
 - 聚合门禁改为消费 `EvalRunRecord`，逐项核对 payload hash、dataset version/hash、
   release、EvalRun gate 与 `SIGNED_OFF` 状态；临时构造的 PASS 或篡改 payload
   fail closed。
-- 新增 `make m5b-release-gate` 和可执行 CLI，从 PostgreSQL 权威 EvalRun、签字
-  EvalDataset 与安全证据文件执行门禁；非 PASS 退出码为 2。
+- 新增 `make m5b-release-gate` 和可执行 CLI，只接受 PostgreSQL 权威
+  `eval_run_id` 与当前候选 git SHA；调用方可变 JSON、内存 PASS 和
+  `--eval-run-file` 路径已删除。EvalRun 必须持久化原始 retrieval/E2E/run
+  samples，门禁重算关键汇总指标后才能放行。
+- 四类安全测试在独立 `SECURITY_TEST_DSN` 中由服务端 runner 实际执行，结果写入
+  insert-only `release_gate_security_record` 并按 artifact ID 加载；记录绑定
+  EvalRun、dataset、release 与 git SHA。调用方自填 `passed=true` JSON 不再是
+  有效证据。
 - 正式报告先从算法 wishlist 规范化为 `ReportCandidate/ReportMajor`，再生成候选、
-  分档、专业代码与学费 Claims。section 返回同 release 的 EvidenceRef
-  citations；当前数据无当前招生计划数时在 `unverified_facts` 明确标为 UNKNOWN。
+  分档、专业代码、学费与招生计划数 Claims。Candidate additive 新增可选
+  `plan_count`；缺失计划数时正式发布失败关闭，不能在 `unverified_facts` 中标记
+  UNKNOWN 后继续发布。section 返回同 release 的 EvidenceRef citations。
 - 将删除与保留共用的正式结果链/官方 checkpoint 清理抽到数据生命周期资源模块；
   principal cleaner 与删除状态机拆分。聚合 decision 与质量 metrics 拆分为独立模块。
 - Evaluation/SLO 与 Security/Retention runtime contract 从“待确认”更新为已确认。
@@ -2833,6 +2840,6 @@ Francis 对 EvalDataset 的签字，也不关闭或改写父 issue。
 ### 验证
 
 - EvalRun 持久化/重放/数据库不可变、门禁篡改与未签字阻断、CLI 非零退出均有测试。
-- 正式报告主 seam 校验 citations、专业学费 Claim、策略分档 Claim、字段级 additive
-  Proto 与 UNKNOWN 计划数。
+- 正式报告主 seam 校验 citations、专业学费 Claim、策略分档 Claim、计划数 Claim
+  与缺失计划数的失败关闭；字段级 additive Proto 保持旧编号与语义。
 - 删除、保留、恢复测试在共享清理重构后继续通过。
