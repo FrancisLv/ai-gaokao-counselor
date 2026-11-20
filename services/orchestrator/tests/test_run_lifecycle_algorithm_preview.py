@@ -1,4 +1,4 @@
-"""Ticket #5：确认画像后的四 RPC 与 ALGORITHM_PREVIEW。"""
+"""Ticket #5/#41：确认画像后的四 RPC 与确定性 V1_FORMAL 报告。"""
 from __future__ import annotations
 
 import asyncio
@@ -153,7 +153,7 @@ class WireFakeAlgoService(algo_pb2_grpc.AlgoServicer):
 
 
 class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
-    async def test_confirmed_profile_publishes_nonempty_preview_from_four_algo_calls(self):
+    async def test_confirmed_profile_publishes_nonempty_formal_report_from_four_algo_calls(self):
         from app.run_lifecycle import (
             ConfirmProfileAnswer,
             ResumeRunCommand,
@@ -210,37 +210,33 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
         completed = await self._wait_for(lifecycle, submitted.run_id, "result")
 
         self.assertEqual(completed.state, "SUCCEEDED")
-        self.assertEqual(completed.result.result_kind, "ALGORITHM_PREVIEW")
-        preview = completed.result_payload
-        self.assertEqual(preview["result_kind"], "ALGORITHM_PREVIEW")
-        self.assertEqual(preview["release_id"], release_id)
+        self.assertEqual(completed.result.result_kind, "V1_FORMAL")
+        formal = completed.formal_result
+        report = formal.report
+        self.assertEqual(report["report_version"], "m5b-report-v1")
+        self.assertEqual(report["generation_mode"], "DETERMINISTIC")
+        self.assertEqual(formal.release_id, release_id)
         self.assertEqual(
-            preview["confirmed_profile_version"],
+            str(formal.confirmed_profile_version),
             str(completed.confirmed_profile_version),
         )
-        self.assertEqual(preview["rank"], 15860)
-        self.assertEqual(preview["percentile"], 0.1234)
-        self.assertEqual(preview["stable_candidates"][0]["candidate"]["university_code"], "U001")
+        sections = {
+            section["section_key"]: section
+            for section in report["sections"]
+        }
+        self.assertIn("15860", sections["plan"]["body"])
+        self.assertIn("测试大学", sections["candidate:U001|01"]["body"])
+        self.assertIn("67%", sections["candidate:U001|01"]["body"])
+        self.assertIn(
+            "U001|01=PASS",
+            sections["qualification"]["body"],
+        )
+        self.assertEqual(formal.verification_report["status"], "PASS")
         self.assertEqual(
-            preview["stable_candidates"][0]["prob"]["probability"],
-            0.67,
+            formal.verification_report["citation_coverage"],
+            1.0,
         )
-        self.assertEqual(preview["audit_basis"]["user_rank"], 15860)
-        self.assertEqual(preview["wishlist"]["candidates"][0]["final_rank"], 1)
-        self.assertFalse(preview["formal_recommendation"])
-        self.assertIn("不得作为正式志愿方案", preview["disclaimer"])
-        self.assertNotIn("保证录取", preview["risk_notice"] + preview["disclaimer"])
-
-        unverified = {item["code"] for item in preview["unverified_conditions"]}
-        self.assertTrue(
-            {
-                "ONLINE_RAG_EVIDENCE",
-                "LLM_GATEWAY",
-                "STRATEGY",
-                "CRITIC",
-                "FORMAL_REPORT",
-            }.issubset(unverified)
-        )
+        self.assertIn("不保证录取", formal.no_admission_guarantee)
         conn = await self._connect()
         try:
             artifact = await (
@@ -331,8 +327,8 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
             await events.aclose()
 
         self.assertEqual(
-            result_event.payload["preview"],
-            completed.result_payload,
+            result_event.payload["formal_result"]["report"],
+            report,
         )
         self.assertEqual(
             result_event.payload["result_version"],
@@ -650,7 +646,7 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
         self.assertIsNone(failed.result)
         self.assertIsNone(failed.result_payload)
 
-    async def test_generated_grpc_algo_client_drives_the_preview_seam(self):
+    async def test_generated_grpc_algo_client_drives_the_formal_report_seam(self):
         from app.run_lifecycle import (
             ConfirmProfileAnswer,
             ResumeRunCommand,
@@ -730,17 +726,21 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
             {release_id},
         )
         self.assertEqual(
-            completed.result_payload["stable_candidates"][0]["candidate"][
-                "university_code"
-            ],
-            "U001",
+            completed.result.result_kind,
+            "V1_FORMAL",
         )
+        candidate_section = next(
+            section
+            for section in completed.formal_result.report["sections"]
+            if section["section_key"] == "candidate:U001|01"
+        )
+        self.assertIn("U001", candidate_section["body"])
 
     @unittest.skipUnless(
         os.getenv("ORCHESTRATOR_ALGO_ADDR"),
         "ORCHESTRATOR_ALGO_ADDR 未设置",
     )
-    async def test_real_svc_algo_contract_drives_the_preview_seam(self):
+    async def test_real_svc_algo_contract_drives_the_formal_report_seam(self):
         from app.run_lifecycle import (
             ConfirmProfileAnswer,
             ResumeRunCommand,
@@ -803,13 +803,13 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
         )
 
         self.assertEqual(completed.state, "SUCCEEDED")
-        self.assertEqual(completed.result_payload["release_id"], release_id)
-        self.assertTrue(
-            completed.result_payload["rush_candidates"]
-            or completed.result_payload["stable_candidates"]
-            or completed.result_payload["safe_candidates"]
+        self.assertEqual(completed.result.result_kind, "V1_FORMAL")
+        self.assertEqual(completed.formal_result.release_id, release_id)
+        self.assertTrue(completed.formal_result.report["sections"])
+        self.assertEqual(
+            completed.formal_result.verification_report["status"],
+            "PASS",
         )
-        self.assertTrue(completed.result_payload["wishlist"]["candidates"])
 
     async def _wait_for(self, lifecycle, run_id, target: str, *, attempts: int = 300):
         for _ in range(attempts):

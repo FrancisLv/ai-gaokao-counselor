@@ -373,7 +373,7 @@ class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
             await channel.close()
             await server.stop(grace=None)
 
-    async def test_grpc_result_event_and_get_run_share_the_algorithm_preview(self):
+    async def test_grpc_result_event_and_get_run_share_the_formal_report(self):
         from app.run_lifecycle import RunLifecycle
         from app.run_lifecycle.worker import RunLifecycleWorker
         from app.server import OrchestratorServicer
@@ -429,7 +429,7 @@ class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
             ),
             metadata=metadata,
         )
-        view = await self._wait_for_grpc_preview(client, receipt.run_id, metadata)
+        view = await self._wait_for_grpc_formal(client, receipt.run_id, metadata)
         events = client.WatchRun(
             pb.WatchRunRequest(run_id=receipt.run_id, after_event_seq=0),
             metadata=metadata,
@@ -444,26 +444,20 @@ class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
             events.cancel()
 
         self.assertEqual(view.state, pb.SUCCEEDED)
-        self.assertEqual(view.result.result_kind, "ALGORITHM_PREVIEW")
-        self.assertEqual(view.result_preview.result_kind, "ALGORITHM_PREVIEW")
-        self.assertTrue(view.result_preview.internal_controlled_only)
-        self.assertFalse(view.result_preview.formal_recommendation)
+        self.assertEqual(view.result.result_kind, "V1_FORMAL")
+        self.assertEqual(view.formal_result.verification_status, "PASS")
         self.assertEqual(
-            view.result_preview.stable_candidates[0].candidate.university_code,
-            "U001",
+            view.formal_result.report.report_version,
+            "m5b-report-v1",
         )
-        self.assertEqual(
-            view.result_preview.eligibility.evidence_bundle_id,
-            "eligibility:test",
-        )
-        self.assertTrue(
-            view.result_preview.eligibility_gate.formal_eligibility_ready
-        )
-        self.assertEqual(
-            list(view.result_preview.eligibility_gate.eligible_group_keys),
-            ["U001|01"],
-        )
-        self.assertEqual(result_event.result, view.result_preview)
+        candidate_sections = [
+            section
+            for section in view.formal_result.report.sections
+            if section.section_key == "candidate:U001|01"
+        ]
+        self.assertEqual(len(candidate_sections), 1)
+        self.assertIn("U001", candidate_sections[0].body)
+        self.assertEqual(result_event.formal_result, view.formal_result)
 
     async def test_grpc_error_event_has_a_typed_stable_reason(self):
         from app.run_lifecycle import RunLifecycle
@@ -572,7 +566,7 @@ class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
             await asyncio.sleep(0.01)
         self.fail("gRPC run 未确认画像")
 
-    async def _wait_for_grpc_preview(self, client, run_id, metadata):
+    async def _wait_for_grpc_formal(self, client, run_id, metadata):
         import asyncio
 
         for _ in range(300):
@@ -580,7 +574,7 @@ class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
                 pb.GetRunRequest(run_id=run_id),
                 metadata=metadata,
             )
-            if view.HasField("result_preview"):
+            if view.HasField("formal_result"):
                 return view
             await asyncio.sleep(0.01)
-        self.fail("gRPC run 未发布 algorithm preview")
+        self.fail("gRPC run 未发布 V1_FORMAL 正式报告")

@@ -2429,3 +2429,45 @@ RunLifecycle，不接真实付费 provider。
 - 真实 provider、账单 adapter、真实付费模型与 orchestrator 入口仍未接线；生产
   fail closed。fake provider 只证明治理 seam 行为，不证明供应商实际 usage 或账单。
 - 流式 `DELTA` 仍是最终守卫后的完整内容块，不宣称供应商 token 实时转发。
+
+## 69. M5b-01 确定性正式报告与自动 V1_FORMAL 发布
+
+**日期与范围**：2026-11-20，issue #41。把确认画像后的 worker 成功路径从
+`ALGORITHM_PREVIEW` 升级为确定性正式报告与 `V1_FORMAL` 自动发布；不接报告
+LLM、不新增 golden set/EvalRun，不改检索器、资格规则或第二业务场景。
+
+### 行为与实现
+
+- 新增内部确定性报告构造器：从不可变算法预览、权威资格 artifact 和
+  `applicable_as_of` 生成候选身份、最终排名、概率、位次、样本年份和资格状态
+  Claims。算法事实使用同 release 的 `DERIVED` EvidenceRef；必需说明使用
+  release-bound `STRUCTURED` EvidenceRef。系统当前日期不参与事实规范化。
+- worker 在画像确认并完成四个算法 RPC 后，构造 `EvidencePackage`，调用既有
+  `VerifyPackage`，再通过 `PublishFormalResult` 原子发布结果、已剥离证据包、
+  完整验证报告、ACTIVE 状态和 RESULT 事件。调用方与测试仍只从
+  `SubmitRun → ResumeRun → GetRun` 观察成功或失败。
+- 正式结果 payload 新增版本化 `m5b-report-v1` 报告：方案概况、逐候选说明、
+  资格核验和风险提示。Orchestrator proto 以新字段加法返回同一报告；
+  Python/GetRun/Watch/gRPC 读取共享同一内容。
+- 缺失样本年份、非法报告输入、非完整资格覆盖、UNKNOWN/FAIL 组、缺失必需说明、
+  证据类型/版本不一致均 fail closed。释放已提交但报告构造失败时进入
+  `FAILED / VALIDATION_FAILED`，不暴露正式结果。
+- 正式发布事务补充主动执行额度复核，避免算法调用耗尽 10 分钟后仍发布；
+  WAITING_HITL 仍不计入主动执行时间。
+
+### 验证
+
+- 新增主 seam 测试覆盖确定性报告成功、RESULT/GetRun/gRPC 同内容、必需说明原文、
+  证据覆盖率 100%、报告输入缺失稳定失败。
+- 现有算法、资格、租约、取消、正式证据、迁移与传输测试升级为正式报告语义；
+  `ORCHESTRATOR_TEST_DSN=...` 下全部 `test_run*.py` 通过。
+- `make py-check py-test`、`make build check test` 通过；proto 通过统一
+  `make api` 生成，未手改生成物。
+
+### 边界与风险
+
+- 本票只提供确定性叙事；受 schema 约束的 LLM 报告叙事、剥离/降级策略留给 #42。
+- 文档证据与结构化招生数据的真实覆盖仍依赖既有检索/规则发布链路；本票没有把
+  算法派生事实伪装为文档事实。
+- `ALGORITHM_PREVIEW` 标识与存储能力为兼容保留，但已确认画像的正常成功路径现在
+  发布 `V1_FORMAL`；需要预览的独立产品入口不在本票范围。

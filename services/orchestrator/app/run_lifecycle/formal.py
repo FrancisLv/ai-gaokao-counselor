@@ -24,6 +24,7 @@ class PublishFormalResultCommand:
     expected_state_version: int
     expected_lease_epoch: int
     package: EvidencePackage
+    report: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +50,7 @@ class FormalResultView:
     evidence_package_sha256: str
     verification_report_sha256: str
     verification_report: dict[str, Any]
+    report: dict[str, Any]
     risk_notice: str
     disclaimer: str
     no_admission_guarantee: str

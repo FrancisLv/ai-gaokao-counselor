@@ -165,6 +165,7 @@ class FormalResultPayload(TypedDict):
     evidence_package_sha256: str
     verification_report_sha256: str
     verification_report: dict[str, Any]
+    report: dict[str, Any]
     risk_notice: str
     disclaimer: str
     no_admission_guarantee: str

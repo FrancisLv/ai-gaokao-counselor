@@ -326,6 +326,20 @@ message FormalResultSummary {
   string disclaimer = 14;
   string risk_notice = 15;
   string no_admission_guarantee = 16;
+  FormalReport report = 17;
+}
+
+message FormalReportSection {
+  string section_key = 1;
+  string title = 2;
+  string body = 3;
+}
+
+message FormalReport {
+  string report_version = 1;
+  string generation_mode = 2;
+  repeated FormalReportSection sections = 3;
+  repeated string claim_ids = 4;
 }
 
 message RunViewReply {
