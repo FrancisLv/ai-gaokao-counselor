@@ -1,7 +1,8 @@
 # svc-llm-gateway 启动约束
 #
-# route / model allowlist / price table 均从 release 绑定的 PostgreSQL
-# 治理记录读取，不在此文件覆盖。LLMGW_DSN 由运行环境注入。
+# route / model allowlist / price table / prompt template / response schema
+# 均从 release 绑定的 PostgreSQL 治理记录读取，不在此文件覆盖。
+# LLMGW_DSN 由运行环境注入。
 server:
   grpc:
     addr: 0.0.0.0:9001
