@@ -2639,6 +2639,18 @@ func TestChatRequiresDataClassAllowedByRoute(t *testing.T) {
 		if _, err := client.Chat(trustedChatContext(fixture.principal), req); err != nil {
 			t.Fatalf("route 允许的 data class %s 被拒绝: %v", className, err)
 		}
+		var storedClass string
+		if err := fixture.pool.QueryRow(context.Background(), `
+			SELECT data_classification
+			FROM llm_logical_call
+			WHERE logical_call_id = $1`,
+			req.LogicalCallId,
+		).Scan(&storedClass); err != nil {
+			t.Fatalf("读取 logical call data class: %v", err)
+		}
+		if storedClass != className {
+			t.Fatalf("stored data class = %q, want %q", storedClass, className)
+		}
 	}
 	if calls := provider.callsSnapshot(); len(calls) != len(safeClasses) {
 		t.Fatalf("provider calls = %d, want %d", len(calls), len(safeClasses))
@@ -2759,6 +2771,15 @@ func TestChatRejectsUnknownTypedDataClassBeforeProvider(t *testing.T) {
 	assertStableError(t, err, codes.InvalidArgument, llmgw.ReasonRequestInvalid)
 	if calls := provider.callsSnapshot(); len(calls) != 0 {
 		t.Fatalf("未知 data class 触发 provider %d 次", len(calls))
+	}
+
+	conflicting := fixture.chatRequest("logical-conflicting-data-class")
+	conflicting.DataClassification = "PUBLIC_DATA"
+	conflicting.DataClass = llmgwv1.DataClassification_SECRET
+	_, err = client.Chat(trustedChatContext(fixture.principal), conflicting)
+	assertStableError(t, err, codes.InvalidArgument, llmgw.ReasonRequestInvalid)
+	if calls := provider.callsSnapshot(); len(calls) != 0 {
+		t.Fatalf("冲突 data class 触发 provider %d 次", len(calls))
 	}
 }
 
