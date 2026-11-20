@@ -2552,3 +2552,37 @@ adapter；不实现保留清理（#47）或备份恢复重放（#48），不新�
   与投影重建仍须在 #48 验证。
 - 确认签发与重新认证服务不在本票范围；控制面通过
   `DeletionConfirmationAuthority` 注入，生产未接线时不能放行删除。
+
+## 72. M5b-08 备份恢复重放删除
+
+**日期与范围**：2026-11-20，issue #48。实现备份恢复的删除安全控制面
+adapter；不实现 #47 的保留策略，也不新增报告或评测 seam。
+
+### 行为与安全边界
+
+- 新增全局恢复闸门。恢复开始时先把状态写为 `RESTORING`，RunLifecycle 的私有
+  读取返回 `RESTORE_IN_PROGRESS`；只有删除 ledger/tombstone 重放完成后才改为
+  `OPEN`。
+- 恢复先重置 Redis 等可重建投影，再按 tombstone 找到备份中的原 principal，
+  标记 `DELETION_PENDING`，复用既有删除 cleaner 清理 Profile、run、event、
+  checkpoint、result、evidence 和缓存关联，最后标记 `DELETED`。
+- 删除 request 或成功资源 ledger 缺失时恢复失败并保持全局关闭；不会为了恢复
+  成功而放宽删除门禁。恢复重放按 `restore_id + principal_ref` 幂等记录，
+  重复调用不重复处理同一删除。
+- 恢复审计只保存 restore id、principal 不可逆引用、删除 request id、结果和稳定
+  错误码；演练不复制完整 prompt、健康原文或被删正文。
+
+### 验证
+
+- 测试覆盖恢复过程中 GetRun 返回 `RESTORE_IN_PROGRESS`、恢复后已删除 principal
+  返回 `PRINCIPAL_DELETED`、正式结果/证据包/报告被清理、公开 release 保留。
+- 覆盖可重建投影重置、同一 restore_id 幂等重放、cleaner 失败时保持关闭并在
+  同一 restore_id 重试成功后开放。
+- 迁移 `39_backup_restore_deletion_replay.sql` 只增恢复闸门与重放审计对象。
+
+### 边界与风险
+
+- 实际 PostgreSQL 备份工具、RTO 编排和 Redis 客户端不在仓库内；本票通过可注入
+  projection adapter 与真实 PostgreSQL 验证恢复顺序和安全不变量。
+- tombstone 与删除 ledger 必须来自独立于旧备份的可靠副本；若副本缺失，恢复
+  fail closed，不能猜测哪些主体已删除。

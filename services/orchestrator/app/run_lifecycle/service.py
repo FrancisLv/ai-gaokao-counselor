@@ -419,6 +419,17 @@ class RunLifecycle:
         conn: psycopg.AsyncConnection,
         principal_id: str,
     ) -> None:
+        restore = await (
+            await conn.execute(
+                """
+                SELECT status
+                FROM data_lifecycle_restore_state
+                WHERE restore_key = 'SERVICE'
+                """
+            )
+        ).fetchone()
+        if restore is not None and restore["status"] != "OPEN":
+            raise RunLifecycleError("RESTORE_IN_PROGRESS")
         row = await (
             await conn.execute(
                 """

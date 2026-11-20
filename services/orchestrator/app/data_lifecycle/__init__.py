@@ -8,6 +8,12 @@ from app.data_lifecycle.deletion import (
     PrincipalDataDeletion,
     PrincipalDataDeletionError,
 )
+from app.data_lifecycle.restore import (
+    PrincipalDataRestore,
+    RestoreBackupCommand,
+    RestoreBackupReceipt,
+    RestoreProjection,
+)
 
 __all__ = [
     "DeletePrincipalDataCommand",
@@ -16,4 +22,8 @@ __all__ = [
     "PrincipalDataCleaner",
     "PrincipalDataDeletion",
     "PrincipalDataDeletionError",
+    "PrincipalDataRestore",
+    "RestoreBackupCommand",
+    "RestoreBackupReceipt",
+    "RestoreProjection",
 ]
