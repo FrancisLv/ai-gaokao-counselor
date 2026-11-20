@@ -3038,21 +3038,24 @@ func TestConcurrentCacheMissInvokesProviderOnce(t *testing.T) {
 		attemptCount int
 		waiterCalls  int
 		cacheStatus  string
+		claimLeaseMS int64
 	)
 	if err := fixture.pool.QueryRow(context.Background(), `
 		SELECT (SELECT count(*) FROM llm_logical_call),
 		       (SELECT count(*) FROM llm_provider_attempt),
 		       (SELECT count(*) FROM llm_logical_call
 		        WHERE logical_call_id = 'logical-cache-concurrent-waiter'),
-		       (SELECT status FROM llm_result_cache)`,
-	).Scan(&logicalCount, &attemptCount, &waiterCalls, &cacheStatus); err != nil {
+		       (SELECT status FROM llm_result_cache),
+		       (SELECT EXTRACT(EPOCH FROM claim_expires_at - claim_started_at) * 1000
+		        FROM llm_result_cache)`,
+	).Scan(&logicalCount, &attemptCount, &waiterCalls, &cacheStatus, &claimLeaseMS); err != nil {
 		t.Fatalf("读取并发 cache 账本: %v", err)
 	}
 	if logicalCount != 2 || attemptCount != 1 || waiterCalls != 0 ||
-		cacheStatus != "READY" {
+		cacheStatus != "READY" || claimLeaseMS < 34_000 {
 		t.Fatalf(
-			"并发 cache 账本 = logical %d attempts %d waiter %d status %q",
-			logicalCount, attemptCount, waiterCalls, cacheStatus,
+			"并发 cache 账本 = logical %d attempts %d waiter %d status %q lease_ms %d",
+			logicalCount, attemptCount, waiterCalls, cacheStatus, claimLeaseMS,
 		)
 	}
 }

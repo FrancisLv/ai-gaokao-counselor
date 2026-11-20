@@ -166,11 +166,11 @@ func buildResultCacheIdentity(
 func (s *Service) claimResultCache(
 	ctx context.Context,
 	identity *resultCacheIdentity,
-	timeoutMS int32,
+	claimLease time.Duration,
 ) (*resultCacheClaim, *resultCacheEntry, error) {
 	claimToken := s.newID()
 	now := s.now()
-	claimExpiresAt := now.Add(time.Duration(timeoutMS)*time.Millisecond + 30*time.Second)
+	claimExpiresAt := now.Add(claimLease)
 	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO llm_result_cache (
 			cache_key_hash, cache_schema_version, release_id, role,

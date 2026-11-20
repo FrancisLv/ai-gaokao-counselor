@@ -235,7 +235,10 @@ func (s *Service) Chat(ctx context.Context, req *llmgwv1.ChatRequest) (*llmgwv1.
 		}
 		cacheKeyHash = identity.keyHash
 		var cached *resultCacheEntry
-		cacheClaim, cached, err = s.claimResultCache(ctx, identity, route.timeoutMS)
+		cacheClaimLease := time.Duration(route.timeoutMS)*
+			time.Duration(effectiveAttemptLimit(route))*time.Millisecond +
+			30*time.Second
+		cacheClaim, cached, err = s.claimResultCache(ctx, identity, cacheClaimLease)
 		if err != nil {
 			return nil, err
 		}

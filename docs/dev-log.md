@@ -2298,8 +2298,9 @@ usage 缺失/不可信与可能已受理断连语义，以及不新增公共 RPC
   `llm-result-cache-v1`。只有 route 显式允许、`temperature=0` 且
   `PUBLIC_DATA` 时才创建 claim。
 - 首次 miss 用 `cache_key_hash` 唯一约束和 claim token 抢占；同键并发请求在 holder
-  未完成时返回 `CALL_IN_PROGRESS`，provider 仍只调用一次。过期 claim 可由后续请求
-  接管，失败/schema 不通过的 claim 进入 `FAILED`，后续安全重试可重新填充。
+  未完成时返回 `CALL_IN_PROGRESS`，provider 仍只调用一次。claim 租约覆盖 route
+  允许的全部 attempt，避免双 attempt 接近完整超时后错误接管；过期 claim 可由后续
+  请求接管，失败/schema 不通过的 claim 进入 `FAILED`，后续安全重试可重新填充。
 - 成功结果会在 schema 与敏感输出守卫之后写入 `READY`。缓存命中另建
   `SUCCEEDED` logical call，`cache_hit=true`、
   `settlement_status=CACHE_HIT`，不创建 provider attempt、不增加预算 settled/

@@ -296,7 +296,8 @@ prompt_template_key + prompt_template_version
   schema 摘要与规范化 messages 的 SHA-256；
 - `llm_result_cache` 以 `cache_key_hash` 唯一，记录 release、key hash、治理身份、
   `IN_PROGRESS / READY / FAILED / INVALIDATED` 与失效依据；首次 miss 用数据库
-  唯一 claim 抢占，同键并发请求不得触发第二个 provider；
+  唯一 claim 抢占，claim 租约覆盖 route 允许的全部 provider attempt；同键并发
+  请求不得触发第二个 provider；
 - 缓存命中另建 `SUCCEEDED` logical call，`cache_hit=true`、
   `settlement_status=CACHE_HIT`，零预算预占、零 provider attempt、零 token/cost；
   同 `logical_call_id` 完成态仍是幂等重放，保持原 attempt 与首次 usage/cost；
