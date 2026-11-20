@@ -308,6 +308,26 @@ P99 输入要求：
 P99 使用 nearest-rank 计算。active execution 任一 run 超过 600000ms 直接失败；P99
 相对同 dataset baseline 增加超过 10% 同样失败。
 
+### 7.4 M5b 聚合发布结论
+
+M5b 发布结论是质量/SLO/预算与安全证据的唯一聚合结果，至少包含六类 gate：
+
+```text
+QUALITY_SLO_BUDGET | CRITICAL_FACTS | CONSENT | DELETION | RETENTION | RESTORE
+```
+
+- `QUALITY_SLO_BUDGET` 消费签字 EvalDataset 上的检索、报告事实、可复现性、P99、
+  token、成本、预算违规与待对账结论；
+- `CRITICAL_FACTS` 只检查最终保留 Claims 与最终报告 case gate，不因预算或 P99
+  失败而误报事实错误；
+- `CONSENT`、`DELETION`、`RETENTION`、`RESTORE` 每类必须恰好有一条已通过证据，
+  缺失、重复或未知 gate 均 fail closed；
+- 任一绝对安全或关键事实失败都使发布结论为 `FAIL`，不能用更高 recall、更低成本
+  或更快 P99 抵消；
+- 聚合结果保存 release、dataset version/hash、git SHA、每项 gate 的
+  actual/threshold/baseline、failed metrics/case IDs、失败资源类型和稳定
+  artifact hash；输入证据重排不得改变 artifact identity。
+
 ## 8. 基线比较
 
 ```text

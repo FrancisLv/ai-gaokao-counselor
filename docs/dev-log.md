@@ -2771,3 +2771,40 @@ case runner、最终 Claims 指标与不可变 EvalRun；不实现 #44 的质量
   JSON payload，持久化/发布聚合由 #49 决定。
 - 实际生产性能环境、数据库数据量和并发信息由调用方显式提供，不得用单次热库
   耗时猜测。
+
+## 77. M5b-09 关键事实与删除安全聚合发布门禁
+
+**日期与范围**：2026-11-20，issue #49。把质量/SLO/预算、最终事实、consent、
+删除、保留和备份恢复证据聚合为一个稳定发布结论；不新增业务执行 seam，不替代
+Francis 对 EvalDataset 的签字，也不关闭或改写父 issue。
+
+### 行为与实现
+
+- `eval.release_gate` 新增 `SecurityGateEvidence`、`M5bReleaseGateDecision` 与
+  `evaluate_m5b_release_gate`。发布结论固定包含 `QUALITY_SLO_BUDGET`、
+  `CRITICAL_FACTS`、`CONSENT`、`DELETION`、`RETENTION`、`RESTORE` 六类 gate。
+- `QUALITY_SLO_BUDGET` 直接消费既有签字数据、质量回归、P99、token/成本、预算违规
+  与待对账门禁；`CRITICAL_FACTS` 独立检查最终保留 Claims 与最终 report case gate，
+  因此预算或性能失败不会把事实错误归因到错误 metric。
+- 四类安全 gate 必须各有一条证据。缺失、重复或未知 gate 均 fail closed；任何失败
+  都阻断发布，不能用更高 recall、更低成本或更快 P99 抵消。
+- 聚合 artifact 保存 release、dataset version/hash、git SHA、每项 gate 的
+  actual/threshold/baseline、failed metrics/case IDs、失败资源类型与稳定
+  `artifact_sha256`。安全证据重排不会改变 artifact identity。
+- `PENDING_SIGNOFF`、fixture、缺失 100+ P99 样本或跨 dataset baseline 由既有质量
+  gate 失败关闭；本票只汇总，不伪造签字或正式 PASS。
+
+### 验证
+
+- 新增聚合门禁测试覆盖全部六类 gate 成功、预算失败不误报事实失败、最终事实矛盾
+  独立阻断、四类安全 gate 分别失败、安全证据缺失/重复/未知、PENDING_SIGNOFF，
+  以及安全证据重排后的 artifact hash 稳定。
+- 失败明细逐项包含 actual/threshold/baseline；安全失败保留 failed case IDs 与
+  resource types，顶层保留 release/dataset/git 身份。
+
+### 边界与风险
+
+- 当前联合 EvalDataset 仍是 `PENDING_SIGNOFF`；聚合门禁实现可以验收，但不能据此
+  宣称正式质量通过。Francis 签字后仍需在固定环境产生真实检索 baseline、真实
+  provider 结果和 100+ 样本性能 EvalRun。
+- 本票只提供可复现的聚合判定与 artifact，不实现新的运营面板或自动签字流程。

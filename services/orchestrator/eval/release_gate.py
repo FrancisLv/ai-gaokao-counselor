@@ -1,8 +1,12 @@
 """签字 golden set、SLO 与预算的发布门禁。"""
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from dataclasses import dataclass
+import hashlib
+import json
 import math
+from typing import Any
 
 from eval.e2e_eval import EndToEndEvaluationReport
 from eval.eval_dataset import JointEvalDataset
@@ -57,6 +61,326 @@ class ReleaseGateReport:
     failed_metrics: tuple[str, ...]
     metrics: dict[str, float | int | str]
     failure_details: tuple[dict, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SecurityGateEvidence:
+    gate_id: str
+    passed: bool
+    actual: Any
+    threshold: Any
+    baseline: Any = None
+    failed_case_ids: tuple[str, ...] = ()
+    resource_types: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class M5bReleaseGateDecision:
+    schema_version: str
+    gate_status: str
+    failed_gates: tuple[str, ...]
+    failed_metrics: tuple[str, ...]
+    failed_case_ids: tuple[str, ...]
+    release_id: str
+    dataset_version: str
+    dataset_sha256: str
+    git_sha: str
+    gates: tuple[dict[str, Any], ...]
+    failure_details: tuple[dict[str, Any], ...]
+    artifact_sha256: str
+
+
+_REQUIRED_SECURITY_GATE_IDS = (
+    "CONSENT",
+    "DELETION",
+    "RETENTION",
+    "RESTORE",
+)
+
+
+def evaluate_m5b_release_gate(
+    *,
+    dataset: JointEvalDataset,
+    quality_report: ReleaseGateReport,
+    run_identity: dict,
+    failed_case_ids: tuple[str, ...],
+    security_evidence: tuple[SecurityGateEvidence, ...],
+) -> M5bReleaseGateDecision:
+    """聚合质量、最终事实和安全证据，任何失败均不可被其他指标抵消。"""
+    evidence_by_gate: dict[str, list[SecurityGateEvidence]] = defaultdict(list)
+    for evidence in security_evidence:
+        evidence_by_gate[evidence.gate_id].append(evidence)
+    gate_counts = Counter(evidence.gate_id for evidence in security_evidence)
+    critical_metric_names = (
+        "factual_claim_count",
+        "claim_citation_coverage",
+        "claim_citation_accuracy",
+        "claim_contradiction_rate",
+        "claim_critical_unverifiable_rate",
+        "claim_hallucination_rate",
+    )
+    critical_actual = {
+        metric: quality_report.metrics.get(metric)
+        for metric in critical_metric_names
+    }
+    critical_thresholds = {
+        "factual_claim_count": 1,
+        "claim_citation_coverage": _CITATION_COVERAGE_MIN,
+        "claim_citation_accuracy": _CITATION_ACCURACY_MIN,
+        "claim_contradiction_rate": _CONTRADICTION_RATE_MAX,
+        "claim_critical_unverifiable_rate": (
+            _CRITICAL_UNVERIFIABLE_RATE_MAX
+        ),
+        "claim_hallucination_rate": _HALLUCINATION_RATE_MAX,
+    }
+    critical_failed_metrics_list = []
+    for metric in critical_metric_names:
+        actual = critical_actual[metric]
+        threshold = critical_thresholds[metric]
+        failed = metric in quality_report.failed_metrics
+        if metric == "factual_claim_count":
+            failed = (
+                failed
+                or isinstance(actual, bool)
+                or not isinstance(actual, int)
+                or actual < 1
+            )
+        elif isinstance(actual, bool) or not isinstance(
+            actual,
+            (int, float),
+        ):
+            failed = True
+        elif metric in {
+            "claim_citation_coverage",
+            "claim_citation_accuracy",
+        }:
+            failed = failed or actual < threshold
+        else:
+            failed = failed or actual > threshold
+        if failed:
+            critical_failed_metrics_list.append(metric)
+    critical_failed_metrics = tuple(critical_failed_metrics_list)
+    critical_gate_passed = (
+        not critical_failed_metrics
+        and "e2e_case_gate" not in quality_report.failed_metrics
+        and "e2e_quality_evidence" not in quality_report.failed_metrics
+    )
+    quality_passed = quality_report.gate_status == "PASS"
+    quality_gate = {
+        "gate_id": "QUALITY_SLO_BUDGET",
+        "status": "PASS" if quality_passed else "FAIL",
+        "actual": quality_report.metrics,
+        "threshold": {
+            "recall_at_5_min": _RECALL_AT_5_MIN,
+            "mrr_min": _MRR_MIN,
+            "scope_leak_rate_max": _SCOPE_LEAK_RATE_MAX,
+            "p99_sample_count_min": _P99_SAMPLE_COUNT_MIN,
+            "active_execution_max_ms": _ACTIVE_EXECUTION_MAX_MS,
+            "p99_regression_max_ratio": _P99_REGRESSION_MAX_RATIO,
+            "session_token_count_max": _SESSION_TOKEN_COUNT_MAX,
+            "session_cost_micro_usd_max": (
+                _SESSION_COST_MICRO_USD_MAX
+            ),
+            "budget_violation_count_max": (
+                _BUDGET_VIOLATION_COUNT_MAX
+            ),
+        },
+        "baseline": {
+            "eval_run_id": run_identity.get("baseline_eval_run_id")
+        },
+        "failed_metrics": list(quality_report.failed_metrics),
+    }
+    critical_gate = {
+        "gate_id": "CRITICAL_FACTS",
+        "status": "PASS" if critical_gate_passed else "FAIL",
+        "actual": critical_actual,
+        "threshold": critical_thresholds,
+        "baseline": {
+            "eval_run_id": run_identity.get("baseline_eval_run_id")
+        },
+        "failed_metrics": list(critical_failed_metrics),
+    }
+    security_gates = []
+    failed_gates = []
+    failed_metrics = list(quality_report.failed_metrics)
+    all_failed_case_ids = set(failed_case_ids)
+    failure_details = list(quality_report.failure_details)
+    if not quality_passed:
+        failed_gates.append("QUALITY_SLO_BUDGET")
+    if not critical_gate_passed:
+        failed_gates.append("CRITICAL_FACTS")
+        for metric in critical_failed_metrics:
+            if metric not in failed_metrics:
+                failed_metrics.append(metric)
+            failure_details.append(
+                {
+                    "metric": metric,
+                    "actual": critical_actual[metric],
+                    "threshold": critical_thresholds[metric],
+                    "baseline": {
+                        "eval_run_id": run_identity.get(
+                            "baseline_eval_run_id"
+                        )
+                    },
+                    "failed_case_ids": sorted(set(failed_case_ids)),
+                    "resource_types": [],
+                }
+            )
+    for gate_id in _REQUIRED_SECURITY_GATE_IDS:
+        gate_evidence = evidence_by_gate.get(gate_id, [])
+        if len(gate_evidence) > 1:
+            duplicate_metric = f"security_gate_duplicate:{gate_id}"
+            failed_gates.append(gate_id)
+            failed_metrics.append(duplicate_metric)
+            duplicate_cases = tuple(
+                sorted(
+                    {
+                        case_id
+                        for evidence in gate_evidence
+                        for case_id in evidence.failed_case_ids
+                    }
+                )
+            )
+            duplicate_resources = tuple(
+                sorted(
+                    {
+                        resource
+                        for evidence in gate_evidence
+                        for resource in evidence.resource_types
+                    }
+                )
+            )
+            all_failed_case_ids.update(duplicate_cases)
+            failure_details.append(
+                {
+                    "metric": duplicate_metric,
+                    "actual": [
+                        evidence.actual for evidence in gate_evidence
+                    ],
+                    "threshold": "exactly one evidence record",
+                    "baseline": [
+                        evidence.baseline for evidence in gate_evidence
+                    ],
+                    "failed_case_ids": list(duplicate_cases),
+                    "resource_types": list(duplicate_resources),
+                }
+            )
+            security_gates.append(
+                {
+                    "gate_id": gate_id,
+                    "status": "FAIL",
+                    "actual": [
+                        evidence.actual for evidence in gate_evidence
+                    ],
+                    "threshold": "exactly one evidence record",
+                    "baseline": [
+                        evidence.baseline for evidence in gate_evidence
+                    ],
+                    "failed_case_ids": list(duplicate_cases),
+                    "resource_types": list(duplicate_resources),
+                }
+            )
+            continue
+        if not gate_evidence:
+            failed_gates.append(gate_id)
+            failed_metrics.append(f"security_gate_missing:{gate_id}")
+            security_gates.append(
+                {
+                    "gate_id": gate_id,
+                    "status": "FAIL",
+                    "actual": "MISSING",
+                    "threshold": "required",
+                    "baseline": {
+                        "eval_run_id": run_identity.get(
+                            "baseline_eval_run_id"
+                        )
+                    },
+                    "failed_case_ids": [],
+                    "resource_types": [],
+                }
+            )
+            continue
+        evidence = gate_evidence[0]
+        all_failed_case_ids.update(evidence.failed_case_ids)
+        if not evidence.passed:
+            failed_gates.append(gate_id)
+            failed_metrics.append(f"security_gate:{gate_id}")
+            failure_details.append(
+                {
+                    "metric": f"security_gate:{gate_id}",
+                    "actual": evidence.actual,
+                    "threshold": evidence.threshold,
+                    "baseline": evidence.baseline,
+                    "failed_case_ids": list(evidence.failed_case_ids),
+                    "resource_types": list(evidence.resource_types),
+                }
+            )
+        security_gates.append(
+            {
+                "gate_id": gate_id,
+                "status": "PASS" if evidence.passed else "FAIL",
+                "actual": evidence.actual,
+                "threshold": evidence.threshold,
+                "baseline": evidence.baseline,
+                "failed_case_ids": list(evidence.failed_case_ids),
+                "resource_types": list(evidence.resource_types),
+            }
+        )
+    for gate_id in sorted(set(gate_counts) - set(_REQUIRED_SECURITY_GATE_IDS)):
+        failed_gates.append(f"UNKNOWN:{gate_id}")
+        failed_metrics.append(f"security_gate_unknown:{gate_id}")
+        failure_details.append(
+            {
+                "metric": f"security_gate_unknown:{gate_id}",
+                "actual": [
+                    evidence.actual for evidence in evidence_by_gate[gate_id]
+                ],
+                "threshold": "one of required security gates",
+                "baseline": None,
+                "failed_case_ids": [],
+                "resource_types": [],
+            }
+        )
+    gates = (quality_gate, critical_gate, *security_gates)
+    payload = {
+        "schema_version": "m5b-release-gate-v1",
+        "gate_status": "FAIL" if failed_gates else "PASS",
+        "failed_gates": sorted(set(failed_gates)),
+        "failed_metrics": sorted(set(failed_metrics)),
+        "failed_case_ids": sorted(all_failed_case_ids),
+        "release_id": dataset.manifest["release_id"],
+        "dataset_version": dataset.manifest["dataset_version"],
+        "dataset_sha256": dataset.manifest["dataset_sha256"],
+        "git_sha": run_identity["git_sha"],
+        "gates": list(gates),
+        "failure_details": sorted(
+            failure_details,
+            key=lambda item: (
+                str(item.get("metric") or item.get("gate_id") or ""),
+                str(item.get("baseline_eval_run_id") or ""),
+            ),
+        ),
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return M5bReleaseGateDecision(
+        schema_version=payload["schema_version"],
+        gate_status=payload["gate_status"],
+        failed_gates=tuple(payload["failed_gates"]),
+        failed_metrics=tuple(payload["failed_metrics"]),
+        failed_case_ids=tuple(payload["failed_case_ids"]),
+        release_id=payload["release_id"],
+        dataset_version=payload["dataset_version"],
+        dataset_sha256=payload["dataset_sha256"],
+        git_sha=payload["git_sha"],
+        gates=tuple(payload["gates"]),
+        failure_details=tuple(payload["failure_details"]),
+        artifact_sha256=hashlib.sha256(canonical).hexdigest(),
+    )
 
 
 def evaluate_release_gate(
