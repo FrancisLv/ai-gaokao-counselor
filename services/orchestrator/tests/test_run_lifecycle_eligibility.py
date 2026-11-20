@@ -237,24 +237,25 @@ class EligibilityRunLifecycleTests(RunLifecyclePostgresTest):
             [item.candidate.university_code for item in algo.calls[3][1].candidates],
             ["U001"],
         )
-        preview = completed.result_payload
-        self.assertEqual(preview["eligibility"]["status"], 1)
-        self.assertTrue(preview["eligibility_gate"]["formal_eligibility_ready"])
+        self.assertEqual(completed.result.result_kind, "V1_FORMAL")
         self.assertEqual(
-            preview["eligibility_gate"]["eligible_group_keys"],
-            ["U001|01"],
+            completed.formal_result.verification_report["status"],
+            "PASS",
         )
-        self.assertFalse(preview["formal_recommendation"])
-        self.assertEqual(
-            preview["wishlist"]["candidates"][0]["cwp"]["prob"]["probability"],
-            0.67,
+        qualification = next(
+            section
+            for section in completed.formal_result.report["sections"]
+            if section["section_key"] == "qualification"
         )
-        self.assertNotIn(
-            "FULL_ELIGIBILITY_RULES",
-            {item["code"] for item in preview["unverified_conditions"]},
+        self.assertIn("U001|01=PASS", qualification["body"])
+        candidate = next(
+            section
+            for section in completed.formal_result.report["sections"]
+            if section["section_key"] == "candidate:U001|01"
         )
+        self.assertIn("67%", candidate["body"])
 
-    async def test_non_full_coverage_cannot_be_formal_even_if_reply_is_complete(self):
+    async def test_non_full_coverage_blocks_the_formal_report(self):
         source = _candidate("U001")
         reply = algo_pb2.EvaluateEligibilityReply(
             status=algo_pb2.EligibilityResultStatus.ELIGIBILITY_RESULT_STATUS_COMPLETE,
@@ -287,12 +288,10 @@ class EligibilityRunLifecycleTests(RunLifecyclePostgresTest):
 
         _, _, _, completed = await self._run_preview(algo, "coverage-gap")
 
-        self.assertEqual(completed.state, "SUCCEEDED", completed.terminal_reason)
-        self.assertFalse(
-            completed.result_payload["eligibility_gate"][
-                "formal_eligibility_ready"
-            ]
-        )
+        self.assertEqual(completed.state, "FAILED")
+        self.assertEqual(completed.terminal_reason, "VALIDATION_FAILED")
+        self.assertIsNone(completed.result)
+        self.assertIsNone(completed.formal_result)
 
     async def test_current_plan_membership_comes_from_algorithm_candidate(self):
         source = _candidate("U001", in_current_plan=False)
@@ -360,24 +359,14 @@ class EligibilityRunLifecycleTests(RunLifecyclePostgresTest):
 
         _, _, _, completed = await self._run_preview(algo, "partial")
 
-        self.assertEqual(completed.state, "SUCCEEDED", completed.terminal_reason)
+        self.assertEqual(completed.state, "FAILED")
+        self.assertEqual(completed.terminal_reason, "VALIDATION_FAILED")
         self.assertEqual(
             [item.candidate.university_code for item in algo.calls[3][1].candidates],
             ["U001"],
         )
-        preview = completed.result_payload
-        self.assertEqual(preview["eligibility"]["status"], 2)
-        self.assertFalse(preview["eligibility_gate"]["formal_eligibility_ready"])
-        self.assertEqual(
-            preview["eligibility_gate"]["eligible_group_keys"],
-            ["U001|01"],
-        )
-        self.assertEqual(
-            preview["eligibility_gate"]["unknown_group_keys"],
-            ["U002|01"],
-        )
-        self.assertNotIn("U002|01", preview["eligibility_gate"]["eligible_group_keys"])
-        self.assertFalse(preview["formal_recommendation"])
+        self.assertIsNone(completed.result)
+        self.assertIsNone(completed.formal_result)
 
     async def test_pass_partial_group_remains_eligible_with_restricted_majors(self):
         source = _candidate("U001", major_codes=("M01", "M02"))
@@ -414,13 +403,16 @@ class EligibilityRunLifecycleTests(RunLifecyclePostgresTest):
 
         self.assertEqual(completed.state, "SUCCEEDED", completed.terminal_reason)
         self.assertEqual(len(algo.calls[3][1].candidates), 1)
-        gate = completed.result_payload["eligibility_gate"]
-        self.assertTrue(gate["formal_eligibility_ready"])
-        self.assertEqual(gate["eligible_group_keys"], ["U001|01"])
-        self.assertEqual(gate["restricted_group_keys"], ["U001|01"])
+        self.assertEqual(completed.result.result_kind, "V1_FORMAL")
+        qualification = next(
+            section
+            for section in completed.formal_result.report["sections"]
+            if section["section_key"] == "qualification"
+        )
+        self.assertIn("U001|01=PASS_PARTIAL", qualification["body"])
         self.assertEqual(
-            completed.result_payload["eligibility"]["groups"][0]["status"],
-            2,
+            completed.formal_result.verification_report["status"],
+            "PASS",
         )
 
     async def test_blocked_eligibility_release_is_terminal_and_never_optimized(self):

@@ -55,6 +55,7 @@ from app.run_lifecycle.models import (
 )
 from app.run_lifecycle.profile import ProfileRuntime, build_profile_fields
 from app.run_lifecycle.profile_graph import build_profile_graph
+from app.run_lifecycle.report import build_formal_report
 from evidence import (
     DerivedEvidenceRecomputer,
     EntailmentVerifier,
@@ -65,6 +66,7 @@ from evidence import (
     QualificationSummary,
     StructuredEvidenceAuthority,
     VerificationReport,
+    VerificationScope,
     VerifyPackage,
 )
 from evidence.canonical import sha256_payload
@@ -332,6 +334,7 @@ class RunLifecycle:
                     evidence_package_sha256=row["package_sha256"],
                     verification_report_sha256=row["report_sha256"],
                     verification_report=row["verification_report"],
+                    report=(row["result_payload"] or {}).get("report", {}),
                     risk_notice=(row["result_payload"] or {}).get(
                         "risk_notice",
                         "",
@@ -584,6 +587,7 @@ class RunLifecycle:
             "evidence_package_sha256": package_sha256,
             "verification_report_sha256": report_sha256,
             "verification_report": report_payload,
+            "report": command.report or {},
             "risk_notice": notice_texts["RISK_NOTICE"],
             "disclaimer": notice_texts["DISCLAIMER"],
             "no_admission_guarantee": notice_texts[
@@ -601,7 +605,9 @@ class RunLifecycle:
                         """
                         SELECT run_id, session_id, state, stage, state_version,
                                release_id, confirmed_profile_version,
-                               lease_owner, lease_epoch, cancel_requested_at
+                               lease_owner, lease_epoch, cancel_requested_at,
+                               active_execution_remaining_ms,
+                               active_execution_started_at
                         FROM run
                         WHERE run_id = %s AND principal_id = %s
                         FOR UPDATE
@@ -611,6 +617,24 @@ class RunLifecycle:
                 ).fetchone()
                 if run is None:
                     raise RunLifecycleError("RUN_NOT_FOUND")
+                remaining = run["active_execution_remaining_ms"]
+                if run["active_execution_started_at"] is not None:
+                    remaining = max(
+                        0,
+                        remaining
+                        - int(
+                            (
+                                self._clock()
+                                - run["active_execution_started_at"]
+                            ).total_seconds()
+                            * 1000
+                        ),
+                    )
+                if remaining <= 0:
+                    raise RunLifecycleError(
+                        "EXECUTION_TIMEOUT",
+                        "主动执行额度在正式发布前耗尽",
+                    )
 
                 concurrent = await self._find_formal_publication(
                     conn,
@@ -2222,11 +2246,51 @@ class RunLifecycle:
         preview = snapshot.values.get("preview")
         if preview is None:
             preview = await self._build_algorithm_preview(conn, row)
-        await self._publish_algorithm_preview(
-            conn,
-            row=row,
-            preview=preview,
+        artifact = await self._load_formal_gate_artifact(
+            principal_id=row["principal_id"],
+            run_id=row["run_id"],
         )
+        task_input = dict(row["task_input"])
+        try:
+            package, report_payload = build_formal_report(
+                preview=preview,
+                artifact=artifact,
+                scope=VerificationScope(
+                    province=str(
+                        task_input.get("province")
+                        or preview["audit_basis"]["province"]
+                    ),
+                    application_year=int(
+                        task_input.get("application_year")
+                        or row["created_at"].year
+                    ),
+                    category=str(
+                        task_input.get("category")
+                        or preview["audit_basis"]["category"]
+                    ),
+                    batch=str(task_input.get("batch") or "本科批"),
+                    school_id=None,
+                ),
+                applicable_as_of=row["created_at"].date(),
+                created_at=row["created_at"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RunLifecycleError(
+                "VALIDATION_FAILED",
+                "正式报告输入不完整或无法规范化",
+            ) from exc
+        publication = await self.PublishFormalResult(
+            PublishFormalResultCommand(
+                principal_id=row["principal_id"],
+                run_id=row["run_id"],
+                expected_state_version=row["state_version"],
+                expected_lease_epoch=row["lease_epoch"],
+                package=package,
+                report=report_payload,
+            )
+        )
+        if not publication.accepted:
+            return
 
     async def _algorithm_preview_for_graph(
         self,

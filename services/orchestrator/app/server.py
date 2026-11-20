@@ -536,6 +536,7 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
                 formal_result.verification_report_sha256
             ),
             "verification_report": formal_result.verification_report,
+            "report": formal_result.report,
             "risk_notice": formal_result.risk_notice,
             "disclaimer": formal_result.disclaimer,
             "no_admission_guarantee": (
@@ -575,6 +576,7 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
                 "blockingReasons": report.get("blocking_reasons", []),
                 "strippedClaimIds": report.get("stripped_claim_ids", []),
                 "citationCoverage": report.get("citation_coverage", 0.0),
+                "report": payload.get("report", {}),
                 "resultState": payload.get("result_state", "ACTIVE"),
                 "staleReason": payload.get("stale_reason") or "",
                 "disclaimer": payload.get("disclaimer", ""),

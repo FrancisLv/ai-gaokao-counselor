@@ -1,4 +1,4 @@
-"""Ticket #6：ALGORITHM_PREVIEW 失败门禁与可复现性。"""
+"""Ticket #6/#41：算法输入失败门禁、正式报告与可复现性。"""
 from __future__ import annotations
 
 import asyncio
@@ -146,26 +146,30 @@ class PreviewGateLifecycleTests(RunLifecyclePostgresTest):
         self.assertEqual(failed.terminal_reason, "VALIDATION_FAILED")
         self.assertIsNone(failed.result)
 
-    async def test_successful_preview_is_internal_controlled_only(self):
+    async def test_successful_formal_report_contains_required_notices(self):
         algo = FakeAlgoClient()
         lifecycle, run_id, _ = await self._run_preview(algo, "controlled-marker")
 
         completed = await self._wait_for_state(lifecycle, run_id, "terminal")
 
         self.assertEqual(completed.state, "SUCCEEDED")
-        self.assertIsNotNone(completed.result_payload)
-        self.assertTrue(completed.result_payload["internal_controlled_only"])
-        self.assertFalse(completed.result_payload["formal_recommendation"])
+        self.assertEqual(completed.result.result_kind, "V1_FORMAL")
+        formal = completed.formal_result
+        self.assertEqual(formal.verification_report["status"], "PASS")
         self.assertIn(
-            "不得作为正式志愿方案",
-            completed.result_payload["disclaimer"],
+            "不构成录取保证",
+            formal.disclaimer,
         )
         self.assertNotIn(
-            "保证录取",
-            str(completed.result_payload["risk_notice"])
-            + str(completed.result_payload["disclaimer"])
-            + str(completed.result_payload["unverified_conditions"]),
+            "保证录取。",
+            formal.disclaimer,
         )
+        risk_section = next(
+            section
+            for section in formal.report["sections"]
+            if section["section_key"] == "risk"
+        )
+        self.assertIn("不保证录取。", risk_section["body"])
 
     async def test_eligibility_unknown_groups_cannot_inject_unestimated_identities(self):
         class RejectedInjectionAlgo(FakeAlgoClient):
@@ -684,43 +688,27 @@ class PreviewGateLifecycleTests(RunLifecyclePostgresTest):
 
         self.assertEqual(first.state, "SUCCEEDED")
         self.assertEqual(second.state, "SUCCEEDED")
-        fact_keys = {
-            "rank",
-            "percentile",
-            "rush_candidates",
-            "stable_candidates",
-            "safe_candidates",
-            "rush_total",
-            "stable_total",
-            "safe_total",
-            "audit_basis",
-            "eligibility",
-            "eligibility_gate",
-            "kept_candidates",
-            "rejected_candidates",
-            "wishlist",
-            "algorithm_method",
-            "algorithm_config_version",
-            "unverified_conditions",
-            "risk_notice",
-            "disclaimer",
-            "result_kind",
-            "formal_recommendation",
-            "internal_controlled_only",
-        }
+        self.assertEqual(first.result.result_kind, "V1_FORMAL")
+        self.assertEqual(second.result.result_kind, "V1_FORMAL")
         self.assertEqual(
-            {key: first.result_payload[key] for key in fact_keys},
-            {key: second.result_payload[key] for key in fact_keys},
+            first.formal_result.report,
+            second.formal_result.report,
         )
         self.assertEqual(
-            [
-                {"key": item["key"], "status": item["status"]}
-                for item in first.result_payload["verification_summary"]
-            ],
-            [
-                {"key": item["key"], "status": item["status"]}
-                for item in second.result_payload["verification_summary"]
-            ],
+            first.formal_result.verification_report,
+            second.formal_result.verification_report,
+        )
+        self.assertEqual(
+            first.formal_result.disclaimer,
+            second.formal_result.disclaimer,
+        )
+        self.assertEqual(
+            first.formal_result.risk_notice,
+            second.formal_result.risk_notice,
+        )
+        self.assertEqual(
+            first.formal_result.no_admission_guarantee,
+            second.formal_result.no_admission_guarantee,
         )
 
     async def test_get_and_reconnected_watch_replay_one_immutable_result(self):

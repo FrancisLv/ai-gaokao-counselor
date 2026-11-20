@@ -317,6 +317,8 @@ expires_at
   `result_version`、ACTIVE 状态和 RESULT 事件；数据库触发器拒绝重写正文。
 - GET、Watch 与 RESULT 事件必须返回同一完整 `verification_report`，并原样返回
   `disclaimer / risk_notice / no_admission_guarantee`。
+- 正式结果响应还以 additively added `report` 返回版本化、已通过门禁的确定性报告章节；
+  报告中的候选身份、数值、单位和样本年份必须与已固化证据包一致。
 - 同一 `result_version` 只能映射一份规范化输入摘要；重试重放原结果与事件，摘要冲突
   返回 `RESULT_VERSION_CONFLICT`。发布与取消竞争只有一个终态提交成功。
 - Redis 仅作通知或可重建投影，不是权威状态。
