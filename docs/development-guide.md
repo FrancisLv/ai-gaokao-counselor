@@ -27,7 +27,7 @@
 | orchestrator | gRPC 入口、图状态及部分节点、导入与图构建测试 | 完整策略/评审/报告链、真实 HITL 挂起恢复、检查点、algo 业务接线 |
 | RAG | 章程解析切分、元数据、Embedding 封装、导入/检索辅助脚本 | 本轮未执行真实模型推理、入库或检索质量评测；复杂嵌套编号仍有限制 |
 | gateway | HTTP 契约和服务入口 | 接口仍返回 TODO，鉴权、会话、SSE 和编排调用未完成 |
-| llm-gateway | gRPC 契约和服务入口 | 模型路由、预算、缓存、记账及真实模型调用未完成 |
+| llm-gateway | 类型化 `Chat/StreamChat`、角色/模型/价格路由、注册 prompt/schema、六类数据分类、原子预算、主备 attempt、未知费用对账、release-bound 缓存、类型化流和真实 PG 生成客户端测试 | 生产 provider 固定 fail closed；真实 provider/账单 adapter、真实付费模型验证和 orchestrator 入口接线未完成；`DELTA` 是最终守卫后的完整内容块，不是供应商 token 实时转发 |
 
 **本轮真正验证的链路**是 Go/Python 测试客户端 → 新构建的 algo 子进程 → 本地 PostgreSQL → 四 RPC。它不是浏览器到完整咨询报告的全系统闭环。图能够构建、返回 `DONE` 事件，也不代表咨询流程已完成。
 
@@ -167,7 +167,7 @@ DSN 环境变量优先于 YAML；实际连接凭据只放本地环境，生产�
 - 最大志愿数和最少保底是 config-only，不会按用户风险偏好自动重新推导；调整两者须保持合法关系。
 - 风险偏好影响冲稳保配比，不降低保底红线；请求内 `per_category_limit` 当前不生效，MVP 保持全量候选。
 
-`make run-orchestrator PY="$PY"` 只启动已有编排骨架，不代表补齐了 TODO 节点。本轮无需 API key，不调用付费模型。
+`make run-orchestrator PY="$PY"` 只启动已有编排骨架，不代表补齐了 TODO 节点。llm-gateway 的 fake-provider 真实 PG 套件通过 `LLMGW_TEST_DSN` 运行；生产装配保持 fail-closed，不读取 API key、不调用付费模型。普通与流式主行为测试都从生成的 `LLMGatewayClient` 进入，强结构化账本查询走独立 `internal/llmgw/data/queries/` 与 sqlc 生成包。
 
 ## 6. 可重复测试与性能验收
 
@@ -233,7 +233,7 @@ docker run --rm --network none --read-only --tmpfs /tmp \
 
 algo 冒烟采用临时 YAML（志愿上限12、保底数3）、`-p 127.0.0.1::9002` 随机回环端口、`-conf` 挂载配置，以及经 `host.docker.internal` 访问本机 PostgreSQL 的只读 DSN。宿主和 Python 镜像分别执行 `tests/smoke_algo.py`，四 RPC/审计/错误详情均通过。测试容器和临时配置已清理；没有重启旧服务或修改数据库。
 
-Compose 含独立数据库初始化和基础设施，开发默认复用本机 PostgreSQL，不需要 `make up`。**未验证**整套 Compose 服务互联与初始化、Linux/amd64、GPU、真实模型、完整咨询闭环；gateway/llm-gateway/orchestrator 的端口就绪不代表其业务已完成。本轮未启动全栈、未部署。
+Compose 含独立数据库初始化和基础设施，开发默认复用本机 PostgreSQL，不需要 `make up`。**未验证**整套 Compose 服务互联与初始化、Linux/amd64、GPU、真实模型、完整咨询闭环；gateway/orchestrator 的端口就绪不等于业务完成。llm-gateway 的治理 seam 已由真实 PG fake-provider 测试覆盖，但生产 provider 仍 fail closed，真实计费、账单拉取与实时 token 流均未接线。
 
 ## 7. 常见问题与修复证据
 
@@ -255,5 +255,5 @@ Compose 含独立数据库初始化和基础设施，开发默认复用本机 Po
 1. 本地 Linux/arm64 Docker 验证已完成；部署前再做目标架构与整栈验收。另行治理同组院校身份冲突，保留数据来源与版本。
 2. 将 algo 类型化客户端接入 orchestrator，完善追问、画像确认、真实中断恢复与候选编辑。
 3. 完成 RAG 检索器和离线评测，增加上下文扩展；不以复杂编号切分的有限覆盖替代检索质量评估。
-4. 实现 gateway 会话/SSE 和 llm-gateway 模型治理，之后才验收全系统咨询闭环。
+4. 实现 gateway 会话/SSE，并把已完成的 llm-gateway 治理 seam 接入 orchestrator；之后才验收全系统咨询闭环。
 5. 用独立留出数据评估概率校准和真实滑档风险，再决定是否升级模型；本轮的防泄漏测试不等于已经完成预测准确率评估。

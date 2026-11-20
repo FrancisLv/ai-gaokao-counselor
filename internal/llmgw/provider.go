@@ -68,7 +68,10 @@ func (e *ProviderFailure) Error() string {
 type unavailableProvider struct{}
 
 func (unavailableProvider) Chat(context.Context, ProviderRequest) (ProviderResponse, error) {
-	return ProviderResponse{}, ErrProviderUnavailable
+	return ProviderResponse{}, &ProviderFailure{
+		Code:      ReasonProviderUnavailable,
+		Retryable: false,
+	}
 }
 
 var (

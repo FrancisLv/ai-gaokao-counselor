@@ -10,6 +10,8 @@ import (
 	jsonschema "github.com/google/jsonschema-go/jsonschema"
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/grpc/codes"
+
+	llmgwdb "github.com/choucisan/ai-gaokao-counselor/internal/llmgw/dbgen"
 )
 
 type responseSchema struct {
@@ -39,27 +41,25 @@ func (s *Service) loadResponseSchema(
 		)
 	}
 
-	var (
-		schema responseSchema
-		status string
-	)
-	err := s.pool.QueryRow(ctx, `
-		SELECT response_schema_key, response_schema_version,
-		       schema_json::text, schema_sha256, status
-		FROM llm_response_schema
-		WHERE release_id = $1
-		  AND response_schema_key = $2
-		  AND response_schema_version = $3`,
-		req.ReleaseID, key, version,
-	).Scan(&schema.key, &schema.version, &schema.document, &schema.digest, &status)
+	row, err := s.queries.GetResponseSchema(ctx, llmgwdb.GetResponseSchemaParams{
+		ReleaseID:             req.ReleaseID,
+		ResponseSchemaKey:     key,
+		ResponseSchemaVersion: version,
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, responseSchemaNotAllowed()
 	}
 	if err != nil {
 		return nil, newStableError(codes.Internal, 500, "INTERNAL", "读取 response schema 失败")
 	}
-	if status != "ACTIVE" {
+	if row.Status != "ACTIVE" {
 		return nil, responseSchemaNotAllowed()
+	}
+	schema := responseSchema{
+		key:      row.ResponseSchemaKey,
+		version:  row.ResponseSchemaVersion,
+		digest:   row.SchemaSha256,
+		document: []byte(row.SchemaDocument),
 	}
 
 	var definition jsonschema.Schema

@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc/codes"
+
+	llmgwdb "github.com/choucisan/ai-gaokao-counselor/internal/llmgw/dbgen"
 )
 
 type ReconciliationOutcome string
@@ -97,8 +99,9 @@ func (r *Reconciler) Reconcile(
 		)
 	}
 	defer tx.Rollback(ctx)
+	queries := llmgwdb.New(tx)
 
-	row, err := loadReconciliationRow(ctx, tx, request)
+	row, err := loadReconciliationRow(ctx, queries, request)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ReconciliationResult{}, newStableError(
 			codes.NotFound, 404, ReasonReconciliationNotPending,
@@ -116,7 +119,7 @@ func (r *Reconciler) Reconcile(
 			"历史逻辑调用缺少可审计的 token 预占总额",
 		)
 	}
-	existing, found, err := loadExistingReconciliation(ctx, tx, request, row)
+	existing, found, err := loadExistingReconciliation(ctx, queries, request, row)
 	if err != nil {
 		return ReconciliationResult{}, err
 	}
@@ -203,117 +206,112 @@ func (r *Reconciler) Reconcile(
 	}
 
 	if releaseBudget {
-		tag, execErr := tx.Exec(ctx, `
-			UPDATE llm_budget_scope
-			SET provider_tokens_reserved = provider_tokens_reserved - $1,
-			    cost_reserved_micro_usd = cost_reserved_micro_usd - $2,
-			    provider_tokens_settled = provider_tokens_settled + $3,
-			    cost_settled_micro_usd = cost_settled_micro_usd + $4,
-			    updated_at = $5
-			WHERE budget_scope_id = $6
-			  AND provider_tokens_reserved >= $1
-			  AND cost_reserved_micro_usd >= $2`,
-			row.logicalReservedTok, row.logicalReservedCost,
-			valueOrZero(inputTokens)+valueOrZero(outputTokens),
-			valueOrZero(costMicroUSD), reconciledAt, row.budgetScopeID,
+		affected, execErr := queries.ReleaseBudgetForReconciliation(
+			ctx,
+			llmgwdb.ReleaseBudgetForReconciliationParams{
+				ProviderTokensReserved: row.logicalReservedTok,
+				CostReservedMicroUsd:   row.logicalReservedCost,
+				ProviderTokensSettled:  valueOrZero(inputTokens) + valueOrZero(outputTokens),
+				CostSettledMicroUsd:    valueOrZero(costMicroUSD),
+				UpdatedAt:              databaseTimestamp(reconciledAt),
+				Column6:                databaseUUID(row.budgetScopeID),
+			},
 		)
 		if execErr != nil {
 			return ReconciliationResult{}, newStableError(
 				codes.Internal, 500, "INTERNAL", "应用对账预算失败",
 			)
 		}
-		if tag.RowsAffected() != 1 {
+		if affected != 1 {
 			return ReconciliationResult{}, newStableError(
 				codes.Internal, 500, "INTERNAL", "对账预算预留状态不一致",
 			)
 		}
 	} else {
-		tag, execErr := tx.Exec(ctx, `
-			UPDATE llm_budget_scope
-			SET budget_status = 'BUDGET_OVERRUN',
-			    overrun_at = COALESCE(overrun_at, $1),
-			    overrun_reason = 'RECONCILIATION_EXCEEDS_RESERVATION',
-			    updated_at = $1
-			WHERE budget_scope_id = $2`,
-			reconciledAt, row.budgetScopeID,
+		affected, execErr := queries.LockBudgetScopeOverrun(
+			ctx,
+			llmgwdb.LockBudgetScopeOverrunParams{
+				UpdatedAt: databaseTimestamp(reconciledAt),
+				Column2:   databaseUUID(row.budgetScopeID),
+			},
 		)
 		if execErr != nil {
 			return ReconciliationResult{}, newStableError(
 				codes.Internal, 500, "INTERNAL", "封锁对账超限预算作用域失败",
 			)
 		}
-		if tag.RowsAffected() != 1 {
+		if affected != 1 {
 			return ReconciliationResult{}, newStableError(
 				codes.Internal, 500, "INTERNAL", "对账超限预算作用域状态不一致",
 			)
 		}
 	}
 
-	tag, err := tx.Exec(ctx, `
-		UPDATE llm_provider_attempt
-		SET status = $1,
-		    input_tokens = $2,
-		    output_tokens = $3,
-		    cost_micro_usd = $4,
-		    error_code = $5
-		WHERE attempt_id = $6
-		  AND status = 'PENDING_RECONCILIATION'`,
-		attemptState, inputTokens, outputTokens, costMicroUSD,
-		attemptError, request.AttemptID,
+	affected, err := queries.UpdateReconciledAttempt(
+		ctx,
+		llmgwdb.UpdateReconciledAttemptParams{
+			Status:       attemptState,
+			InputTokens:  nullableInt8(inputTokens),
+			OutputTokens: nullableInt8(outputTokens),
+			CostMicroUsd: nullableInt8(costMicroUSD),
+			ErrorCode:    databaseText(valueOrEmpty(attemptError)),
+			Column6:      databaseUUID(request.AttemptID),
+		},
 	)
 	if err != nil {
 		return ReconciliationResult{}, newStableError(
 			codes.Internal, 500, "INTERNAL", "更新对账 attempt 失败",
 		)
 	}
-	if tag.RowsAffected() != 1 {
+	if affected != 1 {
 		return ReconciliationResult{}, newStableError(
 			codes.Aborted, 409, ReasonReconciliationConflict,
 			"待对账 attempt 状态已变化",
 		)
 	}
 
-	tag, err = tx.Exec(ctx, `
-		UPDATE llm_logical_call
-		SET status = $1,
-		    actual_input_tokens = $2,
-		    actual_output_tokens = $3,
-		    actual_cost_micro_usd = $4,
-		    error_reason = $5,
-		    completed_at = $6,
-		    updated_at = $7
-		WHERE logical_call_pk = $8
-		  AND status = 'PARTIAL_UNKNOWN'`,
-		logicalState, inputTokens, outputTokens, costMicroUSD,
-		logicalError, completedAt, reconciledAt, row.logicalCallPK,
+	affected, err = queries.UpdateReconciledLogicalCall(
+		ctx,
+		llmgwdb.UpdateReconciledLogicalCallParams{
+			Status:             logicalState,
+			ActualInputTokens:  nullableInt8(inputTokens),
+			ActualOutputTokens: nullableInt8(outputTokens),
+			ActualCostMicroUsd: nullableInt8(costMicroUSD),
+			ErrorReason:        databaseText(logicalError),
+			CompletedAt:        nullableTimestamp(completedAt),
+			UpdatedAt:          databaseTimestamp(reconciledAt),
+			Column8:            databaseUUID(row.logicalCallPK),
+		},
 	)
 	if err != nil {
 		return ReconciliationResult{}, newStableError(
 			codes.Internal, 500, "INTERNAL", "更新对账逻辑调用失败",
 		)
 	}
-	if tag.RowsAffected() != 1 {
+	if affected != 1 {
 		return ReconciliationResult{}, newStableError(
 			codes.Aborted, 409, ReasonReconciliationConflict,
 			"待对账逻辑调用状态已变化",
 		)
 	}
 
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO llm_attempt_reconciliation (
-			attempt_id, logical_call_pk, logical_call_id, outcome,
-			previous_attempt_status, previous_error_code,
-			previous_reserved_tokens, previous_reserved_cost_micro_usd,
-			input_tokens, output_tokens, cost_micro_usd,
-			evidence_ref, reconciled_at
-		) VALUES (
-			$1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, $10, $11, $12, $13
-		)`,
-		request.AttemptID, row.logicalCallPK, row.logicalCallID, outcome,
-		row.attemptStatus, row.attemptErrorCode,
-		row.attemptReservedTok, row.attemptReservedCost,
-		inputTokens, outputTokens, costMicroUSD,
-		strings.TrimSpace(request.EvidenceRef), reconciledAt,
+	if err := queries.InsertReconciliationAudit(
+		ctx,
+		llmgwdb.InsertReconciliationAuditParams{
+			Column1:                      databaseUUID(request.AttemptID),
+			Column2:                      databaseUUID(row.logicalCallPK),
+			LogicalCallID:                row.logicalCallID,
+			Outcome:                      outcome,
+			PreviousAttemptStatus:        row.attemptStatus,
+			Column6:                      nullableText(row.attemptErrorCode),
+			PreviousReservedTokens:       row.attemptReservedTok,
+			PreviousReservedCostMicroUsd: row.attemptReservedCost,
+			InputTokens:                  nullableInt8(inputTokens),
+			OutputTokens:                 nullableInt8(outputTokens),
+			CostMicroUsd:                 nullableInt8(costMicroUSD),
+			EvidenceRef:                  strings.TrimSpace(request.EvidenceRef),
+			ReconciledAt:                 databaseTimestamp(reconciledAt),
+		},
 	); err != nil {
 		return ReconciliationResult{}, newStableError(
 			codes.Internal, 500, "INTERNAL", "记录对账审计依据失败",
@@ -375,68 +373,45 @@ func validateReconciliationRequest(request ReconciliationRequest) error {
 
 func loadReconciliationRow(
 	ctx context.Context,
-	tx pgx.Tx,
+	queries *llmgwdb.Queries,
 	request ReconciliationRequest,
 ) (reconciliationRow, error) {
-	var row reconciliationRow
-	err := tx.QueryRow(ctx, `
-		SELECT call.logical_call_pk::text,
-		       call.logical_call_id,
-		       call.ledger_entry_id::text,
-		       call.status,
-		       call.reserved_cost_micro_usd,
-		       COALESCE(call.reserved_provider_tokens, -1),
-		       call.budget_scope_id::text,
-		       attempt.status,
-		       attempt.attempt_no,
-		       attempt.reserved_cost_micro_usd,
-		       attempt.reserved_tokens,
-		       COALESCE(attempt.error_code, ''),
-		       scope.budget_status,
-		       price.input_micro_usd_per_million_tokens,
-		       price.output_micro_usd_per_million_tokens
-		FROM llm_provider_attempt attempt
-		JOIN llm_logical_call call
-		  ON call.logical_call_pk = attempt.logical_call_pk
-		JOIN llm_budget_scope scope
-		  ON scope.budget_scope_id = call.budget_scope_id
-		JOIN llm_price_entry price
-		  ON price.price_table_version = call.price_table_version
-		 AND price.model_id = attempt.model_id
-		WHERE call.logical_call_id = $1
-		  AND attempt.attempt_id = $2
-		FOR UPDATE OF attempt, call, scope`,
-		request.LogicalCallID, request.AttemptID,
-	).Scan(
-		&row.logicalCallPK, &row.logicalCallID, &row.ledgerEntryID,
-		&row.logicalStatus, &row.logicalReservedCost, &row.logicalReservedTok,
-		&row.budgetScopeID, &row.attemptStatus, &row.attemptNo,
-		&row.attemptReservedCost, &row.attemptReservedTok,
-		&row.attemptErrorCode, &row.budgetStatus,
-		&row.inputRate, &row.outputRate,
+	result, err := queries.LockReconciliationRow(
+		ctx,
+		llmgwdb.LockReconciliationRowParams{
+			LogicalCallID: request.LogicalCallID,
+			Column2:       databaseUUID(request.AttemptID),
+		},
 	)
-	return row, err
+	if err != nil {
+		return reconciliationRow{}, err
+	}
+	return reconciliationRow{
+		logicalCallPK:       result.CallLogicalCallPk,
+		logicalCallID:       result.LogicalCallID,
+		ledgerEntryID:       result.CallLedgerEntryID,
+		logicalStatus:       result.LogicalStatus,
+		logicalReservedCost: result.LogicalReservedCost,
+		logicalReservedTok:  result.LogicalReservedTokens,
+		budgetScopeID:       result.CallBudgetScopeID,
+		attemptStatus:       result.AttemptStatus,
+		attemptNo:           result.AttemptNo,
+		attemptReservedCost: result.AttemptReservedCost,
+		attemptReservedTok:  result.AttemptReservedTokens,
+		attemptErrorCode:    result.AttemptErrorCode,
+		budgetStatus:        result.BudgetStatus,
+		inputRate:           result.InputRate,
+		outputRate:          result.OutputRate,
+	}, nil
 }
 
 func loadExistingReconciliation(
 	ctx context.Context,
-	tx pgx.Tx,
+	queries *llmgwdb.Queries,
 	request ReconciliationRequest,
 	row reconciliationRow,
 ) (ReconciliationResult, bool, error) {
-	var (
-		outcome      string
-		inputTokens  *int64
-		outputTokens *int64
-		costMicroUSD *int64
-		evidenceRef  string
-	)
-	err := tx.QueryRow(ctx, `
-		SELECT outcome, input_tokens, output_tokens, cost_micro_usd, evidence_ref
-		FROM llm_attempt_reconciliation
-		WHERE attempt_id = $1`,
-		request.AttemptID,
-	).Scan(&outcome, &inputTokens, &outputTokens, &costMicroUSD, &evidenceRef)
+	result, err := queries.GetExistingReconciliation(ctx, databaseUUID(request.AttemptID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ReconciliationResult{}, false, nil
 	}
@@ -446,16 +421,19 @@ func loadExistingReconciliation(
 		)
 	}
 
-	matches := evidenceRef == strings.TrimSpace(request.EvidenceRef)
+	inputTokens := int8Pointer(result.InputTokens)
+	outputTokens := int8Pointer(result.OutputTokens)
+	costMicroUSD := int8Pointer(result.CostMicroUsd)
+	matches := result.EvidenceRef == strings.TrimSpace(request.EvidenceRef)
 	switch request.Outcome {
 	case ReconciliationCharged:
 		matches = matches &&
-			(outcome == "CHARGED" || outcome == "CHARGED_OVERRUN") &&
+			(result.Outcome == "CHARGED" || result.Outcome == "CHARGED_OVERRUN") &&
 			inputTokens != nil && *inputTokens == request.InputTokens &&
 			outputTokens != nil && *outputTokens == request.OutputTokens
 	case ReconciliationNoCharge:
 		matches = matches &&
-			outcome == "NO_CHARGE" &&
+			result.Outcome == "NO_CHARGE" &&
 			inputTokens == nil && outputTokens == nil && costMicroUSD == nil
 	}
 	if !matches {

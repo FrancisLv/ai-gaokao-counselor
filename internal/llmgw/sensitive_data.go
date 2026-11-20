@@ -3,6 +3,10 @@ package llmgw
 import (
 	"regexp"
 	"sort"
+	"strconv"
+	"strings"
+
+	"google.golang.org/grpc/codes"
 )
 
 var directIdentifierPatterns = []*regexp.Regexp{
@@ -45,7 +49,7 @@ func rejectUnsafeInput(req governedRequest) error {
 	values := make([]string, 0, len(req.Messages)+len(req.PromptVariables)+2)
 	values = append(values, req.TraceID)
 	for _, message := range req.Messages {
-		values = append(values, message.Content)
+		values = append(values, message.Role, message.Content)
 	}
 	keys := make([]string, 0, len(req.PromptVariables))
 	for key := range req.PromptVariables {
@@ -62,9 +66,15 @@ func rejectUnsafeInput(req governedRequest) error {
 }
 
 func rejectUnsafeRenderedMessages(messages []ProviderMessage) error {
-	values := make([]string, 0, len(messages))
+	values := make([]string, 0, len(messages)*2)
 	for _, message := range messages {
-		values = append(values, message.Content)
+		if _, allowed := allowedRenderedMessageRoles[message.Role]; !allowed {
+			return newStableError(
+				codes.InvalidArgument, 400, ReasonRequestInvalid,
+				"模板渲染后的消息角色不在协议白名单内",
+			)
+		}
+		values = append(values, message.Role, message.Content)
 	}
 	if containsUnsafeStringValues(values) {
 		return sensitiveInputNotAllowed()
@@ -74,11 +84,29 @@ func rejectUnsafeRenderedMessages(messages []ProviderMessage) error {
 
 func containsUnsafeStringValues(values []string) bool {
 	for _, value := range values {
-		if containsDirectIdentifier(value) || containsRawSensitiveFact(value) {
-			return true
+		candidates := []string{value}
+		if decoded, ok := decodeJSONEscapedString(value); ok {
+			candidates = append(candidates, decoded)
+		}
+		for _, candidate := range candidates {
+			if containsDirectIdentifier(candidate) || containsRawSensitiveFact(candidate) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+func decodeJSONEscapedString(value string) (string, bool) {
+	if !strings.Contains(value, `\u`) {
+		return "", false
+	}
+	quoted := `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
+	decoded, err := strconv.Unquote(quoted)
+	if err != nil || decoded == value {
+		return "", false
+	}
+	return decoded, true
 }
 
 func containsDirectIdentifier(value string) bool {

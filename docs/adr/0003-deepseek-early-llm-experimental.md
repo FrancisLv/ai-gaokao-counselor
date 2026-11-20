@@ -2,7 +2,7 @@
 
 - 状态：已接受（2026-11-18）
 - 决策者：Francis
-- 关联：`gap-analysis.md §6` 决策3、PRD 风险#3 / §8、`internal/llmgw/service.go`
+- 关联：`gap-analysis.md §6` 决策3、PRD 风险#3 / §8、`internal/llmgw/`
 
 ## 背景
 

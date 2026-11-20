@@ -2381,3 +2381,51 @@ RunLifecycle，不接真实付费 provider。
   provider request id、usage/cost 和断流账单仍只由确定性测试替身验证。
 - 客户端断开后无法接收 ERROR；可通过预占错误 metadata 或后续内部对账按
   `logical_call_id + attempt_id` 定位。未实现自动账单拉取或人工对账 UI。
+
+## 68. M5a 两轴 review-fix：可信 usage、失败收口与 sqlc 收口
+
+**日期与范围**：2026-11-20，`codex/m5a-integration@a48b79e` 的两轴审查修复。
+只修改 `review-fixes` worktree；不推送、不关闭 issue，不接真实付费 provider。
+
+### 行为与安全修复
+
+- `ProviderResponse.UsageStatus` 现在只有显式 `TRUSTED` 才进入成功结算。空值、
+  `UNTRUSTED` 和未知值即使携带非零 token，也保持
+  `PARTIAL_UNKNOWN / PENDING_RECONCILIATION` 与原预算预占；fake provider 的成功
+  fixture 全部显式标记可信 usage。
+- `StreamChat` 在预算预占后、provider 调用前发送 `START` 失败时，使用独立持久化
+  上下文原子转换 logical call/attempt 为 `FAILED / FAILED_NO_CHARGE`，释放预算
+  与缓存 claim，并追加失败投影；稳定原因新增 `STREAM_START_FAILED`。
+- 生产 `nil` provider 使用 typed `ProviderFailure` 表达“明确未受理”，不再把
+  fail-closed 装配误记为未知费用。对应调用返回 `PROVIDER_UNAVAILABLE`，预算释放、
+  attempt 为 `FAILED_NO_CHARGE`。
+- M5a 角色封闭为 `profile/report/verify/policy_qa`；调用方消息角色只允许
+  `user/assistant`，`system` 仍只能由注册模板生成。角色与内容均参与敏感扫描，
+  模板渲染后和 JSON 字符串反转义后再次检查。
+- `BUDGET_OVERRUN` 在任何缓存读取前预检，并在缓存命中事务内再次锁定复核；阻断后
+  不创建新的成功 logical call，也不访问 provider。
+
+### SQL 与结构维护
+
+- `sqlc.yaml` 新增独立 LLMGateway 目标：
+  `internal/llmgw/data/queries` → `internal/llmgw/dbgen`。治理读取、预占/结算、
+  缓存、对账和投影的条件更新全部改为生成方法；pgx 事务仍由服务编排。
+- 生成的 `dbgen` 不混入 algo 包，`make sqlc-generate` / `make sqlc-check` 通过。
+- 新增 Python 兼容测试，读取 `make api` 生成的 `ChatDelta.content=1/done=2`、
+  additive `event=3`；Go 主 seam 同时验证角色、release、logical call、
+  session/run、prompt 等必需字段缺失时在 provider 前 fail closed。
+
+### 验证
+
+- 新增回归测试先从生成客户端观察到失败：空 usage 状态被结算、START 发送失败
+  悬挂预占、生产 provider 待对账、角色/消息 role 越界、超限缓存命中成功。
+  修复后逐项转绿。
+- `LLMGW_TEST_DSN=... go test -tags integration ./internal/llmgw -count=1`
+  覆盖完整 M5a 真实 PG 套件；`go test ./internal/llmgw ./cmd/llm-gateway`、
+  Python 兼容单测与 sqlc check 通过。
+
+### 边界
+
+- 真实 provider、账单 adapter、真实付费模型与 orchestrator 入口仍未接线；生产
+  fail closed。fake provider 只证明治理 seam 行为，不证明供应商实际 usage 或账单。
+- 流式 `DELTA` 仍是最终守卫后的完整内容块，不宣称供应商 token 实时转发。
