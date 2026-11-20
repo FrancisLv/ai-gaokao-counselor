@@ -3476,6 +3476,7 @@ class RunLifecycle:
                         "PROFILE_NOT_CONFIRMED",
                         "RELEASE_REVOKED",
                         "NO_RELIABLE_DATA",
+                        "BUDGET_EXHAUSTED",
                         "EXECUTION_TIMEOUT",
                         "CONSENT_REQUIRED",
                         "CONSENT_REVOKED",

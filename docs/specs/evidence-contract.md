@@ -228,6 +228,7 @@ VerificationReport
 ```text
 ClaimVerification
   claim_id
+  claim_type: DOCUMENT_FACT | STRUCTURED_FACT | DERIVED_FACT
   criticality: CRITICAL | NORMAL
   status: VERIFIED | CONTRADICTED | UNVERIFIABLE
   reason: stable code

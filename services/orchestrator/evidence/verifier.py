@@ -117,6 +117,7 @@ def VerifyPackage(
         report_claims.append(
             ClaimVerification(
                 claim_id=claim.claim_id,
+                claim_type=claim.claim_type,
                 criticality=claim.criticality,
                 status=decision,
                 reason=reason,

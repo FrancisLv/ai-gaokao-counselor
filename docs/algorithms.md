@@ -345,3 +345,20 @@ Profile、release、输出字段、值、单位、精度或样本年份不一致
 模型质量不在本阶段验收范围。确定性 fixture 基线只验证评测链路，其
 `authoritative_quality=false`，不得作为检索质量结论；真实检索也只有在
 `owner_status=SIGNED_OFF` 时才标记为权威质量结果。
+
+### 11.1 联合端到端报告指标
+
+端到端评测从 `RunLifecycle` 的最终 `V1_FORMAL` 结果读取保留后的 Claims，不把
+报告草稿或已被剥离的段落计入分母：
+
+- `citation_coverage = 有至少一个 EvidenceRef 的最终事实 Claim 数 / 最终事实 Claim 数`；
+- `citation_accuracy = 有证据且 VERIFIED 的最终事实 Claim 数 / 有证据的最终事实 Claim 数`；
+- `contradiction_rate = CONTRADICTED 的最终事实 Claim 数 / 最终事实 Claim 数`；
+- `critical_unverifiable_rate = UNVERIFIABLE 的关键事实 Claim 数 / 关键事实 Claim 数`；
+- `hallucination_rate = (CONTRADICTED + UNVERIFIABLE) 的最终事实 Claim 数 / 最终事实 Claim 数`。
+
+成功 case 若没有最终事实 Claim，门禁失败，不能把“无事实可查”视为 100% 覆盖。
+最终成功报告要求 coverage 与 accuracy 为 100%，contradiction、关键
+unverifiable 和 hallucination 均为 0。联合 EvalRun 还记录 dataset hash、release、
+检索指标、报告指标、最终 run/result 身份、失败 case 与 first diff；只有
+`owner_status=SIGNED_OFF` 时 `release_gate_status` 才可能为 PASS。

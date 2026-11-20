@@ -307,6 +307,7 @@ message FormalClaimVerification {
   string reason = 4;
   repeated string checked_against = 5;
   bool deterministic = 6;
+  string claim_type = 7;
 }
 
 message FormalResultSummary {

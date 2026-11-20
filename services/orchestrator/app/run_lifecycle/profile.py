@@ -45,6 +45,13 @@ def build_profile_fields(profile: StructuredProfileInput) -> ProfileFields:
             "source": "USER_FORM",
             "value": list(profile.subjects),
         }
+    if profile.conditional_fields:
+        fields.update(
+            {
+                key: dict(value)
+                for key, value in profile.conditional_fields.items()
+            }
+        )
     if profile.rank is not None:
         fields["rank"] = {"state": "PROVIDED", "source": "USER_TEXT", "value": profile.rank}
     return fields
