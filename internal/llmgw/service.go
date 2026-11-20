@@ -960,6 +960,34 @@ func stableProviderFailure(failure *ProviderFailure) error {
 	}
 }
 
+func stableStoredFailure(status string, errorReason *string) error {
+	if errorReason == nil || strings.TrimSpace(*errorReason) == "" {
+		return newStableError(codes.Internal, 500, "INTERNAL", "逻辑调用失败但缺少稳定原因")
+	}
+	reason := *errorReason
+	switch reason {
+	case ReasonProviderRateLimited:
+		return newStableError(codes.ResourceExhausted, 429, reason, "供应商限流且确认未计费")
+	case ReasonProviderBadRequest:
+		return newStableError(codes.InvalidArgument, 400, reason, "供应商拒绝请求参数且确认未计费")
+	case ReasonProviderAuthFailed:
+		return newStableError(codes.PermissionDenied, 403, reason, "供应商认证失败且确认未计费")
+	case ReasonSchemaUnsupported:
+		return newStableError(codes.FailedPrecondition, 412, reason, "供应商不支持请求的输出 schema")
+	case ReasonBudgetOverrun:
+		return newStableError(codes.ResourceExhausted, 429, reason, "调用实际用量超过预算预留")
+	case ReasonProviderUnavailable, "PROVIDER_NOT_CHARGED":
+		return newStableError(codes.Unavailable, 503, reason, "供应商请求失败且确认未计费")
+	case ReasonReconciliation:
+		return newStableError(codes.Unavailable, 503, reason, "供应商费用仍待对账")
+	default:
+		if status == "BUDGET_OVERRUN" {
+			return newStableError(codes.ResourceExhausted, 429, ReasonBudgetOverrun, "调用实际用量超过预算预留")
+		}
+		return newStableError(codes.FailedPrecondition, 412, reason, "逻辑调用已稳定失败")
+	}
+}
+
 func (s *Service) markBudgetOverrun(
 	ctx context.Context,
 	prepared *preparedCall,
@@ -1113,6 +1141,7 @@ func (s *Service) resolveExistingCall(
 		actualIn       *int64
 		actualOut      *int64
 		actualCost     *int64
+		errorReason    *string
 		resultPayload  []byte
 	)
 	err := s.pool.QueryRow(ctx, `
@@ -1128,6 +1157,7 @@ func (s *Service) resolveExistingCall(
 		       actual_input_tokens,
 		       actual_output_tokens,
 		       actual_cost_micro_usd,
+		       error_reason,
 		       response_payload
 		FROM llm_logical_call
 		WHERE principal_id = $1
@@ -1137,7 +1167,7 @@ func (s *Service) resolveExistingCall(
 	).Scan(
 		&callPK, &ledgerID, &storedHash, &status, &routeVersion,
 		&priceVersion, &modelID, &reservedCost, &reservedTokens,
-		&actualIn, &actualOut, &actualCost, &resultPayload,
+		&actualIn, &actualOut, &actualCost, &errorReason, &resultPayload,
 	)
 	if err != nil {
 		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "读取逻辑调用幂等状态失败")
@@ -1145,8 +1175,20 @@ func (s *Service) resolveExistingCall(
 	if storedHash != requestHash {
 		return nil, nil, newStableError(codes.Aborted, 409, ReasonIdempotencyConflict, "logical_call_id 已绑定不同请求")
 	}
-	if status != "SUCCEEDED" || actualIn == nil || actualOut == nil || actualCost == nil {
+	if status == "RESERVED" || status == "IN_PROGRESS" {
 		return nil, nil, newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用正在执行或等待对账")
+	}
+	if status == "PARTIAL_UNKNOWN" {
+		return nil, nil, newStableError(
+			codes.Unavailable, 503, ReasonReconciliation,
+			"逻辑调用仍有供应商费用待对账",
+		)
+	}
+	if status == "FAILED" || status == "BUDGET_OVERRUN" {
+		return nil, nil, stableStoredFailure(status, errorReason)
+	}
+	if status != "SUCCEEDED" || actualIn == nil || actualOut == nil || actualCost == nil {
+		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "逻辑调用状态缺少可重放结果")
 	}
 	var result providerResult
 	if err := json.Unmarshal(resultPayload, &result); err != nil {

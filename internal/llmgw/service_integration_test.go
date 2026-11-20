@@ -1807,6 +1807,33 @@ func TestSemanticRepairUsesANewLogicalCall(t *testing.T) {
 	}
 }
 
+func TestTerminalFailureReplayReturnsSameStableError(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	provider := &fakeProvider{behaviors: []fakeBehavior{
+		{
+			err: &llmgw.ProviderFailure{
+				Code:      llmgw.ReasonProviderBadRequest,
+				Retryable: false,
+			},
+		},
+		{
+			response: llmgw.ProviderResponse{
+				Content: "must not run", InputTokens: 1, OutputTokens: 1,
+			},
+		},
+	}}
+	client := fixture.chatClient(t, provider)
+	req := fixture.chatRequest("logical-terminal-failure")
+
+	_, err := client.Chat(trustedChatContext(fixture.principal), req)
+	assertStableError(t, err, codes.InvalidArgument, llmgw.ReasonProviderBadRequest)
+	_, replayErr := client.Chat(trustedChatContext(fixture.principal), req)
+	assertStableError(t, replayErr, codes.InvalidArgument, llmgw.ReasonProviderBadRequest)
+	if calls := provider.callsSnapshot(); len(calls) != 1 {
+		t.Fatalf("终态失败重放新增 provider calls = %d, want 1", len(calls))
+	}
+}
+
 func TestRetryableFailuresStopAtTwoAttemptsAndReleaseReservation(t *testing.T) {
 	fixture := newLLMTestFixture(t)
 	fixture.enableFallbackChain(t)

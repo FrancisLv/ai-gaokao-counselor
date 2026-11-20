@@ -2098,6 +2098,9 @@ prompt/schema、敏感分类、缓存与流式能力。
   temperature、token/timeout、release 与 route 模型顺序；同 hash 完成态重放，
   异 hash 返回 `IDEMPOTENCY_CONFLICT`。真实 PostgreSQL 唯一约束负责同 ID 并发
   仲裁，输家返回 `CALL_IN_PROGRESS`。
+- 复核实测补上终态失败重放：`FAILED / BUDGET_OVERRUN` 返回持久稳定原因，
+  `PARTIAL_UNKNOWN` 返回待对账原因，只有 `RESERVED / IN_PROGRESS` 返回
+  `CALL_IN_PROGRESS`；终态重放不会新增 provider attempt。
 
 ### 验证
 

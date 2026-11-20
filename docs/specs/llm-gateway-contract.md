@@ -252,6 +252,8 @@ principal_id + session_id + logical_call_id
 - 同 `logical_call_id`、同 request hash：返回已存在的结果或在途状态。
 - 同 `logical_call_id`、不同 request hash：`IDEMPOTENCY_CONFLICT`。
 - 已完成调用再次请求：返回同一最终响应，不重复产生供应商费用。
+- 已知终态失败再次请求：返回同一稳定原因且不新增 attempt；`PARTIAL_UNKNOWN`
+  返回待对账原因，只有 `RESERVED / IN_PROGRESS` 返回 `CALL_IN_PROGRESS`。
 - 进行中的调用返回 `CALL_IN_PROGRESS`，不并发重复发起。
 
 ### 7.2 供应商重试
