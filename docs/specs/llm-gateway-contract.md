@@ -146,6 +146,8 @@ RoleRoute
 - 备用模型只有在主模型发生可重试故障时使用；
 - 每次 attempt 记录实际模型；
 - 切换备用模型属于同一 `logical_call_id` 的新 `attempt_id`；
+- M5a 核心硬上限为每个 logical call 最多两个 provider attempt；route
+  `max_attempts` 只能配置 1 或 2，数据库同时约束 attempt 序号不超过 2；
 - 模型价格表中不存在的模型不得启用。
 
 ## 5. 请求与响应
@@ -262,6 +264,13 @@ principal_id + session_id + logical_call_id
 | 客户端断流 | 标记 `STREAM_INTERRUPTED`，对账前保持预占 |
 
 格式错误导致的语义修复必须新建 `logical_call_id` 或进入业务层重写预算，不能伪装成网络重试。
+
+- Provider adapter 必须关闭供应商 SDK 内部自动重试；网关的一次 `Provider.Chat`
+  对应一次供应商请求，因此 SDK 重试不能绕过 attempt 上限。
+- Adapter 只有在已确认“未受理且未计费”时才返回 typed `ProviderFailure`；
+  `Retryable=true` 才允许按 route 使用下一模型。参数错误、认证失败和 schema
+  不支持返回不可重试的稳定原因；任何未分类连接异常、超时或断流仍按未知计费处理，
+  不由网关猜测为免费。
 
 ## 8. 流式接口
 
