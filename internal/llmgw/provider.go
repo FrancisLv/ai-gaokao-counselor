@@ -36,7 +36,17 @@ type ProviderResponse struct {
 	OutputTokens      int64
 	ProviderRequestID string
 	FinishReason      string
+	// UsageStatus lets the adapter explicitly reject a syntactically present
+	// usage payload whose accounting meaning is not trustworthy.
+	UsageStatus ProviderUsageStatus
 }
+
+type ProviderUsageStatus string
+
+const (
+	ProviderUsageTrusted   ProviderUsageStatus = "TRUSTED"
+	ProviderUsageUntrusted ProviderUsageStatus = "UNTRUSTED"
+)
 
 // ProviderFailure is a supplier rejection that the adapter has determined did
 // not incur a charge. Retryable failures may use the next route model. Any

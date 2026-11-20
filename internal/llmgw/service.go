@@ -223,6 +223,11 @@ func (s *Service) executeProviderAttempts(ctx context.Context, prepared *prepare
 			}
 			return nil, s.markProviderUnknown(ctx, prepared, providerErr)
 		}
+		if !trustedProviderUsage(providerResponse) {
+			return nil, s.markProviderUnknown(
+				ctx, prepared, errors.New("provider usage is missing or untrusted"),
+			)
+		}
 
 		result := providerResult{
 			Content:           providerResponse.Content,
@@ -603,15 +608,16 @@ func (s *Service) reserveCall(
 			session_id, run_id, role, release_id, route_version,
 			price_table_version, model_id, request_hash, budget_scope_id,
 			status, reserved_input_tokens, reserved_output_tokens,
-			reserved_cost_micro_usd
+			reserved_cost_micro_usd, reserved_provider_tokens
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-			'IN_PROGRESS', $14, $15, $16
+			'IN_PROGRESS', $14, $15, $16, $17
 		)`,
 		prepared.logicalCallPK, prepared.ledgerEntryID, req.LogicalCallID,
 		req.PrincipalID, req.SessionID, req.RunID, req.Role, req.ReleaseID,
 		route.version, route.priceVersion, prepared.selected.modelID,
 		requestHash, budgetScopeID, inputBound, outputBound, reservedCost,
+		reservedTokens,
 	)
 	if isUniqueViolation(err) {
 		_ = tx.Rollback(ctx)
@@ -1089,38 +1095,54 @@ func (s *Service) markBudgetOverrun(
 
 func (s *Service) markProviderUnknown(ctx context.Context, prepared *preparedCall, cause error) error {
 	errorCode := ReasonReconciliation
-	if errors.Is(cause, ErrProviderUnavailable) {
-		errorCode = ReasonProviderUnavailable
+	if errors.Is(cause, context.DeadlineExceeded) {
+		errorCode = ReasonProviderTimeout
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return newStableError(codes.Internal, 500, "INTERNAL", "记录待对账状态失败")
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `
+	finishedAt := s.now()
+	tag, err := tx.Exec(ctx, `
 		UPDATE llm_provider_attempt
 		SET status = 'PENDING_RECONCILIATION',
 		    error_code = $1,
 		    finished_at = $2
 		WHERE attempt_id = $3 AND status IN ('RESERVED', 'IN_PROGRESS')`,
-		errorCode, s.now(), prepared.attemptID,
-	); err != nil {
+		errorCode, finishedAt, prepared.attemptID,
+	)
+	if err != nil {
 		return newStableError(codes.Internal, 500, "INTERNAL", "更新未知计费 attempt 失败")
 	}
-	if _, err := tx.Exec(ctx, `
+	if tag.RowsAffected() != 1 {
+		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "attempt 状态不允许进入待对账")
+	}
+	tag, err = tx.Exec(ctx, `
 		UPDATE llm_logical_call
 		SET status = 'PARTIAL_UNKNOWN',
 		    error_reason = $1,
 		    updated_at = $2
 		WHERE logical_call_pk = $3 AND status = 'IN_PROGRESS'`,
-		errorCode, s.now(), prepared.logicalCallPK,
-	); err != nil {
+		errorCode, finishedAt, prepared.logicalCallPK,
+	)
+	if err != nil {
 		return newStableError(codes.Internal, 500, "INTERNAL", "更新待对账逻辑调用失败")
+	}
+	if tag.RowsAffected() != 1 {
+		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用状态不允许进入待对账")
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return newStableError(codes.Internal, 500, "INTERNAL", "提交待对账状态失败")
 	}
-	return newStableError(codes.Unavailable, 503, ReasonReconciliation, "供应商请求可能已计费，预算预留保持待对账")
+	message := "供应商请求可能已计费，预算预留保持待对账"
+	if errorCode == ReasonProviderTimeout {
+		message = "供应商请求超时且费用未知，预算预留保持待对账"
+	}
+	return newStableErrorWithMetadata(
+		codes.Unavailable, 503, errorCode, message,
+		reconciliationMetadata(prepared.logicalCallID, prepared.attemptID, prepared.ledgerEntryID),
+	)
 }
 
 func (s *Service) resolveExistingCall(
@@ -1143,6 +1165,7 @@ func (s *Service) resolveExistingCall(
 		actualCost     *int64
 		errorReason    *string
 		resultPayload  []byte
+		attemptID      string
 	)
 	err := s.pool.QueryRow(ctx, `
 		SELECT logical_call_pk::text,
@@ -1158,8 +1181,15 @@ func (s *Service) resolveExistingCall(
 		       actual_output_tokens,
 		       actual_cost_micro_usd,
 		       error_reason,
-		       response_payload
-		FROM llm_logical_call
+		       response_payload,
+		       COALESCE((
+		           SELECT attempt.attempt_id::text
+		           FROM llm_provider_attempt attempt
+		           WHERE attempt.logical_call_pk = call.logical_call_pk
+		           ORDER BY attempt.attempt_no DESC
+		           LIMIT 1
+		       ), '')
+		FROM llm_logical_call call
 		WHERE principal_id = $1
 		  AND session_id = $2
 		  AND logical_call_id = $3`,
@@ -1168,6 +1198,7 @@ func (s *Service) resolveExistingCall(
 		&callPK, &ledgerID, &storedHash, &status, &routeVersion,
 		&priceVersion, &modelID, &reservedCost, &reservedTokens,
 		&actualIn, &actualOut, &actualCost, &errorReason, &resultPayload,
+		&attemptID,
 	)
 	if err != nil {
 		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "读取逻辑调用幂等状态失败")
@@ -1179,13 +1210,22 @@ func (s *Service) resolveExistingCall(
 		return nil, nil, newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用正在执行或等待对账")
 	}
 	if status == "PARTIAL_UNKNOWN" {
-		return nil, nil, newStableError(
-			codes.Unavailable, 503, ReasonReconciliation,
-			"逻辑调用仍有供应商费用待对账",
+		reason := ReasonReconciliation
+		message := "逻辑调用仍有供应商费用待对账"
+		if errorReason != nil && *errorReason == ReasonProviderTimeout {
+			reason = ReasonProviderTimeout
+			message = "供应商请求超时且费用仍待对账"
+		}
+		return nil, nil, newStableErrorWithMetadata(
+			codes.Unavailable, 503, reason, message,
+			reconciliationMetadata(req.LogicalCallID, attemptID, ledgerID),
 		)
 	}
 	if status == "FAILED" || status == "BUDGET_OVERRUN" {
-		return nil, nil, stableStoredFailure(status, errorReason)
+		return nil, nil, withStableErrorMetadata(
+			stableStoredFailure(status, errorReason),
+			reconciliationMetadata(req.LogicalCallID, attemptID, ledgerID),
+		)
 	}
 	if status != "SUCCEEDED" || actualIn == nil || actualOut == nil || actualCost == nil {
 		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "逻辑调用状态缺少可重放结果")
@@ -1437,4 +1477,39 @@ func valueOrEmpty(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+func trustedProviderUsage(response ProviderResponse) bool {
+	switch response.UsageStatus {
+	case ProviderUsageTrusted:
+		return true
+	case ProviderUsageUntrusted:
+		return false
+	case "":
+		// Kept for internal adapters written before the explicit status was
+		// introduced. A syntactically missing, all-zero usage payload remains
+		// unknown unless the adapter explicitly marks it trusted.
+		return response.InputTokens > 0 || response.OutputTokens > 0
+	default:
+		return false
+	}
+}
+
+func reconciliationMetadata(logicalCallID, attemptID, ledgerEntryID string) map[string]string {
+	return map[string]string{
+		"logical_call_id": logicalCallID,
+		"attempt_id":      attemptID,
+		"ledger_entry_id": ledgerEntryID,
+	}
+}
+
+func withStableErrorMetadata(err error, errorMetadata map[string]string) error {
+	var stable *stableError
+	if !errors.As(err, &stable) || len(errorMetadata) == 0 {
+		return err
+	}
+	return &stableError{
+		err:  stable.err.WithMetadata(errorMetadata),
+		code: stable.code,
+	}
 }
