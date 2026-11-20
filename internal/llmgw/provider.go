@@ -42,4 +42,7 @@ func (unavailableProvider) Chat(context.Context, ProviderRequest) (ProviderRespo
 	return ProviderResponse{}, ErrProviderUnavailable
 }
 
-var ErrProviderUnavailable = errors.New("provider unavailable")
+var (
+	ErrProviderUnavailable = errors.New("provider unavailable")
+	ErrProviderNotCharged  = errors.New("provider rejected request without charging")
+)

@@ -72,6 +72,13 @@ func (p *fakeProvider) callsSnapshot() []providerCall {
 	return append([]providerCall(nil), p.calls...)
 }
 
+func (p *fakeProvider) setBehavior(response llmgw.ProviderResponse, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.response = response
+	p.err = err
+}
+
 type llmTestFixture struct {
 	pool       *pgxpool.Pool
 	admin      *pgxpool.Pool
@@ -107,6 +114,11 @@ func newLLMTestFixture(t *testing.T) *llmTestFixture {
 	if !strings.Contains(strings.ToLower(database), "test") {
 		t.Fatalf("拒绝在非测试数据库运行: %s", database)
 	}
+	for _, extension := range []string{"vector", "pg_trgm"} {
+		if _, err := admin.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS "+extension+" WITH SCHEMA public"); err != nil {
+			t.Fatalf("在 public 安装扩展 %s: %v", extension, err)
+		}
+	}
 
 	schema := "llmgw_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
@@ -123,7 +135,7 @@ func newLLMTestFixture(t *testing.T) *llmTestFixture {
 		t.Fatalf("解析 LLMGW_TEST_DSN: %v", err)
 	}
 	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
-	config.MaxConns = 1
+	config.MaxConns = 8
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatalf("建立隔离 schema 连接池: %v", err)
@@ -147,9 +159,25 @@ func newLLMTestFixture(t *testing.T) *llmTestFixture {
 	return fixture
 }
 
+func (f *llmTestFixture) seedBudget(t *testing.T, tokenLimit, costLimit int64) string {
+	t.Helper()
+	var budgetScopeID string
+	if err := f.pool.QueryRow(context.Background(), `
+		INSERT INTO llm_budget_scope (
+			budget_scope_id, principal_id, session_id, token_limit,
+			cost_limit_micro_usd
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4)
+		RETURNING budget_scope_id::text`,
+		f.principal, f.sessionID, tokenLimit, costLimit,
+	).Scan(&budgetScopeID); err != nil {
+		t.Fatalf("seed budget scope: %v", err)
+	}
+	return budgetScopeID
+}
+
 func applyLLMGatewayMigrations(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	applyLLMGatewayMigrationsThrough(t, pool, 29)
+	applyLLMGatewayMigrationsThrough(t, pool, 30)
 }
 
 func applyLLMGatewayMigrationsThrough(t *testing.T, pool *pgxpool.Pool, last int) {
@@ -730,6 +758,433 @@ func TestChatBudgetRejectCreatesNoProviderAttempt(t *testing.T) {
 	}
 }
 
+func TestBudgetOverrunBlocksSubsequentChatBeforeProvider(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	provider := &fakeProvider{response: llmgw.ProviderResponse{
+		Content: "用量异常", InputTokens: 1_000_000, OutputTokens: 1,
+		FinishReason: "STOP",
+	}}
+	client := fixture.chatClient(t, provider)
+
+	_, err := client.Chat(
+		trustedChatContext(fixture.principal),
+		fixture.chatRequest("logical-overrun-first"),
+	)
+	assertStableError(t, err, codes.ResourceExhausted, llmgw.ReasonBudgetOverrun)
+	if calls := provider.callsSnapshot(); len(calls) != 1 {
+		t.Fatalf("首次超预留调用 provider %d 次, want 1", len(calls))
+	}
+
+	var budgetStatus, callStatus string
+	if err := fixture.pool.QueryRow(context.Background(), `
+		SELECT budget.budget_status, call.status
+		FROM llm_budget_scope budget
+		JOIN llm_logical_call call
+		  ON call.budget_scope_id = budget.budget_scope_id
+		WHERE call.logical_call_id = 'logical-overrun-first'`,
+	).Scan(&budgetStatus, &callStatus); err != nil {
+		t.Fatalf("读取超限状态: %v", err)
+	}
+	if budgetStatus != "BUDGET_OVERRUN" || callStatus != "BUDGET_OVERRUN" {
+		t.Fatalf("超限状态 = budget %q call %q", budgetStatus, callStatus)
+	}
+
+	_, err = client.Chat(
+		trustedChatContext(fixture.principal),
+		fixture.chatRequest("logical-overrun-next"),
+	)
+	assertStableError(t, err, codes.ResourceExhausted, llmgw.ReasonBudgetOverrun)
+	if calls := provider.callsSnapshot(); len(calls) != 1 {
+		t.Fatalf("超限作用域后续调用 provider %d 次, want 1", len(calls))
+	}
+}
+
+func TestExplicitProviderRejectionReleasesEntireReservation(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	if _, err := fixture.pool.Exec(context.Background(), `
+		INSERT INTO llm_budget_scope (
+			budget_scope_id, principal_id, session_id, token_limit,
+			cost_limit_micro_usd
+		) VALUES (gen_random_uuid(), $1, $2, 5000, 5000)`,
+		fixture.principal, fixture.sessionID,
+	); err != nil {
+		t.Fatalf("seed constrained budget scope: %v", err)
+	}
+	provider := &fakeProvider{}
+	provider.setBehavior(llmgw.ProviderResponse{}, llmgw.ErrProviderNotCharged)
+	client := fixture.chatClient(t, provider)
+
+	_, err := client.Chat(
+		trustedChatContext(fixture.principal),
+		fixture.chatRequest("logical-uncharged"),
+	)
+	assertStableError(t, err, codes.Unavailable, llmgw.ReasonProviderUnavailable)
+
+	var (
+		budgetStatus   string
+		reservedTokens int64
+		settledTokens  int64
+		reservedCost   int64
+		settledCost    int64
+		attemptStatus  string
+		attemptError   string
+		callStatus     string
+	)
+	if err := fixture.pool.QueryRow(context.Background(), `
+		SELECT budget.budget_status,
+		       budget.provider_tokens_reserved,
+		       budget.provider_tokens_settled,
+		       budget.cost_reserved_micro_usd,
+		       budget.cost_settled_micro_usd,
+		       attempt.status,
+		       attempt.error_code,
+		       call.status
+		FROM llm_budget_scope budget
+		JOIN llm_logical_call call
+		  ON call.budget_scope_id = budget.budget_scope_id
+		JOIN llm_provider_attempt attempt
+		  ON attempt.logical_call_pk = call.logical_call_pk
+		WHERE call.logical_call_id = 'logical-uncharged'`,
+	).Scan(
+		&budgetStatus, &reservedTokens, &settledTokens,
+		&reservedCost, &settledCost, &attemptStatus,
+		&attemptError, &callStatus,
+	); err != nil {
+		t.Fatalf("读取免计费账本: %v", err)
+	}
+	if budgetStatus != "ACTIVE" ||
+		reservedTokens != 0 || settledTokens != 0 ||
+		reservedCost != 0 || settledCost != 0 {
+		t.Fatalf(
+			"免计费预算 = status %q tokens %d/%d cost %d/%d",
+			budgetStatus, settledTokens, reservedTokens, settledCost, reservedCost,
+		)
+	}
+	if attemptStatus != "FAILED_NO_CHARGE" ||
+		attemptError != "PROVIDER_NOT_CHARGED" ||
+		callStatus != "FAILED" {
+		t.Fatalf(
+			"免计费状态 = attempt %q/%q call %q",
+			attemptStatus, attemptError, callStatus,
+		)
+	}
+}
+
+func TestConcurrentChatsEnforceTokenBudgetBeforeProvider(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	fixture.seedBudget(t, 5000, 150000)
+	provider := &fakeProvider{
+		response: llmgw.ProviderResponse{
+			Content: "ok", InputTokens: 100, OutputTokens: 50,
+			FinishReason: "STOP",
+		},
+		onCall: func(context.Context) {
+			time.Sleep(100 * time.Millisecond)
+		},
+	}
+	client := fixture.chatClient(t, provider)
+
+	const requests = 12
+	errs := make(chan error, requests)
+	var wg sync.WaitGroup
+	for i := 0; i < requests; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			_, err := client.Chat(
+				trustedChatContext(fixture.principal),
+				fixture.chatRequest(fmt.Sprintf("logical-token-race-%02d", index)),
+			)
+			errs <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+
+	successes := 0
+	rejections := 0
+	for err := range errs {
+		if err == nil {
+			successes++
+			continue
+		}
+		if status.Code(err) == codes.ResourceExhausted &&
+			kerrors.Reason(err) == llmgw.ReasonBudgetExceeded {
+			rejections++
+			continue
+		}
+		t.Fatalf("并发 Chat 返回意外错误: %v", err)
+	}
+	if successes == 0 || rejections == 0 || successes+rejections != requests {
+		t.Fatalf("并发预算结果 = success %d reject %d total %d", successes, rejections, requests)
+	}
+	if calls := provider.callsSnapshot(); len(calls) != successes {
+		t.Fatalf("provider calls = %d, want %d successful reservations", len(calls), successes)
+	}
+
+	var (
+		settledTokens  int64
+		reservedTokens int64
+		settledCost    int64
+		reservedCost   int64
+		attempts       int
+	)
+	if err := fixture.pool.QueryRow(context.Background(), `
+		SELECT provider_tokens_settled,
+		       provider_tokens_reserved,
+		       cost_settled_micro_usd,
+		       cost_reserved_micro_usd
+		FROM llm_budget_scope
+		WHERE principal_id = $1 AND session_id = $2`,
+		fixture.principal, fixture.sessionID,
+	).Scan(&settledTokens, &reservedTokens, &settledCost, &reservedCost); err != nil {
+		t.Fatalf("读取并发 token 预算: %v", err)
+	}
+	if err := fixture.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM llm_provider_attempt`,
+	).Scan(&attempts); err != nil {
+		t.Fatalf("统计并发 token attempt: %v", err)
+	}
+	if settledTokens+reservedTokens > 5000 ||
+		settledCost+reservedCost > 150000 ||
+		attempts != successes {
+		t.Fatalf(
+			"并发 token 账本 = tokens %d/%d cost %d/%d attempts %d success %d",
+			settledTokens, reservedTokens, settledCost, reservedCost, attempts, successes,
+		)
+	}
+}
+
+func TestConcurrentChatsEnforceCostBudgetBeforeProvider(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	fixture.seedBudget(t, 50000, 5000)
+	provider := &fakeProvider{
+		response: llmgw.ProviderResponse{
+			Content: "ok", InputTokens: 100, OutputTokens: 50,
+			FinishReason: "STOP",
+		},
+		onCall: func(context.Context) {
+			time.Sleep(100 * time.Millisecond)
+		},
+	}
+	client := fixture.chatClient(t, provider)
+
+	const requests = 12
+	errs := make(chan error, requests)
+	var wg sync.WaitGroup
+	for i := 0; i < requests; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			_, err := client.Chat(
+				trustedChatContext(fixture.principal),
+				fixture.chatRequest(fmt.Sprintf("logical-cost-race-%02d", index)),
+			)
+			errs <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+
+	successes := 0
+	rejections := 0
+	for err := range errs {
+		if err == nil {
+			successes++
+			continue
+		}
+		if status.Code(err) == codes.ResourceExhausted &&
+			kerrors.Reason(err) == llmgw.ReasonBudgetExceeded {
+			rejections++
+			continue
+		}
+		t.Fatalf("并发 Chat 返回意外错误: %v", err)
+	}
+	if successes == 0 || rejections == 0 || successes+rejections != requests {
+		t.Fatalf("并发成本结果 = success %d reject %d total %d", successes, rejections, requests)
+	}
+	if calls := provider.callsSnapshot(); len(calls) != successes {
+		t.Fatalf("provider calls = %d, want %d successful reservations", len(calls), successes)
+	}
+
+	var (
+		settledTokens  int64
+		reservedTokens int64
+		settledCost    int64
+		reservedCost   int64
+		attempts       int
+	)
+	if err := fixture.pool.QueryRow(context.Background(), `
+		SELECT provider_tokens_settled,
+		       provider_tokens_reserved,
+		       cost_settled_micro_usd,
+		       cost_reserved_micro_usd
+		FROM llm_budget_scope
+		WHERE principal_id = $1 AND session_id = $2`,
+		fixture.principal, fixture.sessionID,
+	).Scan(&settledTokens, &reservedTokens, &settledCost, &reservedCost); err != nil {
+		t.Fatalf("读取并发成本预算: %v", err)
+	}
+	if err := fixture.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM llm_provider_attempt`,
+	).Scan(&attempts); err != nil {
+		t.Fatalf("统计并发成本 attempt: %v", err)
+	}
+	if settledTokens+reservedTokens > 50000 ||
+		settledCost+reservedCost > 5000 ||
+		attempts != successes {
+		t.Fatalf(
+			"并发成本账本 = tokens %d/%d cost %d/%d attempts %d success %d",
+			settledTokens, reservedTokens, settledCost, reservedCost, attempts, successes,
+		)
+	}
+}
+
+func TestBudgetScopeAccumulatesAcrossRunsAndIsolatesSessions(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	provider := &fakeProvider{response: llmgw.ProviderResponse{
+		Content: "ok", InputTokens: 1000, OutputTokens: 500, FinishReason: "STOP",
+	}}
+	client := fixture.chatClient(t, provider)
+
+	firstRequest := fixture.chatRequest("logical-budget-scope")
+	if _, err := client.Chat(trustedChatContext(fixture.principal), firstRequest); err != nil {
+		t.Fatalf("首个 run Chat: %v", err)
+	}
+
+	secondRunID := uuid.NewString()
+	if _, err := fixture.pool.Exec(context.Background(), `
+		INSERT INTO run (
+			run_id, session_id, principal_id, task_kind, task_input,
+			state, stage, release_id
+		) VALUES ($1, $2, $3, 'REVISE_PLAN', '{}'::jsonb, 'RUNNING', 'llm', $4)`,
+		secondRunID, fixture.sessionID, fixture.principal, fixture.releaseID,
+	); err != nil {
+		t.Fatalf("seed second run: %v", err)
+	}
+	secondRequest := fixture.chatRequest("logical-second-run")
+	secondRequest.RunId = secondRunID
+	if _, err := client.Chat(trustedChatContext(fixture.principal), secondRequest); err != nil {
+		t.Fatalf("同 session 第二 run Chat: %v", err)
+	}
+
+	secondSessionID := uuid.NewString()
+	thirdRunID := uuid.NewString()
+	if _, err := fixture.pool.Exec(context.Background(), `
+		INSERT INTO chat_session (id, principal_id, status)
+		VALUES ($1, $2, 'active')`,
+		secondSessionID, fixture.principal,
+	); err != nil {
+		t.Fatalf("seed second session: %v", err)
+	}
+	if _, err := fixture.pool.Exec(context.Background(), `
+		INSERT INTO run (
+			run_id, session_id, principal_id, task_kind, task_input,
+			state, stage, release_id
+		) VALUES ($1, $2, $3, 'GENERATE_PLAN', '{}'::jsonb, 'RUNNING', 'llm', $4)`,
+		thirdRunID, secondSessionID, fixture.principal, fixture.releaseID,
+	); err != nil {
+		t.Fatalf("seed second session run: %v", err)
+	}
+	thirdRequest := fixture.chatRequest("logical-budget-scope")
+	thirdRequest.SessionId = secondSessionID
+	thirdRequest.RunId = thirdRunID
+	if _, err := client.Chat(trustedChatContext(fixture.principal), thirdRequest); err != nil {
+		t.Fatalf("独立 session Chat: %v", err)
+	}
+
+	if calls := provider.callsSnapshot(); len(calls) != 3 {
+		t.Fatalf("provider calls = %d, want 3", len(calls))
+	}
+	rows, err := fixture.pool.Query(context.Background(), `
+		SELECT session_id::text,
+		       token_limit,
+		       cost_limit_micro_usd,
+		       provider_tokens_settled,
+		       provider_tokens_reserved,
+		       cost_settled_micro_usd,
+		       cost_reserved_micro_usd
+		FROM llm_budget_scope
+		WHERE principal_id = $1
+		ORDER BY session_id`,
+		fixture.principal,
+	)
+	if err != nil {
+		t.Fatalf("读取预算作用域: %v", err)
+	}
+	defer rows.Close()
+	scopes := map[string][6]int64{}
+	for rows.Next() {
+		var (
+			sessionID string
+			values    [6]int64
+		)
+		if err := rows.Scan(
+			&sessionID, &values[0], &values[1], &values[2],
+			&values[3], &values[4], &values[5],
+		); err != nil {
+			t.Fatalf("读取预算作用域行: %v", err)
+		}
+		scopes[sessionID] = values
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("遍历预算作用域: %v", err)
+	}
+	if len(scopes) != 2 {
+		t.Fatalf("budget scopes = %d, want 2", len(scopes))
+	}
+	firstScope, ok := scopes[fixture.sessionID]
+	if !ok {
+		t.Fatal("缺少首 session 的预算作用域")
+	}
+	secondScope, ok := scopes[secondSessionID]
+	if !ok {
+		t.Fatal("缺少第二 session 的预算作用域")
+	}
+	if firstScope != [6]int64{50000, 150000, 3000, 0, 4000, 0} {
+		t.Fatalf("首 session 预算 = %v", firstScope)
+	}
+	if secondScope != [6]int64{50000, 150000, 1500, 0, 2000, 0} {
+		t.Fatalf("第二 session 预算 = %v", secondScope)
+	}
+}
+
+func TestMissingCallLogProjectionCannotChangeAuthoritativeBudget(t *testing.T) {
+	fixture := newLLMTestFixture(t)
+	if _, err := fixture.pool.Exec(context.Background(), `DROP TABLE llm_call_log`); err != nil {
+		t.Fatalf("移除旧调用日志投影: %v", err)
+	}
+	provider := &fakeProvider{response: llmgw.ProviderResponse{
+		Content: "投影缺失不影响结算", InputTokens: 200, OutputTokens: 100,
+		FinishReason: "STOP",
+	}}
+	client := fixture.chatClient(t, provider)
+
+	response, err := client.Chat(
+		trustedChatContext(fixture.principal),
+		fixture.chatRequest("logical-no-projection"),
+	)
+	if err != nil {
+		t.Fatalf("投影缺失时 Chat: %v", err)
+	}
+	if response.GetUsage().GetInputTokens() != 200 ||
+		response.GetUsage().GetOutputTokens() != 100 {
+		t.Fatalf("投影缺失时响应 usage = %+v", response.GetUsage())
+	}
+	var settledTokens, settledCost int64
+	if err := fixture.pool.QueryRow(context.Background(), `
+		SELECT provider_tokens_settled, cost_settled_micro_usd
+		FROM llm_budget_scope
+		WHERE principal_id = $1 AND session_id = $2`,
+		fixture.principal, fixture.sessionID,
+	).Scan(&settledTokens, &settledCost); err != nil {
+		t.Fatalf("读取权威预算: %v", err)
+	}
+	if settledTokens != 300 || settledCost != 400 {
+		t.Fatalf("权威预算 = tokens %d cost %d", settledTokens, settledCost)
+	}
+}
+
 func TestLLMGatewayMigrationFreshAndUpgradePaths(t *testing.T) {
 	fixture := newLLMTestFixture(t)
 	for _, table := range []string{
@@ -759,6 +1214,27 @@ func TestLLMGatewayMigrationFreshAndUpgradePaths(t *testing.T) {
 		fixture.principal, fixture.sessionID,
 	); err != nil {
 		t.Fatalf("首次插入 budget scope: %v", err)
+	}
+	var tokenLimit, costLimit int64
+	var budgetStatus string
+	if err := fixture.pool.QueryRow(context.Background(), `
+		SELECT token_limit, cost_limit_micro_usd, budget_status
+		FROM llm_budget_scope
+		WHERE principal_id = $1 AND session_id = $2`,
+		fixture.principal, fixture.sessionID,
+	).Scan(&tokenLimit, &costLimit, &budgetStatus); err != nil {
+		t.Fatalf("读取 budget scope 默认值: %v", err)
+	}
+	if tokenLimit != 50000 || costLimit != 150000 || budgetStatus != "ACTIVE" {
+		t.Fatalf("budget scope 默认值 = %d/%d/%q", tokenLimit, costLimit, budgetStatus)
+	}
+	if _, err := fixture.pool.Exec(context.Background(), `
+		UPDATE llm_budget_scope
+		SET budget_status = 'INVALID'
+		WHERE principal_id = $1 AND session_id = $2`,
+		fixture.principal, fixture.sessionID,
+	); err == nil {
+		t.Fatal("非法 budget_status 应被约束拒绝")
 	}
 	if _, err := fixture.pool.Exec(context.Background(), `
 		INSERT INTO llm_budget_scope (
@@ -871,6 +1347,7 @@ func TestLLMGatewayMigrationUpgradesExistingRunSchema(t *testing.T) {
 	}
 
 	applyLLMGatewayMigration(t, pool, "29_llm_gateway_chat.sql")
+	applyLLMGatewayMigration(t, pool, "30_llm_budget_overrun.sql")
 	var gotRun string
 	if err := pool.QueryRow(ctx, `SELECT run_id::text FROM run WHERE run_id = $1`, runID).Scan(&gotRun); err != nil {
 		t.Fatalf("upgrade 后读取旧 run: %v", err)
