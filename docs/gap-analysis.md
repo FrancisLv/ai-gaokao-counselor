@@ -26,7 +26,7 @@
 - **svc-algo（Go）**：既有四 RPC 全部实现（`RankConvert / EstimateProb / CheckConstraints / OptimizeWishlist`）；`EvaluateEligibility` 已具备 release-bound 规则、生命周期、覆盖声明、受限 AST、条件字段 typed facts，以及专业五态与组级 PASS_PARTIAL 汇总。薄 service + biz usecase 分层，仍是当前最成体系的已实现能力。
 - **svc-orchestrator（Python/LangGraph）**：🟡 RunLifecycle 已提供持久 run/interrupt/租约与受控算法预览，`RetrievePolicy` 与在线检索节点已接线；自然语言画像、完整 POLICY_QA 子图、Strategy/Critic/report 等业务节点仍待实现，未调用 llmgw。
 - **svc-gateway（Go）**：⛔ 三个入口方法（`CreatePlan / ConfirmProfile / BackfillProfile`）全部 `return errors.New("TODO")`。
-- **svc-llm-gateway（Go）**：🟡 类型化 `Chat` 已具备可信 principal、session/run/release 校验、release-bound route/模型白名单/价格，以及 `principal + session` 跨 run 累计的原子 token/cost 硬预算、成功/明确免计费结算、`BUDGET_OVERRUN` 封锁和 logical call / attempt 权威账本；`StreamChat`、fallback/重试、未知费用对账、缓存、prompt/schema 与六类敏感数据边界仍待后续 M5a issue。
+- **svc-llm-gateway（Go）**：🟡 类型化 `Chat` 已具备可信 principal、session/run/release 校验、release-bound route/模型白名单/价格、注册 prompt template 与 response schema 版本、结构化输出校验，以及 `principal + session` 跨 run 累计的原子 token/cost 硬预算、成功/明确免计费/schema 失败结算、`BUDGET_OVERRUN` 封锁和 logical call / attempt 权威账本；`StreamChat`、fallback/重试、未知费用对账、缓存与六类敏感数据边界仍待后续 M5a issue。
 
 ---
 
@@ -72,7 +72,7 @@
 | --- | --- | --- | --- | --- | --- |
 | FR-18 报告生成（P0） | ⛔ | `build.py:38` report 节点 TODO；`state.py:62` 有 `report` 字段但无生成逻辑 | report 节点 + 强制免责声明 + 禁「保证录取」；数值由结构化模板渲染 | P1-05 | M5 |
 | FR-19 事实校验 Verifier（P0） | 🟡 Verifier 与正式发布闭环已接 | `services/orchestrator/evidence/verifier.py` 保留唯一 `VerifyPackage` seam；内部 `claims / formal_gate / normalization / models` 分离三类 Claim、正式门禁、规范值与运行时模型。Verifier 覆盖确定性单位/年份/语义绑定、notice registry、adapter 版本和版本化适用日期；`RunLifecycle.PublishFormalResult` 绑定 `run_formal_gate_artifact` 的权威资格/配置，`migrations/27`/`28` 以 insert-only 证据包、报告、资格 artifact、不可变结果和独立 ACTIVE/STALE 状态原子发布 `V1_FORMAL`，GET/Watch 返回同一报告及必需说明原文；真实 PG 覆盖 PASS、PARTIAL、BLOCKED、伪造资格、重试冲突、release 撤销及发布/取消竞态 | `build.py:38` verify 节点仍为 TODO；后续接入图内报告生成、重写≤2、回算≤2 与最终文案剥离 | P1-05 | M4/M5 |
-| FR-20 LLM 治理与成本闸门（P0） | 🟡 类型化 Chat + 跨 run 硬预算已闭环 | `api/llmgw/v1/llmgw.proto` 加法演进保留旧字段并返回 typed usage/cost/attempt/ledger；`internal/llmgw/service.go` 从可信 `x-principal-id` 经 release-bound `llm_role_route` / `llm_model_allowlist` / `llm_price_table` 选主模型，在同一事务内提交 `IN_PROGRESS` logical call、首个 `IN_PROGRESS` attempt 与 50K/150K token/cost 条件预占，成功或明确免计费后原子结算/释放，实际 usage 超预留时锁存 `BUDGET_OVERRUN` 并拒绝后续 provider 调用；`migrations/29`/`30` 建立权威价格、预算、逻辑调用与 attempt 账本及超限封锁状态。真实 PG client 测试覆盖并发 token/cost 上限、跨 run 累计、session 隔离、默认限额、结算差额、明确免计费、超限封锁、旧 `llm_call_log` 缺失不影响权威预算、幂等重放/冲突和 `00/07→30` / `28→29→30` 迁移 | 后续 M5a：备用模型/可重试故障与 attempt 状态机、未知计费/超限对账、prompt/schema 注册与校验、六类数据分类、缓存、完整 `StreamChat`；真实 provider 接线前保持 fail closed | P1-11, P1-12 | M5a 进行中 |
+| FR-20 LLM 治理与成本闸门（P0） | 🟡 类型化 Chat + prompt/schema 注册 + 跨 run 硬预算已闭环 | `api/llmgw/v1/llmgw.proto` 加法演进保留旧字段并返回 typed usage/cost/attempt/ledger、模板变量、structured output 与 prompt/schema 身份；`internal/llmgw/service.go` 从可信 `x-principal-id` 经 release-bound route/模型白名单/价格选主模型，在任何预算预占和 provider 调用前解析 `ACTIVE` prompt template 与 response schema；调用方 system message 和 raw `json_schema` 不能授权或覆盖，输出经注册 JSON Schema 校验后才返回规范 object，schema 失败仍按真实 usage 原子结算；同一事务提交 `IN_PROGRESS` logical call、首个 attempt 与 50K/150K token/cost 条件预占，成功、明确免计费或 schema 失败后结算，实际 usage 超预留时锁存 `BUDGET_OVERRUN`。`migrations/29`/`30`/`31` 建立价格、预算、调用/attempt 账本、超限封锁与不可变 prompt/schema 注册。真实 PG client 测试覆盖并发上限、跨 run 累计、session 隔离、结算差额、明确免计费、schema 失败结算、未注册/撤销拒绝、system/raw schema 绕过、合法结构化输出、版本变化身份、幂等重放/冲突和 `00/07→31` / `28→29→30→31` 迁移 | 后续 M5a：备用模型/可重试故障与 attempt 状态机、未知计费/超限对账、六类数据分类、缓存、完整 `StreamChat`；真实 provider 接线前保持 fail closed | P1-11, P1-12 | M5a 进行中 |
 | FR-21 限流与并发保护（P0） | ⛔ | `internal/gateway/service.go:16` 注释「限流器」为 TODO(M2) | 令牌桶限流 + 并发闸门（超限排队非 500）；公网发布前置 | P1-08 | M2/M4 |
 | FR-22 降级与故障处理（P0） | 🟡 | `state.py:66` 有 `degraded` 字段；PRD §7.4 隐私条款已按 R9 回填；但无实际降级路径逻辑（节点全 TODO） | 六类故障降级路径实现；体检/健康最小化+同意+限期+脱敏落地 | P1-03, P1-04, P1-06 | M5 |
 | FR-23 评测与发布门禁（P0） | 🟡 检索 harness 已建，待签字与真实基线 | `data/golden/retrieval-hunan-2025-v0.2.0-draft/` 有 30 条检索 Agent 草稿、可验证 interference 元数据与 hash manifest，`owner_status=PENDING_SIGNOFF`；`services/orchestrator/eval/retrieval_eval.py` 只经 `RetrievePolicy` runner 计算 recall@5/20、MRR、逐例 scope leak 与 first diff，并对签字真实 run 应用 recall/MRR 质量门禁；`scripts/run_retrieval_eval.py` 支持确定性 fixture 和可复现 baseline | Francis 定标 30 条草稿；绑定全国/省级政策 release；跑真实政策索引 baseline；补首批 10 条端到端集、四层测试与发布门禁阈值 | P2-04 | M4 进行中 |
@@ -191,7 +191,10 @@
 ## 7. 证据索引（实测文件:行）
 
 - `internal/gateway/service.go:16,24,30,36` — 三入口 TODO + 限流器 TODO
-- `internal/llmgw/service.go:17,24,35` — Chat/StreamChat TODO + 治理组件 TODO
+- `internal/llmgw/service.go` — 类型化 Chat 的身份/路由/预算/结算主流程、注册 prompt/schema 解析、schema 失败结算与幂等重放
+- `internal/llmgw/schema.go` — 注册 JSON Schema 编译与结构化输出规范化校验
+- `internal/llmgw/service_integration_test.go` — 生成 client + Kratos gRPC + fake provider + 真实 PostgreSQL 的外部行为测试
+- `migrations/29_llm_gateway_chat.sql` / `30_llm_budget_overrun.sql` / `31_llm_prompt_schema_registry.sql` — 价格/预算/调用账本、超限封锁与不可变 prompt/schema 注册
 - `internal/algo/service/algo.go:36,54,76,86` — 四 RPC 实现
 - `api/algo/v1/algo.proto:35,84,117,140,146,153,159,178,193` — UserProfile/ProbEstimate/OptimizationReport/RejectedCandidate/RankConvert/EstimateProb/OptimizeWishlist 契约
 - `services/orchestrator/app/server.py` — RunLifecycle 传输适配与 run-bound 检索构图入口
