@@ -134,6 +134,17 @@ ConsentRecord
 
 “归档”只表示降低访问频率，不延长保留期，也不绕过删除。
 
+运行实现使用 `data_retention_policy` 固定策略版本、资源类别、天数和动作；
+`data_retention_sweep` 与 `data_retention_ledger` 只记录非敏感审计身份、资源类别、
+结果、行数和错误码。每次清理必须找到完整的 `m5b-retention-v1` 策略，缺失任一
+资源策略时 fail closed。
+
+成功结果/证据包、Profile、run/session 元数据与成功检查点默认 30 天清理或去标识化；
+事件、失败/过期检查点与命令 receipt 默认 7 天删除；provider 账本与安全审计默认
+180 天去标识化。run/session 为维持 provider 账本外键保留最小 stub，原 principal
+访问返回 `RUN_NOT_FOUND`，task input、Profile、result、interrupt 与敏感投影清空。
+公开文档、release、规则和统计不在用户保留清理范围。
+
 ## 7. 删除流程
 
 ### 7.1 DeletePrincipalData

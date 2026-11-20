@@ -2553,7 +2553,94 @@ adapter；不实现保留清理（#47）或备份恢复重放（#48），不新�
 - 确认签发与重新认证服务不在本票范围；控制面通过
   `DeletionConfirmationAuthority` 注入，生产未接线时不能放行删除。
 
-## 72. M5b-08 备份恢复重放删除
+## 72. M5b-02 受控报告叙事、剥离与降级
+
+**日期与范围**：2026-11-20，issue #42。为确定性正式报告增加受
+`role=report` 约束的 LLMGateway 叙事 adapter；不新增公开 seam，不修改检索器、
+资格规则、EvalDataset 或删除流程。
+
+### 行为与实现
+
+- RunLifecycle 在确定性报告和 Claims 已构造后，可选调用报告叙事 writer。
+  writer 只能返回 `overview / candidate_reasons / note`；总述与逐候选说明按稳定
+  顺序合并，候选身份、概率、单位、年份、资格和最终顺序仍由既有模板渲染。
+- 叙事在进入报告前执行确定性边界检查：拒绝数字、已知学校/代码/专业身份、
+  EvidenceRef、未知字段、控制字符、模板控制符、资格结论和录取承诺；
+  `录取稳了` 等等价承诺也与既有 Verifier 词边界一并阻断。越界输出进入
+  `FAILED / VALIDATION_FAILED`，不回退后静默发布。
+- 模型超时、限流、不可用或缺失结构化输出时退回同事实集的确定性模板，并在风险
+  区明确记录“生成质量降级”；NARRATIVE_RETRY 最多重写 2 次，超限同样降级。
+- 模型可选补充说明若没有证据，作为 NORMAL Claim 进入 VerifyPackage；由既有规则
+  剥离并从最终 `claim_ids` 与报告正文移除，完整验证报告保留
+  `stripped_claim_ids`。
+- 新增内部 `GrpcReportNarrativeWriter`，只调用 M5a `LLMGateway.Chat`，固定
+  `PUBLIC_DATA`、`temperature=0`、注册 prompt/schema key/version 和稳定
+  `logical_call_id`；orchestrator 仅在设置 `LLM_GATEWAY_ADDR` 时启用。模型 key
+  与 provider 访问仍只在 llmgw 侧。
+- Compose 为 orchestrator 增加 llm-gateway 地址和启动依赖；未配置地址时保留
+  M5b-01 的纯确定性模式。
+
+### 验证
+
+- 新增主 seam 测试覆盖 LLM 叙事成功、事实/数值篡改、schema 污染、资格越权、
+  录取承诺、非关键未知剥离、超时降级和两次重写上限；全部从
+  `SubmitRun → ResumeRun → GetRun` 观察。
+- `test_run_lifecycle_report` 共 12 项通过；真实 PostgreSQL `test_run*.py`
+  共 111 项通过、1 项因未配置真实算法地址跳过。
+- `make py-check py-test`、`make build check test`、`make compose-check`
+  与 `git diff --check` 通过。
+
+### 边界与风险
+
+- 真实 release 仍需发布 `m5b_report_narrative/v1` prompt template、
+  `m5b_report_narrative_v1/v1` response schema、report role route 和价格配置；
+  缺失时 LLMGateway 拒绝，orchestrator 使用明确标记的确定性降级。
+- 本票不证明真实模型质量；golden set、citation/hallucination、P99 和预算门禁由
+  M5b-03/M5b-04 完成。
+
+## 73. M5b-07 终态数据保留清理
+
+**日期与范围**：2026-11-20，issue #47。实现版本化 7/30/180 天保留清理与
+非敏感审计；不实现备份恢复 tombstone 重放（#48）。
+
+### 行为与实现
+
+- 新增 `data_retention_policy`、`data_retention_sweep` 与
+  `data_retention_ledger`。策略按 `policy_version + resource_kind` 固化天数和
+  `DELETE/DEIDENTIFY` 动作；任一资源缺失时返回 `RETENTION_POLICY_INVALID`，
+  不创建 sweep。
+- 成功结果/证据包、Profile、run/session 元数据与成功检查点使用 30 天窗口；
+  事件、失败/过期检查点与命令 receipt 使用 7 天；provider 账本与安全审计使用
+  180 天去标识化。清理时间均以持久化记录时间和策略计算。
+- 30 天后正式结果/证据/验证报告按受控事务删除；Profile 先断开 run 引用再删除。
+  run/session 保留最小 stub 以维持 provider 账本外键，task input、Profile/result
+  引用和 interrupt 清空，原 principal 的 `GetRun` 返回 `RUN_NOT_FOUND`。
+- 7 天清理删除过期事件、失败/过期 checkpoint 与命令回执。180 天清理将 logical
+  call、budget scope 的主体改为 `retention:deidentified`，清空模型响应/错误文本、
+  provider request id 和兼容调用日志；usage/成本数值保留用于对账。
+- 删除审计 180 天后将 request id 改为 `retention-expired`，tombstone 原因改为
+  `RETENTION_EXPIRED`，删除旧删除请求记录，但保留最小 tombstone 和 DELETED 状态。
+  公开文档、release、规则与统计不被清理。
+- 每个资源独立执行并记录成功/失败；单资源失败不阻止其他资源清理，sweep 状态为
+  `RETENTION_FAILED_RETRYABLE`，重试成功后幂等收敛。正式结果触发器只新增
+  `app.retention_cleanup=on` 的受控 DELETE 通道。
+
+### 验证
+
+- 主 seam 测试验证 30 天后 `GetRun` 不再暴露结果/Profile，run/session 仅保留去标识化
+  stub，公开 release 仍为 PUBLISHED。
+- 覆盖 7 天事件/回执、成功与失败 checkpoint 窗口、180 天 provider 账本/安全审计
+  去标识化、缺失策略 fail closed、单资源部分失败后可重试、重复 sweep 幂等。
+- 独立测试库完整 `test_run*.py` 通过；`make py-check py-test` 通过。
+
+### 边界与风险
+
+- 兼容调用日志没有 principal 列，按旧 `session_id` 的 session 到期批次去标识化；
+  后续若增加 principal 归属需同步扩展。
+- Redis 投影清理与备份恢复重放不在本票；由 #48 使用 tombstone/ledger 验证。
+- 生产定时调度器尚未接线；本票交付可注入时钟的清理控制面 adapter。
+
+## 74. M5b-08 备份恢复重放删除
 
 **日期与范围**：2026-11-20，issue #48。实现备份恢复的删除安全控制面
 adapter；不实现 #47 的保留策略，也不新增报告或评测 seam。

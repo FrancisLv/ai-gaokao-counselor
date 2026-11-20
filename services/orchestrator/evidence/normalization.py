@@ -113,7 +113,7 @@ def text_exceeds_admission_boundary(text: str) -> bool:
     forbidden_patterns = (
         r"(?:保证|确保|承诺|必定|一定).{0,6}录取",
         r"(?:100%|百分之百).{0,2}录取",
-        r"录取.{0,2}(?:保证|无忧)",
+        r"录取.{0,2}(?:保证|无忧|稳了|稳妥|放心)",
         r"包录取",
     )
     return any(

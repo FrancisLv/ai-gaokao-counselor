@@ -14,8 +14,16 @@ from app.data_lifecycle.restore import (
     RestoreBackupReceipt,
     RestoreProjection,
 )
+from app.data_lifecycle.retention import (
+    DataRetention,
+    DataRetentionError,
+    RetentionSweepReceipt,
+    SweepRetentionCommand,
+)
 
 __all__ = [
+    "DataRetention",
+    "DataRetentionError",
     "DeletePrincipalDataCommand",
     "DeletePrincipalDataReceipt",
     "DeletionConfirmationAuthority",
@@ -26,4 +34,6 @@ __all__ = [
     "RestoreBackupCommand",
     "RestoreBackupReceipt",
     "RestoreProjection",
+    "RetentionSweepReceipt",
+    "SweepRetentionCommand",
 ]

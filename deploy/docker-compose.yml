@@ -68,7 +68,8 @@ services:
     environment:
       - ORCHESTRATOR_DSN=postgres://app:app@postgres:5432/gaokao?sslmode=disable
       - ALGO_ADDR=algo:9002
-    depends_on: [postgres, redis, algo]
+      - LLM_GATEWAY_ADDR=llm-gateway:9001
+    depends_on: [postgres, redis, algo, llm-gateway]
 
   postgres:
     image: pgvector/pgvector:pg16

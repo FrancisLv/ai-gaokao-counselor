@@ -15,6 +15,7 @@ async def _serve() -> None:
 
     from app.run_lifecycle import RunLifecycle
     from app.run_lifecycle.algo import GrpcAlgoClient
+    from app.run_lifecycle.llm_report import GrpcReportNarrativeWriter
     from app.run_lifecycle.policy import PostgresPolicyRetriever
     from app.run_lifecycle.worker import RunLifecycleWorker
     from app.server import OrchestratorServicer
@@ -25,6 +26,17 @@ async def _serve() -> None:
     algo_client = (
         GrpcAlgoClient(address=os.getenv("ALGO_ADDR", "localhost:9002"))
         if dsn
+        else None
+    )
+    llm_gateway_addr = os.getenv("LLM_GATEWAY_ADDR")
+    llm_gateway_channel = (
+        grpc.aio.insecure_channel(llm_gateway_addr)
+        if llm_gateway_addr
+        else None
+    )
+    report_narrative_writer = (
+        GrpcReportNarrativeWriter(llm_gateway_channel)
+        if llm_gateway_channel is not None
         else None
     )
     lifecycle = (
@@ -41,6 +53,7 @@ async def _serve() -> None:
                     else None
                 ),
             ),
+            report_narrative_writer=report_narrative_writer,
         )
         if dsn
         else None
@@ -65,6 +78,8 @@ async def _serve() -> None:
             await lifecycle.close()
         if algo_client is not None:
             await algo_client.Close()
+        if llm_gateway_channel is not None:
+            await llm_gateway_channel.close()
 
 
 def main() -> None:
