@@ -104,6 +104,7 @@ type routeConfig struct {
 	version                string
 	priceVersion           string
 	primaryModel           string
+	allowedDataClasses     []string
 	maxOutput              int32
 	timeoutMS              int32
 	maxAttempts            int32
@@ -187,6 +188,9 @@ func (s *Service) Chat(ctx context.Context, req *llmgwv1.ChatRequest) (*llmgwv1.
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectUnsafeInput(governed); err != nil {
+		return nil, err
+	}
 
 	binding, err := s.loadRunBinding(ctx, governed)
 	if err != nil {
@@ -194,6 +198,9 @@ func (s *Service) Chat(ctx context.Context, req *llmgwv1.ChatRequest) (*llmgwv1.
 	}
 	route, err := s.loadRoute(ctx, governed, binding)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateRouteDataClassification(route, governed.DataClassification); err != nil {
 		return nil, err
 	}
 	prompt, err := s.loadPromptTemplate(ctx, governed)
@@ -281,6 +288,11 @@ func (s *Service) executeProviderAttempts(ctx context.Context, prepared *prepare
 		if err != nil {
 			return nil, s.markProviderUnknown(ctx, prepared, err)
 		}
+		if containsUnsafeProviderOutput(result) {
+			return nil, s.settleSensitiveOutputFailure(
+				ctx, prepared, result, actualCostMicroUSD, actualTokens,
+			)
+		}
 		if actualCostMicroUSD > prepared.reservedCost || actualTokens > prepared.reservedTokens {
 			return nil, s.markBudgetOverrun(ctx, prepared, result, actualCostMicroUSD)
 		}
@@ -321,9 +333,14 @@ func normalizeRequest(principalID string, req *llmgwv1.ChatRequest) (governedReq
 	}
 	if strings.TrimSpace(req.GetRole()) == "" ||
 		strings.TrimSpace(req.GetReleaseId()) == "" ||
-		strings.TrimSpace(req.GetLogicalCallId()) == "" ||
-		strings.TrimSpace(req.GetDataClassification()) == "" {
+		strings.TrimSpace(req.GetLogicalCallId()) == "" {
 		return governedRequest{}, newStableError(codes.InvalidArgument, 400, ReasonRequestInvalid, "缺少必要的治理字段")
+	}
+	dataClass, err := resolveDataClassification(
+		req.GetDataClassification(), req.GetDataClass(),
+	)
+	if err != nil {
+		return governedRequest{}, err
 	}
 	if req.GetMaxTokens() < 0 || req.GetTimeoutMs() < 0 ||
 		math.IsNaN(req.GetTemperature()) || math.IsInf(req.GetTemperature(), 0) {
@@ -360,7 +377,7 @@ func normalizeRequest(principalID string, req *llmgwv1.ChatRequest) (governedReq
 		PromptVersion:      req.GetPromptTemplateVersion(),
 		SchemaKey:          req.GetResponseSchemaKey(),
 		SchemaVersion:      req.GetResponseSchemaVersion(),
-		DataClassification: req.GetDataClassification(),
+		DataClassification: dataClass,
 		Messages:           messages,
 		RawSchema:          req.GetJsonSchema(),
 		PromptVariables:    req.GetPromptVariables(),
@@ -415,6 +432,7 @@ func (s *Service) loadRoute(ctx context.Context, req governedRequest, binding ru
 		SELECT route.route_version,
 		       route.primary_model_id,
 		       route.fallback_model_ids,
+		       route.allowed_data_classes,
 		       route.max_output_tokens,
 		       route.timeout_ms,
 		       route.max_attempts,
@@ -431,6 +449,7 @@ func (s *Service) loadRoute(ctx context.Context, req governedRequest, binding ru
 		&route.version,
 		&route.primaryModel,
 		&fallbacks,
+		&route.allowedDataClasses,
 		&route.maxOutput,
 		&route.timeoutMS,
 		&route.maxAttempts,
@@ -804,7 +823,7 @@ func (s *Service) reserveCall(
 			logical_call_pk, ledger_entry_id, logical_call_id, principal_id,
 			session_id, run_id, role, release_id, route_version,
 			price_table_version, model_id, request_hash, budget_scope_id,
-			status, reserved_input_tokens, reserved_output_tokens,
+			status, data_classification, reserved_input_tokens, reserved_output_tokens,
 			reserved_cost_micro_usd, reserved_provider_tokens,
 			prompt_template_key,
 			prompt_template_version, prompt_template_sha256,
@@ -812,13 +831,13 @@ func (s *Service) reserveCall(
 			response_schema_sha256
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-			'IN_PROGRESS', $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+			'IN_PROGRESS', $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
 		)`,
 		prepared.logicalCallPK, prepared.ledgerEntryID, req.LogicalCallID,
 		req.PrincipalID, req.SessionID, req.RunID, req.Role, req.ReleaseID,
 		route.version, route.priceVersion, prepared.selected.modelID,
-		requestHash, budgetScopeID, inputBound, outputBound, reservedCost,
-		reservedTokens,
+		requestHash, budgetScopeID, req.DataClassification,
+		inputBound, outputBound, reservedCost, reservedTokens,
 		prompt.key, prompt.version, prompt.digest,
 		nullableText(schemaKey(schema)), nullableText(schemaVersion(schema)),
 		nullableText(schemaDigest(schema)),
@@ -1053,9 +1072,39 @@ func (s *Service) settleSchemaFailure(
 	actualCostMicroUSD int64,
 	actualTokens int64,
 ) error {
+	return s.settleRejectedProviderResult(
+		ctx, prepared, result, actualCostMicroUSD, actualTokens,
+		ReasonSchemaValidationFailed,
+		"供应商输出不符合已注册 response schema",
+	)
+}
+
+func (s *Service) settleSensitiveOutputFailure(
+	ctx context.Context,
+	prepared *preparedCall,
+	result providerResult,
+	actualCostMicroUSD int64,
+	actualTokens int64,
+) error {
+	return s.settleRejectedProviderResult(
+		ctx, prepared, result, actualCostMicroUSD, actualTokens,
+		ReasonSensitiveDataNotAllowed,
+		"供应商输出包含不得返回或持久化的敏感原文",
+	)
+}
+
+func (s *Service) settleRejectedProviderResult(
+	ctx context.Context,
+	prepared *preparedCall,
+	result providerResult,
+	actualCostMicroUSD int64,
+	actualTokens int64,
+	errorReason string,
+	errorMessage string,
+) error {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return newStableError(codes.Internal, 500, "INTERNAL", "启动 schema 失败结算事务失败")
+		return newStableError(codes.Internal, 500, "INTERNAL", "启动被拒输出结算事务失败")
 	}
 	defer tx.Rollback(ctx)
 
@@ -1067,7 +1116,7 @@ func (s *Service) settleSchemaFailure(
 		FOR UPDATE`,
 		prepared.logicalCallPK,
 	).Scan(&currentStatus); err != nil {
-		return newStableError(codes.Internal, 500, "INTERNAL", "读取 schema 失败调用状态失败")
+		return newStableError(codes.Internal, 500, "INTERNAL", "读取被拒输出调用状态失败")
 	}
 	if currentStatus != "IN_PROGRESS" {
 		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用已完成或正在结算")
@@ -1092,7 +1141,7 @@ func (s *Service) settleSchemaFailure(
 		actualTokens, actualCostMicroUSD, finishedAt, prepared.logicalCallPK,
 	)
 	if err != nil {
-		return newStableError(codes.Internal, 500, "INTERNAL", "释放 schema 失败预算差额失败")
+		return newStableError(codes.Internal, 500, "INTERNAL", "释放被拒输出预算差额失败")
 	}
 	if tag.RowsAffected() != 1 {
 		return newStableError(codes.Internal, 500, "INTERNAL", "预算预留状态不一致")
@@ -1109,13 +1158,13 @@ func (s *Service) settleSchemaFailure(
 		    finished_at = $6
 		WHERE attempt_id = $7 AND status = 'IN_PROGRESS'`,
 		result.InputTokens, result.OutputTokens, actualCostMicroUSD,
-		result.ProviderRequestID, ReasonSchemaValidationFailed, finishedAt, prepared.attemptID,
+		result.ProviderRequestID, errorReason, finishedAt, prepared.attemptID,
 	)
 	if err != nil {
-		return newStableError(codes.Internal, 500, "INTERNAL", "结算 schema 失败 attempt 失败")
+		return newStableError(codes.Internal, 500, "INTERNAL", "结算被拒输出 attempt 失败")
 	}
 	if tag.RowsAffected() != 1 {
-		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "attempt 状态不允许 schema 失败结算")
+		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "attempt 状态不允许被拒输出结算")
 	}
 
 	tag, err = tx.Exec(ctx, `
@@ -1130,21 +1179,20 @@ func (s *Service) settleSchemaFailure(
 		    updated_at = $5
 		WHERE logical_call_pk = $6 AND status = 'IN_PROGRESS'`,
 		result.InputTokens, result.OutputTokens, actualCostMicroUSD,
-		ReasonSchemaValidationFailed, finishedAt, prepared.logicalCallPK,
+		errorReason, finishedAt, prepared.logicalCallPK,
 	)
 	if err != nil {
-		return newStableError(codes.Internal, 500, "INTERNAL", "提交 schema 失败逻辑调用失败")
+		return newStableError(codes.Internal, 500, "INTERNAL", "提交被拒输出逻辑调用失败")
 	}
 	if tag.RowsAffected() != 1 {
-		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用状态不允许 schema 失败结算")
+		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用状态不允许被拒输出结算")
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return newStableError(codes.Internal, 500, "INTERNAL", "提交 schema 失败结算失败")
+		return newStableError(codes.Internal, 500, "INTERNAL", "提交被拒输出结算失败")
 	}
-	s.insertFailedProjection(ctx, prepared, result, actualCostMicroUSD)
+	s.insertFailedProjection(ctx, prepared, result, actualCostMicroUSD, errorReason)
 	return newStableError(
-		codes.FailedPrecondition, 412, ReasonSchemaValidationFailed,
-		"供应商输出不符合已注册 response schema",
+		codes.FailedPrecondition, 412, errorReason, errorMessage,
 	)
 }
 
@@ -1347,10 +1395,6 @@ func (s *Service) markBudgetOverrun(
 		return newStableError(codes.Internal, 500, "INTERNAL", "预算作用域状态不一致")
 	}
 
-	payload, err := json.Marshal(result)
-	if err != nil {
-		return newStableError(codes.Internal, 500, "INTERNAL", "序列化预算超限结果失败")
-	}
 	tag, err = tx.Exec(ctx, `
 		UPDATE llm_provider_attempt
 		SET status = 'PENDING_RECONCILIATION',
@@ -1377,12 +1421,12 @@ func (s *Service) markBudgetOverrun(
 		    actual_input_tokens = $1,
 		    actual_output_tokens = $2,
 		    actual_cost_micro_usd = $3,
-		    response_payload = $4,
-		    error_reason = $5,
-		    updated_at = $6
-		WHERE logical_call_pk = $7 AND status = 'IN_PROGRESS'`,
+		    response_payload = NULL,
+		    error_reason = $4,
+		    updated_at = $5
+		WHERE logical_call_pk = $6 AND status = 'IN_PROGRESS'`,
 		result.InputTokens, result.OutputTokens, actualCostMicroUSD,
-		payload, ReasonBudgetOverrun, finishedAt, prepared.logicalCallPK,
+		ReasonBudgetOverrun, finishedAt, prepared.logicalCallPK,
 	)
 	if err != nil {
 		return newStableError(codes.Internal, 500, "INTERNAL", "记录预算超限逻辑调用失败")
@@ -1544,6 +1588,13 @@ func (s *Service) resolveExistingCall(
 		return nil, nil, newStableError(
 			codes.FailedPrecondition, 412, ReasonSchemaValidationFailed,
 			"供应商输出不符合已注册 response schema",
+		)
+	}
+	if status == "FAILED" && errorReason != nil &&
+		*errorReason == ReasonSensitiveDataNotAllowed {
+		return nil, nil, newStableError(
+			codes.FailedPrecondition, 412, ReasonSensitiveDataNotAllowed,
+			"供应商输出包含不得返回或持久化的敏感原文",
 		)
 	}
 	if status == "FAILED" || status == "BUDGET_OVERRUN" {
@@ -1710,6 +1761,7 @@ func (s *Service) insertFailedProjection(
 	prepared *preparedCall,
 	result providerResult,
 	actualCostMicroUSD int64,
+	errorReason string,
 ) {
 	_, _ = s.pool.Exec(ctx, `
 		INSERT INTO llm_call_log (
@@ -1725,7 +1777,7 @@ func (s *Service) insertFailedProjection(
 		prepared.traceID, prepared.sessionID, prepared.role,
 		prepared.selected.modelID, prepared.requestHash,
 		result.InputTokens, result.OutputTokens, float64(actualCostMicroUSD)/1_000_000,
-		time.Since(prepared.startedAt).Milliseconds(), ReasonSchemaValidationFailed,
+		time.Since(prepared.startedAt).Milliseconds(), errorReason,
 		prepared.logicalCallID, prepared.ledgerEntryID, prepared.attemptID,
 		prepared.route.version, prepared.route.priceVersion, actualCostMicroUSD,
 	)

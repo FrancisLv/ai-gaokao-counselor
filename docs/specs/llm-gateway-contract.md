@@ -139,8 +139,8 @@ RoleRoute
   timeout_ms
   requires_response_schema: bool
   price_table_version
-  allowed_data_classification:
-    PUBLIC | INTERNAL
+  allowed_data_classes:
+    subset of PUBLIC_DATA | PRINCIPAL_DATA | INQUIRY_DATA | OPERATIONAL_DATA
 ```
 
 规则：
@@ -153,7 +153,9 @@ RoleRoute
 - 切换备用模型属于同一 `logical_call_id` 的新 `attempt_id`；
 - M5a 核心硬上限为每个 logical call 最多两个 provider attempt；route
   `max_attempts` 只能配置 1 或 2，数据库同时约束 attempt 序号不超过 2；
-- 模型价格表中不存在的模型不得启用。
+- 模型价格表中不存在的模型不得启用；
+- route 必须明确声明允许的数据类别；`SENSITIVE_ELIGIBILITY_DATA` 与 `SECRET`
+  不能进入该集合，任意调用方声明这两个类别都返回 `SENSITIVE_DATA_NOT_ALLOWED`。
 
 ## 5. 请求与响应
 
@@ -177,7 +179,9 @@ ChatRequest
   temperature: double
   max_output_tokens: int32
   timeout_ms: int32
-  data_classification: PUBLIC | INTERNAL | SENSITIVE
+  data_class: PUBLIC_DATA | PRINCIPAL_DATA | INQUIRY_DATA
+             | SENSITIVE_ELIGIBILITY_DATA | OPERATIONAL_DATA | SECRET
+  data_classification: legacy string compatibility only
   logical_call_id: stable string
 ```
 
@@ -187,7 +191,16 @@ ChatRequest
   变量；未注册、已撤销或版本不存在返回 `PROMPT_TEMPLATE_NOT_ALLOWED`。
 - `system` message 必须由注册模板生成；调用方 messages 中出现 system 角色返回
   `PROMPT_TEMPLATE_NOT_ALLOWED`。非 system messages 只能在服务端模板之后追加。
-- `SENSITIVE` 数据不得发送到云供应商，返回 `SENSITIVE_DATA_NOT_ALLOWED`。
+- 新调用使用 typed `data_class`，值必须是六类之一且被 route 允许；未知值 fail
+  closed。旧 string `data_classification` 仍可传六类值，或显式兼容
+  `PUBLIC -> PUBLIC_DATA`、`INTERNAL -> PRINCIPAL_DATA`、
+  `SENSITIVE -> SENSITIVE_ELIGIBILITY_DATA`；新旧字段同时出现必须映射一致。
+- `SENSITIVE_ELIGIBILITY_DATA`、`SECRET`、route 未允许的类别，以及无法可靠
+  分离的手机号/身份证号/邮箱/健康等直接敏感原文，均在持久化和 provider 调用前
+  返回 `SENSITIVE_DATA_NOT_ALLOWED`。
+- 已脱敏规则只发送字段语义与 `PASS/FAIL/UNKNOWN` 结论，不发送原始健康、色觉、
+  视力、性别、户籍或学籍事实。provider 回显未脱敏内容时按实际 usage 结算后
+  丢弃响应并返回同一稳定错误。
 - `max_output_tokens` 不能超过角色路由上限。
 - `timeout_ms` 不能超过当前 run 剩余执行时间。
 - `release_id` 必须有效且用于缓存与模型配置解析。
@@ -272,7 +285,7 @@ prompt_template_key + prompt_template_version
 
 规则：
 
-- 仅 `temperature=0` 且 `data_classification != SENSITIVE` 的调用可缓存；
+- 仅 `temperature=0`、数据类别为 `PUBLIC_DATA` 且 route 明确允许缓存时可缓存；
 - 缓存值保存最终内容、结构化结果、模型、route、schema 和 usage 类型；
 - 缓存命中不创建 provider attempt，provider token 和实际费用为 0；
 - 缓存命中仍记录 logical call、命中来源和本地延迟；
@@ -423,7 +436,7 @@ ReconciliationRequest
 - 日志记录 trace、principal/session/run 身份、role、模型、usage、成本、延迟和错误码；
 - 默认不记录完整 messages、模型原始响应和敏感字段；
 - 如需调试 prompt，只记录模板 key/version、脱敏后的 hash 和样本 ID；
-- `SENSITIVE` 数据在到达网关前必须已转换为脱敏规则结论；
+- 敏感资格数据在到达网关前必须已转换为脱敏规则结论；
 - 模型 key 只在 gateway 进程中通过 secrets 注入；
 - 供应商 URL 和模型 id 不能被请求覆盖。
 
@@ -436,7 +449,7 @@ ReconciliationRequest
 | `MODEL_NOT_ALLOWED` | 拒绝路由 |
 | `PROMPT_TEMPLATE_NOT_ALLOWED` | 拒绝未注册 system prompt |
 | `RESPONSE_SCHEMA_NOT_ALLOWED` | 拒绝未注册/撤销 schema 或 raw schema 绕过 |
-| `SENSITIVE_DATA_NOT_ALLOWED` | 拒绝云模型调用 |
+| `SENSITIVE_DATA_NOT_ALLOWED` | 分类/route/原文不允许；拒绝持久化与 provider，或丢弃不安全输出 |
 | `IDEMPOTENCY_CONFLICT` | 同 key 不同请求 |
 | `CALL_IN_PROGRESS` | 同逻辑调用正在执行 |
 | `SCHEMA_VALIDATION_FAILED` | 不返回成功结构化结果，按真实 usage 结算 |
