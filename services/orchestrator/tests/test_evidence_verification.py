@@ -548,6 +548,75 @@ class VerifyPackageDocumentTests(unittest.TestCase):
         self.assertEqual(report.status, "BLOCKED")
         self.assertEqual(report.claims[0].status, "CONTRADICTED")
 
+    def test_document_claim_cannot_splice_bindings_from_different_excerpts(self):
+        amount_document = document_evidence(
+            excerpt="该专业学费为5000。",
+        )
+        amount_ref = document_ref(
+            amount_document,
+            evidence_id="ev-tuition-amount",
+        )
+        unit_document = replace(
+            document_evidence(excerpt="学费单位为元。"),
+            chunk_id="chunk-tuition-unit",
+        )
+        unit_ref = document_ref(
+            unit_document,
+            evidence_id="ev-tuition-unit",
+        )
+        year_document = replace(
+            document_evidence(excerpt="来源年份为2023年。"),
+            chunk_id="chunk-tuition-year",
+        )
+        year_ref = document_ref(
+            year_document,
+            evidence_id="ev-tuition-year",
+        )
+        claim = Claim(
+            claim_id="claim-tuition",
+            claim_type="DOCUMENT_FACT",
+            criticality="CRITICAL",
+            normalized=NormalizedFact(
+                subject="湖南测试大学",
+                predicate="学费",
+                object=5000,
+                unit="元",
+                source_year=2023,
+            ),
+            rendered_text="该专业学费为5000元，来源年份为2023年。",
+            evidence_refs=(amount_ref, unit_ref, year_ref),
+            rendered_bindings=(
+                RenderedBinding(
+                    fact_path="normalized.object",
+                    rendered_text="5000",
+                    evidence_id=amount_ref.evidence_id,
+                ),
+                RenderedBinding(
+                    fact_path="normalized.unit",
+                    rendered_text="元",
+                    evidence_id=unit_ref.evidence_id,
+                ),
+                RenderedBinding(
+                    fact_path="normalized.source_year",
+                    rendered_text="2023",
+                    evidence_id=year_ref.evidence_id,
+                ),
+            ),
+        )
+
+        report = VerifyPackage(
+            document_package(
+                amount_document,
+                amount_ref,
+                registry=(amount_ref, unit_ref, year_ref),
+                claims=(claim,),
+            ),
+        )
+
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.claims[0].status, "CONTRADICTED")
+        self.assertEqual(report.claims[0].reason, "CLAIM_RENDER_MISMATCH")
+
     def test_excerpt_hash_mismatch_is_contradicted(self):
         document = document_evidence()
         ref = replace(document_ref(document), content_sha256="b" * 64)

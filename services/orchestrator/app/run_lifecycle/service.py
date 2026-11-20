@@ -1563,7 +1563,7 @@ class RunLifecycle:
                            state_version, release_id, working_profile_version,
                            confirmed_profile_version, lease_owner, lease_epoch,
                            lease_expires_at, active_execution_remaining_ms,
-                           active_execution_started_at
+                           active_execution_started_at, created_at
                     FROM run
                     WHERE run_id = %s
                     FOR UPDATE
@@ -1622,7 +1622,7 @@ class RunLifecycle:
                               state_version, release_id, working_profile_version,
                               confirmed_profile_version, lease_owner, lease_epoch,
                               lease_expires_at, active_execution_remaining_ms,
-                              active_execution_started_at
+                              active_execution_started_at, created_at
                     """,
                     (
                         next_version,
@@ -2241,7 +2241,7 @@ class RunLifecycle:
                            state_version, release_id, working_profile_version,
                            confirmed_profile_version, lease_owner, lease_epoch,
                            lease_expires_at, active_execution_remaining_ms,
-                           active_execution_started_at
+                           active_execution_started_at, created_at
                     FROM run
                     WHERE run_id = %s
                     """,
@@ -2466,7 +2466,7 @@ class RunLifecycle:
             release_id=row["release_id"],
             profile_version=str(row["confirmed_profile_version"]),
             verifier_version=self._formal_verifier_version,
-            applicable_as_of=self._clock().date(),
+            applicable_as_of=row["created_at"].date(),
             algorithm_config_version=row["release_id"],
             algorithm_config_sha256=algorithm_config_sha256,
             qualification=qualification,

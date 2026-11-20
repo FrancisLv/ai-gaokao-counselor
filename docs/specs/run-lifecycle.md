@@ -311,6 +311,8 @@ expires_at
 - 结果发布必须同时校验 lease epoch、state_version、confirmed profile 和 release 有效性。
 - 正式发布必须从 `run_formal_gate_artifact` 复核资格摘要、release manifest 配置、
   Verifier 版本和 `applicable_as_of`；缺失、摘要不一致或 artifact hash 冲突均 fail closed。
+- `applicable_as_of` 固定取持久化 `run.created_at` 的日期，不取 worker 当前时钟；
+  同一 run 在不同日期重建 artifact 时摘要必须稳定。
 - `V1_FORMAL` 必须在同一事务写入结果、证据包、验证报告、`run.state=SUCCEEDED`、
   `result_version`、ACTIVE 状态和 RESULT 事件；数据库触发器拒绝重写正文。
 - GET、Watch 与 RESULT 事件必须返回同一完整 `verification_report`，并原样返回

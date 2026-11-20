@@ -244,7 +244,8 @@ ClaimVerification
 1. 检查证据存在、release 一致，并按 package 的 `applicable_as_of` 检查适用域；
 2. 检查 excerpt/hash/section path；
 3. 对结构化抽取的文档事实做确定性字段比对，单位与来源年份也必须绑定到同一原文和
-   `rendered_bindings`；
+   `rendered_bindings`；数值、单位、来源年份等关键绑定必须共同解析到同一条 excerpt，
+   即使逐条分别命中不同原文也不得拼接为 `VERIFIED`，应返回 `CLAIM_RENDER_MISMATCH`；
 4. 对真正需要语义判断的文本，可调用经过版本化的 entailment verifier；adapter
    `verifier_version` 必须与 package/gate 的 Verifier 版本完全一致；
 5. entailment 无法确定时只能返回 `UNVERIFIABLE`，不能升级为 `VERIFIED`。

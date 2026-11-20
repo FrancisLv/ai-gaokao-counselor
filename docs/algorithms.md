@@ -270,8 +270,10 @@ MISSING_REQUIRED_FACT、FAIL、BLOCKED 和未被资格结果覆盖的候选均�
 诊断结果并明确 `formal_eligibility_ready=false`。PASS_PARTIAL 可以进入优化，但必须
 在结果中保留受限专业。资格结果不修改候选身份、概率或优化顺序。
 EvaluateEligibility 返回后，RunLifecycle 立即把资格摘要、release manifest 配置身份、
-Verifier 版本和运行快照日期写入不可变 `run_formal_gate_artifact`。后续正式发布必须
-复核该 artifact，不能信任调用方另外提交的 `COMPLETE + PASS` 摘要。
+Verifier 版本和 run 不可变创建日期写入不可变 `run_formal_gate_artifact`。该日期取
+持久化 `run.created_at` 的日期，不读取 worker 当前时钟；同一 run 在不同日期重建
+artifact 必须得到同一摘要。后续正式发布必须复核该 artifact，不能信任调用方另外提交
+的 `COMPLETE + PASS` 摘要。
 
 `in_current_plan` 由 `EstimateProb` 的候选专业明细提供，取值来自报考年
 `enrollment_plan` 的专业代码成员检查；历史录取专业不因曾存在于上一年计划而自动成为
@@ -298,8 +300,10 @@ Profile、release、输出字段、值、单位、精度或样本年份不一致
 来源年份、结构化事实的 subject/predicate 也必须与确定性渲染绑定一致。
 
 数字、单位和样本年份在 `rendered_bindings` 中必须指向本 Claim 的证据，且展示文本
-与规范身份一致。派生事实即使数值完全一致，也不得表达“保证录取”等算法能力之外的
-承诺；合法的“不保证录取”免责声明不触发该门禁。
+与规范身份一致。文档 Claim 的数值、单位和来源年份等关键绑定必须共同解析到同一份
+证据原文；即使每个片段分别存在于不同 excerpt 且单独匹配，也不得跨原文拼接为
+`VERIFIED`。派生事实即使数值完全一致，也不得表达“保证录取”等算法能力之外的承诺；
+合法的“不保证录取”免责声明不触发该门禁。
 
 ---
 

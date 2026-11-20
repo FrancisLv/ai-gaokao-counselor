@@ -550,6 +550,7 @@ def _claim_supported_by_documents(
             claim.normalized.source_year
         )
     seen: set[str] = set()
+    binding_evidence_ids: set[str] = set()
     for binding in claim.rendered_bindings:
         expected_text = expected.get(binding.fact_path)
         if (
@@ -565,7 +566,11 @@ def _claim_supported_by_documents(
         if binding.rendered_text not in claim.rendered_text:
             return False
         seen.add(binding.fact_path)
-    return seen == set(expected)
+        binding_evidence_ids.add(binding.evidence_id)
+    return (
+        seen == set(expected)
+        and len(binding_evidence_ids) == 1
+    )
 
 
 def _same_derived_identity(

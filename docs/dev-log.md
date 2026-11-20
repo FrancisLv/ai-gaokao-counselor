@@ -1936,3 +1936,31 @@ LLM 规则生成。
   按既有约定跳过。
 - `make api PY=/Users/francis/miniconda3/envs/ai-gaokao-counselor/bin/python3`、
   `make build check test` 均通过。
+
+## 59. M4c 最终 merger 修复：跨原文拼接与 artifact 日期漂移
+
+**日期与范围**：2026-11-20，分支 `codex/m4c-review-fixes`，修复 issue #30/M4c
+最终 merger 的两个 blocker。
+
+### 问题与实现
+
+- `VerifyPackage` 原先分别验证每个文档渲染绑定，可能把不同 excerpt 中的数值、单位
+  和来源年份拼成一条 `VERIFIED` 文档 Claim。现要求所有关键绑定共同解析到同一
+  `EvidenceRef`，跨原文组合返回 `CLAIM_RENDER_MISMATCH` 并阻断。
+- 权威正式 `run_formal_gate_artifact` 的 `applicable_as_of` 原取 worker 当前时钟
+  日期，导致同一 run 在跨日重试时产生不同摘要并冲突。现从 run 查询中携带持久化
+  `created_at`，固定使用其日期生成 artifact。
+
+### 验证
+
+- 严格 TDD 先新增三个独立 excerpt 的文档 Claim 跨原文拼接反例，修复前错误为
+  `PASS`，修复后为 `BLOCKED / CONTRADICTED / CLAIM_RENDER_MISMATCH`。
+- 真实 PostgreSQL 公开行为测试将 lifecycle 时钟固定在 2024-01-02，断言 artifact
+  日期等于 run 的持久创建日期；修复前为 `2024-01-02` 而 run 创建日为
+  `2026-11-20`，修复后一致。
+- 同一 run 在 2024-01-02 生成 artifact 后模拟 worker 中断，再由 2024-01-03 的
+  lifecycle 重试；重试成功且 artifact 日期与 SHA-256 均保持不变。
+- `test_evidence_verification.py` 77 tests OK；真实库
+  `test_run_lifecycle_algorithm_preview.py` 6 tests OK，1 个外部 algo 用例按既有
+  条件跳过；全量 Python 292 tests OK，2 个条件用例跳过。
+- `make api`、`make build`、`make check`、`make test` 与 `git diff --check` 通过。

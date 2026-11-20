@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import os
 import unittest
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import grpc
@@ -336,6 +337,163 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
         self.assertEqual(
             result_event.payload["result_version"],
             str(completed.result.result_version),
+        )
+
+    async def test_formal_gate_artifact_rebuild_is_stable_across_dates(self):
+        from app.run_lifecycle import (
+            ConfirmProfileAnswer,
+            ResumeRunCommand,
+            RunLifecycle,
+            StructuredProfileInput,
+            SubmitRunCommand,
+        )
+        from app.run_lifecycle.worker import RunLifecycleWorker
+
+        class InterruptedPreviewAlgo(FakeAlgoClient):
+            def __init__(self):
+                super().__init__()
+                self.optimize_entered = asyncio.Event()
+                self.allow_failure = asyncio.Event()
+
+            async def OptimizeWishlist(self, request):
+                self.calls.append(("OptimizeWishlist", request))
+                self.optimize_entered.set()
+                await self.allow_failure.wait()
+                raise RuntimeError("simulate interrupted preview")
+
+        await self.seed_release()
+        first_algo = InterruptedPreviewAlgo()
+        first_lifecycle = RunLifecycle(
+            self.dsn,
+            worker_owner="worker-artifact-date",
+            algo_client=first_algo,
+            lease_duration=timedelta(seconds=1),
+            clock=lambda: datetime(
+                2024,
+                1,
+                2,
+                23,
+                59,
+                59,
+                tzinfo=timezone.utc,
+            ),
+        )
+        self.addAsyncCleanup(first_lifecycle.close)
+        worker = RunLifecycleWorker(first_lifecycle, poll_interval=0.01)
+        await worker.start()
+
+        submitted = await first_lifecycle.SubmitRun(
+            SubmitRunCommand(
+                principal_id="principal-a",
+                session_id=None,
+                task_kind="GENERATE_PLAN",
+                input=StructuredProfileInput(
+                    province="湖南",
+                    application_year=2025,
+                    category="物理类",
+                    batch="本科批",
+                    score=600,
+                    subjects=("物理", "化学", "生物"),
+                ),
+                idempotency_key="algorithm-preview-artifact-date-submit",
+            )
+        )
+        waiting = await self._wait_for(
+            first_lifecycle,
+            submitted.run_id,
+            "interrupt",
+        )
+        await first_lifecycle.ResumeRun(
+            ResumeRunCommand(
+                principal_id="principal-a",
+                run_id=submitted.run_id,
+                interrupt_id=waiting.current_interrupt.interrupt_id,
+                expected_state_version=waiting.state_version,
+                profile_version=UUID(
+                    waiting.current_interrupt.payload["profile_version"]
+                ),
+                answer=ConfirmProfileAnswer(),
+                idempotency_key="algorithm-preview-artifact-date-confirm",
+            )
+        )
+        await asyncio.wait_for(first_algo.optimize_entered.wait(), timeout=5)
+
+        conn = await self._connect()
+        try:
+            first_artifact = await (
+                await conn.execute(
+                    """
+                    SELECT run.created_at, artifact.applicable_as_of,
+                           artifact.artifact_sha256
+                    FROM run
+                    JOIN run_formal_gate_artifact artifact
+                      ON artifact.run_id = run.run_id
+                    WHERE run.run_id = %s
+                    """,
+                    (submitted.run_id,),
+                )
+            ).fetchone()
+        finally:
+            await conn.close()
+
+        with self.assertLogs(
+            "app.run_lifecycle.worker",
+            level="ERROR",
+        ):
+            first_algo.allow_failure.set()
+            await asyncio.sleep(0.05)
+            await worker.stop()
+        await first_lifecycle.close()
+
+        restarted = RunLifecycle(
+            self.dsn,
+            worker_owner="worker-artifact-date-retry",
+            algo_client=FakeAlgoClient(),
+            clock=lambda: datetime(
+                2024,
+                1,
+                3,
+                0,
+                0,
+                1,
+                tzinfo=timezone.utc,
+            ),
+        )
+        self.addAsyncCleanup(restarted.close)
+        await restarted.run_due_work_once()
+        completed = await self._wait_for(
+            restarted,
+            submitted.run_id,
+            "result",
+        )
+
+        conn = await self._connect()
+        try:
+            rebuilt_artifact = await (
+                await conn.execute(
+                    """
+                    SELECT applicable_as_of, artifact_sha256
+                    FROM run_formal_gate_artifact
+                    WHERE run_id = %s
+                    """,
+                    (submitted.run_id,),
+                )
+            ).fetchone()
+        finally:
+            await conn.close()
+
+        self.assertEqual(completed.state, "SUCCEEDED")
+        self.assertEqual(
+            first_artifact["applicable_as_of"],
+            first_artifact["created_at"].date(),
+        )
+        self.assertEqual(
+            rebuilt_artifact["applicable_as_of"],
+            first_artifact["applicable_as_of"],
+        )
+        self.assertEqual(
+            rebuilt_artifact["artifact_sha256"],
+            first_artifact["artifact_sha256"],
         )
 
     async def test_missing_audit_basis_fails_closed_without_result_event(self):
