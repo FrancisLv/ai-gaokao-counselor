@@ -2109,7 +2109,7 @@ prompt/schema、敏感分类、缓存与流式能力。
 - 覆盖主模型 429 后备用成功、两个 attempt 的不同 ID/模型/起止时间/provider
   request id/usage/cost/error、两次 attempt 耗尽、不可重试参数/认证/schema
   故障不降级、同 ID 在途并发只产生一次 provider 调用、完成态重放、request hash
-  维度、预算完整释放及 `00/07→31` / `28→29→30→31` 迁移。
+  维度、预算完整释放及 `00/07→32` / `28→29→30→31→32` 迁移。
 - `LLMGW_TEST_DSN=postgresql://.../ai_gaokao_ticket2_test \
   go test -tags integration ./internal/llmgw/... -count=1` 通过。
 
@@ -2137,7 +2137,7 @@ usage 缺失/不可信与可能已受理断连语义，以及不新增公共 RPC
   `RECONCILIATION_REQUIRED`。gRPC `ErrorInfo.metadata` 携带
   `logical_call_id / attempt_id / ledger_entry_id`，并复用相同身份重放长期未知
   状态；错误 message 不拼接供应商原始正文。
-- `migrations/32_llm_attempt_reconciliation.sql` 为 logical call 冻结包含全部
+- `migrations/33_llm_attempt_reconciliation.sql` 为 logical call 冻结包含全部
   attempt 的 `reserved_provider_tokens`，并新建追加式
   `llm_attempt_reconciliation`。迁移前旧行保持 `NULL`，不回填猜测值；对账对
   缺少冻结总额的旧行明确拒绝。
@@ -2159,7 +2159,7 @@ usage 缺失/不可信与可能已受理断连语义，以及不新增公共 RPC
 - 覆盖 `PROVIDER_TIMEOUT` 身份 metadata、供应商正文不回显、长期未知重复请求
   不新增 provider attempt、usage 缺失与显式不可信、明确计费、明确免计费、
   同依据重复、异依据冲突、超预留封锁后续调用，以及审计原预留/原错误保留。
-- fresh/upgrade 迁移扩展到 `32`；既有 Chat、并发预算、主备切换、幂等和终态
+- fresh/upgrade 迁移扩展到 `33`；既有 Chat、并发预算、主备切换、幂等和终态
   重放测试全部回归通过。
 
 ### 边界与风险
@@ -2170,3 +2170,52 @@ usage 缺失/不可信与可能已受理断连语义，以及不新增公共 RPC
   运营 adapter 负责在其可信边界内取得明确依据。
 - 升级前已存在的未知 attempt 没有历史 `reserved_provider_tokens` 可无损推导，
   对账会 fail closed，需先完成人工账务审计，不能静默猜测回填。
+
+## 64. M5a-03 注册 prompt 模板与 response schema
+
+**日期与范围**：2026-11-20，issue #36。按 TDD 从生成的
+`LLMGatewayClient.Chat` 收紧 prompt/schema 授权：只允许 release 内注册且未撤销的
+版本；不实现 #37 六类敏感分类、#38 缓存或 #39 `StreamChat`。
+
+### 契约与实现
+
+- `ChatRequest` 新增 `map<string,string> prompt_variables`。旧 `messages/json_schema`
+  保留 wire 兼容；调用方 system message 返回 `PROMPT_TEMPLATE_NOT_ALLOWED`，raw
+  `json_schema` 单独出现返回 `RESPONSE_SCHEMA_NOT_ALLOWED`，不能授权或覆盖注册
+  schema。`ChatResponse` 新增 prompt/schema key/version；合法结构化输出继续返回
+  typed `structured_output`，并同时返回 route/model/price 身份。
+- `migrations/32_llm_prompt_schema_registry.sql` 只增建立 release-bound
+  `llm_prompt_template` / `llm_response_schema`，PK 为 `(release_id,key,version)`；
+  内容摘要与模板/schema 内容不可原地改写，仅允许 `ACTIVE -> REVOKED`。route 新增
+  `requires_response_schema`；logical call 冻结 prompt/schema key/version/摘要并以
+  composite FK 绑定注册行。
+- `Chat` 在预算预占前解析并校验 prompt/schema。模板用 `{{variable_name}}` 渲染，
+  system/user 模板生成服务端消息，调用方非 system messages 只能追加；解析消息、
+  prompt/schema key/version 与内容摘要全部进入 request hash。任一项版本变化会形成
+  新语义，同 `logical_call_id` 返回 `IDEMPOTENCY_CONFLICT`。
+- 结构化 output 必须是 JSON object，并先按唯一注册 schema 校验，再返回
+  protobuf `Struct`。校验失败返回 `SCHEMA_VALIDATION_FAILED`；logical call 记为
+  `FAILED`、attempt 记录供应商真实 usage 与错误码，权威预算按实际 token/cost
+  结算并释放差额，`llm_call_log` 只写 best-effort 失败投影。
+- JSON Schema 校验使用已缓存的 `github.com/google/jsonschema-go v0.4.3`；没有
+  引入网络 schema 加载或供应商侧授权路径。
+
+### 验证
+
+- 主 seam 测试继续使用真实 PostgreSQL 临时 schema、Kratos gRPC + bufconn、生成
+  `LLMGatewayClient` 与 fake provider；直接 SQL 断言仅用于证明预算结算、注册内容
+  不可变和失败终态。
+- 覆盖：模板 key/version 有效、变量渲染、无 messages 时由模板生成内容、未注册/
+  撤销模板、system message 绕过、route 强制 schema、raw schema 单独/覆盖、
+  撤销 schema、合法 structured output、schema 失败按真实 usage 结算及安全重放、
+  prompt/schema/变量版本进入 request hash。
+- fresh schema 覆盖 `00/07 -> 32`，升级路径覆盖 `28 -> 29 -> 30 -> 31 -> 32`；注册
+  prompt/schema 内容的 UPDATE/DELETE 与撤销后恢复均被数据库触发器和约束拒绝。
+
+### 边界与风险
+
+- 本票只做授权与 schema 正确性；敏感原文字段识别、出站脱敏仍是 #37。
+- `CacheHit` 当前固定为 false，没有缓存表或缓存命中；prompt/schema 版本已进入
+  request hash，供 #38 直接扩展缓存键。
+- fake provider 把注册 schema 作为内部请求参数，但不代表真实供应商已接线；
+  生产入口仍 fail closed，`StreamChat` 仍返回未实现。

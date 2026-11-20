@@ -33,6 +33,10 @@ LLM Gateway 是模型供应商的唯一适配层。调用方不得持有供应�
 8. **结构化输出必须由服务端校验。** schema 校验失败不能作为成功结果返回。
 9. **流结束必须有账本。** 正常完成、供应商错误和客户端断流都要记录可对账状态。
 10. **只记录必要数据。** 不把完整敏感 prompt、模型 key 或未脱敏响应写入日志。
+11. **system prompt 只来自注册模板。** 调用方 messages 中不得夹带 system 角色；
+    prompt 模板按 release + key + version 解析。
+12. **结构化授权只来自注册 schema。** 旧 `json_schema` 字段保留 wire 兼容，但不能
+    授权、覆盖或改变已注册 response schema。
 
 ## 3. 预算模型
 
@@ -134,6 +138,7 @@ RoleRoute
   max_output_tokens
   timeout_ms
   requires_response_schema: bool
+  price_table_version
   allowed_data_classification:
     PUBLIC | INTERNAL
 ```
@@ -164,7 +169,9 @@ ChatRequest
   release_id
   prompt_template_key
   prompt_template_version
+  prompt_variables: map<string, string>
   messages: list<Message>
+  json_schema: legacy wire compatibility only
   response_schema_key: string | null
   response_schema_version: string | null
   temperature: double
@@ -176,11 +183,16 @@ ChatRequest
 
 约束：
 
-- `system` message 必须由注册模板生成；调用方自带未注册 system prompt 返回 `PROMPT_TEMPLATE_NOT_ALLOWED`。
+- 新调用必须引用 release 内 `ACTIVE` 的 prompt template key/version，并可提交模板
+  变量；未注册、已撤销或版本不存在返回 `PROMPT_TEMPLATE_NOT_ALLOWED`。
+- `system` message 必须由注册模板生成；调用方 messages 中出现 system 角色返回
+  `PROMPT_TEMPLATE_NOT_ALLOWED`。非 system messages 只能在服务端模板之后追加。
 - `SENSITIVE` 数据不得发送到云供应商，返回 `SENSITIVE_DATA_NOT_ALLOWED`。
 - `max_output_tokens` 不能超过角色路由上限。
 - `timeout_ms` 不能超过当前 run 剩余执行时间。
 - `release_id` 必须有效且用于缓存与模型配置解析。
+- `requires_response_schema=true` 或调用方提交 schema 引用时，必须使用 release
+  内 `ACTIVE` 的 response schema key/version。原始 `json_schema` 不能代替注册引用。
 
 ### 5.2 ChatResponse
 
@@ -201,6 +213,8 @@ ChatResponse
     settlement_status
   attempts: list<AttemptSummary>
   ledger_entry_id
+  prompt_template_key / prompt_template_version
+  response_schema_key / response_schema_version
 ```
 
 `AttemptSummary`：
@@ -215,6 +229,32 @@ provider_request_id | null
 ```
 
 `structured_output` 必须通过 response schema 校验；校验失败返回 `SCHEMA_VALIDATION_FAILED`，不得作为成功内容。
+
+### 5.3 Prompt template 与 response schema 注册
+
+`migrations/32_llm_prompt_schema_registry.sql` 建立两张 release-bound 注册表：
+
+- `llm_prompt_template`：`release_id + prompt_template_key + prompt_template_version`
+  唯一，保存不可变 `system_template / user_template / template_sha256 / status`；
+- `llm_response_schema`：`release_id + response_schema_key + response_schema_version`
+  唯一，保存不可变 JSON Schema、内容摘要和 `status`；
+- `llm_role_route.requires_response_schema` 明确该角色是否必须结构化输出；
+- `llm_logical_call` 冻结本次调用实际使用的 prompt/schema key、version 和摘要。
+
+模板变量使用 `{{variable_name}}`，变量值作为数据替换；缺失变量或格式无效时不预占
+预算、不访问 provider。解析后的 system/user messages，连同 prompt/schema 的
+key、version 和摘要进入 request hash。模板内容只能在发布新 version 时变化；撤销
+只允许 `ACTIVE -> REVOKED`，不能恢复或原地改写。
+
+结构化调用要求供应商返回 JSON object。网关在 provider 返回后、成功响应和结算前用
+同一注册 schema 校验：
+
+- 通过时 `structured_output` 返回规范化 object，并返回 prompt/schema/route/model/
+  price 身份；
+- 不通过时返回 `SCHEMA_VALIDATION_FAILED`，logical call 记为 `FAILED`，不返回
+  structured output；
+- schema 失败仍按供应商真实 usage 原子结算并释放差额；`llm_call_log` 只记录失败
+  投影与稳定 reason，不作为预算权威。
 
 ## 6. 缓存
 
@@ -395,10 +435,11 @@ ReconciliationRequest
 | `PRICE_UNAVAILABLE` | 不发起请求 |
 | `MODEL_NOT_ALLOWED` | 拒绝路由 |
 | `PROMPT_TEMPLATE_NOT_ALLOWED` | 拒绝未注册 system prompt |
+| `RESPONSE_SCHEMA_NOT_ALLOWED` | 拒绝未注册/撤销 schema 或 raw schema 绕过 |
 | `SENSITIVE_DATA_NOT_ALLOWED` | 拒绝云模型调用 |
 | `IDEMPOTENCY_CONFLICT` | 同 key 不同请求 |
 | `CALL_IN_PROGRESS` | 同逻辑调用正在执行 |
-| `SCHEMA_VALIDATION_FAILED` | 不返回成功结构化结果 |
+| `SCHEMA_VALIDATION_FAILED` | 不返回成功结构化结果，按真实 usage 结算 |
 | `PROVIDER_TIMEOUT` | 记录 attempt 与待对账状态 |
 | `PROVIDER_RATE_LIMITED` | 可重试或切换备用模型 |
 | `PROVIDER_UNAVAILABLE` | 可重试或失败 |
@@ -429,3 +470,9 @@ message 不得拼接供应商原始正文。
 | LG-13 | 客户端断开流 | 记录 `STREAM_INTERRUPTED`，可对账 |
 | LG-14 | release 撤销 | 拒绝新模型调用 |
 | LG-15 | 实际费用超过预占 | `BUDGET_OVERRUN`，停止后续调用并告警 |
+| LG-16 | 调用方自带 system message | `PROMPT_TEMPLATE_NOT_ALLOWED`，provider 零调用 |
+| LG-17 | prompt 未注册、撤销或版本不存在 | `PROMPT_TEMPLATE_NOT_ALLOWED`，provider 零调用 |
+| LG-18 | raw `json_schema` 未引用注册 schema | `RESPONSE_SCHEMA_NOT_ALLOWED`，provider 零调用 |
+| LG-19 | 合法结构化 object | 返回 canonical `structured_output` 与全部治理身份 |
+| LG-20 | 输出不符合 schema | `SCHEMA_VALIDATION_FAILED`，无成功结果但结算真实 usage |
+| LG-21 | prompt/schema version 变化 | request hash 与逻辑调用身份变化，不复用旧语义 |
