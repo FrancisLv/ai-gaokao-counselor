@@ -2277,3 +2277,55 @@ usage 缺失/不可信与可能已受理断连语义，以及不新增公共 RPC
   预算预留，仍需在后续对账流程中协调 `BUDGET_OVERRUN` 与
   `SENSITIVE_DATA_NOT_ALLOWED` 的运营优先级。
 - 缓存与 `StreamChat` 未实现；本票只为未来缓存声明默认仅 `PUBLIC_DATA` 可共享。
+
+## 66. M5a-07 release-bound Chat 结果缓存
+
+**日期与范围**：2026-11-20，issue #38。按 TDD 从生成的
+`LLMGatewayClient.Chat` 增加 release-bound 结果缓存；不实现 #39
+`StreamChat`，不接真实付费 provider。
+
+### 契约与实现
+
+- `migrations/35_llm_result_cache.sql` 为 route 增加默认关闭的
+  `allow_result_cache`，为 logical call / 旧投影增加 `cache_hit` 与 key hash，
+  并建立 `llm_result_cache`。缓存行保留 release、key hash、prompt/schema/route/
+  model/data policy 身份、缓存 schema 版本、claim 租约与
+  `IN_PROGRESS / READY / FAILED / INVALIDATED` 状态；request manifest 只保存
+  治理摘要和规范化 messages 的 SHA-256，不保存 prompt 明文。
+- `internal/llmgw/cache.go` 构造 canonical key：
+  prompt key/version/摘要、脱敏 messages、schema key/version/摘要、role、route、
+  完整模型序列、temperature、输出上限、release、data classification/policy 与
+  `llm-result-cache-v1`。只有 route 显式允许、`temperature=0` 且
+  `PUBLIC_DATA` 时才创建 claim。
+- 首次 miss 用 `cache_key_hash` 唯一约束和 claim token 抢占；同键并发请求在 holder
+  未完成时返回 `CALL_IN_PROGRESS`，provider 仍只调用一次。过期 claim 可由后续请求
+  接管，失败/schema 不通过的 claim 进入 `FAILED`，后续安全重试可重新填充。
+- 成功结果会在 schema 与敏感输出守卫之后写入 `READY`。缓存命中另建
+  `SUCCEEDED` logical call，`cache_hit=true`、
+  `settlement_status=CACHE_HIT`，不创建 provider attempt、不增加预算 settled/
+  reserved token/cost；同 logical call 重放继续返回原零费用账本身份。
+- release 撤销触发器把相关缓存转为
+  `INVALIDATED / RELEASE_REVOKED` 并清除结果。Chat 仍在读缓存前按当前
+  `release.status` fail closed；缓存清理只删 `llm_result_cache`，不触碰权威预算、
+  logical call、attempt 或已结算费用。
+- 供应商原始错误、未脱敏/敏感输出、schema 失败结果与敏感输入 prompt 均不进入
+  可读缓存；失败 claim 只保留治理摘要。
+
+### 验证
+
+- 主 seam 测试继续使用真实 PostgreSQL 临时 schema、Kratos gRPC + bufconn、生成
+  `LLMGatewayClient` 与 fake provider。覆盖首次 miss/第二次 hit、消息、prompt、
+  schema、route、模型、temperature、输出上限、data policy 与 release 变化、
+  PUBLIC/temperature/route 准入、结构化结果回放、并发 miss 单调用、幂等重放与
+  cache hit 区分、命中后同 ID 重放、release 撤销自动失效、敏感输入/输出与
+  provider 错误不缓存、schema 失败不缓存且可重试、清理不改账本。
+- fresh schema 验证 `00/07 -> 35` 与缓存表；升级路径验证
+  `28 -> 29 -> ... -> 35`、旧 run 保留及 route/logical call 新列存在。
+
+### 边界与风险
+
+- 缓存目前只服务普通 `Chat`；#39 `StreamChat` 仍未实现。生产 provider 仍
+  fail closed，未执行真实付费模型调用，供应商 usage/cost 仍由真实 adapter 接线后
+  验证。
+- 共享缓存仅允许 `PUBLIC_DATA`。未来若开放 principal/session 作用域缓存，必须
+  新增加固键和迁移，不能只放宽当前 data class 判断。

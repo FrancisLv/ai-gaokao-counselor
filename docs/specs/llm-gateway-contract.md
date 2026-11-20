@@ -277,20 +277,34 @@ key、version 和摘要进入 request hash。模板内容只能在发布新 vers
 prompt_template_key + prompt_template_version
 + canonical_redacted_messages
 + response_schema_key + response_schema_version
-+ role + route_version + model_id
++ role + route_version + ordered_model_ids + model_id
 + temperature + max_output_tokens
 + release_id
++ data_classification + allowed_data_classes + data_policy
 + cache_schema_version
 ```
 
 规则：
 
-- 仅 `temperature=0`、数据类别为 `PUBLIC_DATA` 且 route 明确允许缓存时可缓存；
+- `llm_role_route.allow_result_cache` 默认 `FALSE`；仅 `temperature=0`、数据类别为
+  `PUBLIC_DATA` 且 route 明确允许缓存时读写共享缓存；
 - 缓存值保存最终内容、结构化结果、模型、route、schema 和 usage 类型；
 - 缓存命中不创建 provider attempt，provider token 和实际费用为 0；
 - 缓存命中仍记录 logical call、命中来源和本地延迟；
 - 模型、schema、prompt、路由或 release 变化自然产生新键；
-- 不缓存供应商原始错误或未脱敏响应。
+- 不缓存供应商原始错误、未脱敏响应或 prompt 原文；审计 manifest 只保存模板/
+  schema 摘要与规范化 messages 的 SHA-256；
+- `llm_result_cache` 以 `cache_key_hash` 唯一，记录 release、key hash、治理身份、
+  `IN_PROGRESS / READY / FAILED / INVALIDATED` 与失效依据；首次 miss 用数据库
+  唯一 claim 抢占，同键并发请求不得触发第二个 provider；
+- 缓存命中另建 `SUCCEEDED` logical call，`cache_hit=true`、
+  `settlement_status=CACHE_HIT`，零预算预占、零 provider attempt、零 token/cost；
+  同 `logical_call_id` 完成态仍是幂等重放，保持原 attempt 与首次 usage/cost；
+- release 撤销时 `llm_result_cache` 转为 `INVALIDATED / RELEASE_REVOKED` 并清除
+  结果；即使缓存行仍存在，Chat 也必须先按当前 `release.status` fail closed；
+- 清理缓存或其失效只操作 `llm_result_cache`，不得修改
+  `llm_budget_scope / llm_logical_call / llm_provider_attempt` 的负债、预留、
+  attempt 或已结算费用。
 
 ## 7. 幂等与重试
 
