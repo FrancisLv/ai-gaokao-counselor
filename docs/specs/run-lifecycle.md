@@ -351,6 +351,9 @@ expires_at
 | `QUEUE_OVERLOADED` | 无可用执行容量 |
 | `EVENT_CURSOR_EXPIRED` | Watch 游标超出保留窗口 |
 | `DEPENDENCY_UNAVAILABLE` | 下游不可用且无合法回放 |
+| `CONSENT_REQUIRED` | 使用敏感资格字段但缺少当前有效同意 |
+| `CONSENT_REVOKED` | 当前 policy 下的敏感数据同意已撤销 |
+| `SENSITIVE_DATA_NOT_ALLOWED` | 敏感原文试图进入不允许的数据边界 |
 
 ## 11. Terminal Reason
 
@@ -365,6 +368,9 @@ expires_at
 - `HITL_TIMEOUT`
 - `RELEASE_REVOKED`
 - `DEPENDENCY_UNAVAILABLE`
+- `CONSENT_REQUIRED`
+- `CONSENT_REVOKED`
+- `SENSITIVE_DATA_NOT_ALLOWED`
 - `INTERNAL_ERROR`
 
 `CANCELLED` 固定原因 `CANCELLED_BY_USER`。原因写入 `terminal_reason`，不得只存在于日志。

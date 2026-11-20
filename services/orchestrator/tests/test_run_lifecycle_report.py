@@ -92,8 +92,19 @@ class FormalReportLifecycleTests(RunLifecyclePostgresTest):
         )
         candidate_section = completed.formal_result.report["sections"][1]
         self.assertIn("测试大学", candidate_section["body"])
+        self.assertIn("测试专业（M01）", candidate_section["body"])
         self.assertIn("67%", candidate_section["body"])
         self.assertIn("2022、2023、2024", candidate_section["body"])
+        major_claim_id = "claim:candidate:U001|01:major:M01:major_code"
+        self.assertIn(
+            major_claim_id,
+            completed.formal_result.report["claim_ids"],
+        )
+        claims = {
+            claim["claim_id"]: claim
+            for claim in completed.formal_result.verification_report["claims"]
+        }
+        self.assertEqual(claims[major_claim_id]["status"], "VERIFIED")
         self.assertIn("15860", completed.formal_result.report["sections"][0]["body"])
         self.assertEqual(
             completed.formal_result.disclaimer,
@@ -155,6 +166,112 @@ class FormalReportLifecycleTests(RunLifecyclePostgresTest):
             ],
             ["plan", "candidate:U001|01", "qualification", "risk"],
         )
+
+    async def test_formal_report_uses_the_confirmed_profile_scope(self):
+        from app.run_lifecycle import (
+            ConfirmProfileAnswer,
+            RejectOrEditProfileAnswer,
+            ResumeRunCommand,
+            RunLifecycle,
+            StructuredProfileInput,
+            SubmitRunCommand,
+        )
+        from app.run_lifecycle.worker import RunLifecycleWorker
+
+        class RequestScopeAlgo(FakeAlgoClient):
+            async def EstimateProb(self, request):
+                reply = await super().EstimateProb(request)
+                reply.basis.category = request.category
+                return reply
+
+        release_id = await self.seed_release()
+        conn = await self._connect()
+        try:
+            await conn.execute(
+                """
+                INSERT INTO release_scope (
+                    release_id, province, application_year, category, batch
+                )
+                VALUES (%s, '湖南', 2025, '历史类', '本科批')
+                ON CONFLICT DO NOTHING
+                """,
+                (release_id,),
+            )
+        finally:
+            await conn.close()
+        lifecycle = RunLifecycle(
+            self.dsn,
+            auto_profile=True,
+            worker_owner="worker-report-confirmed-scope",
+            algo_client=RequestScopeAlgo(),
+        )
+        self.addAsyncCleanup(lifecycle.close)
+        worker = RunLifecycleWorker(lifecycle, poll_interval=0.01)
+        await worker.start()
+        self.addAsyncCleanup(worker.stop)
+
+        submitted = await lifecycle.SubmitRun(
+            SubmitRunCommand(
+                principal_id="principal-report",
+                session_id=None,
+                task_kind="GENERATE_PLAN",
+                input=StructuredProfileInput(
+                    province="湖南",
+                    application_year=2025,
+                    category="物理类",
+                    batch="本科批",
+                    score=600,
+                    subjects=("物理", "化学", "生物"),
+                ),
+                idempotency_key="formal-report-confirmed-scope-submit",
+            )
+        )
+        waiting = await self._wait_for_interrupt(lifecycle, submitted.run_id)
+        await lifecycle.ResumeRun(
+            ResumeRunCommand(
+                principal_id="principal-report",
+                run_id=submitted.run_id,
+                interrupt_id=waiting.current_interrupt.interrupt_id,
+                expected_state_version=waiting.state_version,
+                profile_version=UUID(
+                    waiting.current_interrupt.payload["profile_version"]
+                ),
+                answer=RejectOrEditProfileAnswer(
+                    patch={
+                        "category": waiting.current_interrupt.payload["fields"][
+                            "category"
+                        ]
+                        | {"value": "历史类"},
+                        "subjects": waiting.current_interrupt.payload["fields"][
+                            "subjects"
+                        ]
+                        | {"value": ["历史", "政治", "地理"]},
+                    }
+                ),
+                idempotency_key="formal-report-confirmed-scope-edit",
+            )
+        )
+        revised = await self._wait_for_interrupt(lifecycle, submitted.run_id)
+        await lifecycle.ResumeRun(
+            ResumeRunCommand(
+                principal_id="principal-report",
+                run_id=submitted.run_id,
+                interrupt_id=revised.current_interrupt.interrupt_id,
+                expected_state_version=revised.state_version,
+                profile_version=UUID(
+                    revised.current_interrupt.payload["profile_version"]
+                ),
+                answer=ConfirmProfileAnswer(),
+                idempotency_key="formal-report-confirmed-scope-confirm",
+            )
+        )
+
+        completed = await self._wait_for_terminal(lifecycle, submitted.run_id)
+
+        self.assertEqual(completed.state, "SUCCEEDED")
+        plan = completed.formal_result.report["sections"][0]
+        self.assertIn("湖南历史类考生", plan["body"])
+        self.assertNotIn("湖南物理类考生", plan["body"])
 
     async def test_missing_algorithm_sample_years_fail_the_formal_report_closed(self):
         from app.run_lifecycle import (

@@ -22,6 +22,11 @@ from psycopg.types.json import Jsonb
 from api.algo.v1 import algo_pb2
 from api.common.v1 import common_pb2
 from app.run_lifecycle.algo import AlgoClient
+from app.run_lifecycle.consent import (
+    CONSENT_POLICY_VERSION,
+    redact_sensitive_profile_fields,
+    require_sensitive_consent,
+)
 from app.run_lifecycle.events import append_event
 from app.run_lifecycle.formal import (
     FormalPublication,
@@ -107,6 +112,7 @@ class RunLifecycle:
         derived_evidence_recomputer: DerivedEvidenceRecomputer | None = None,
         formal_verifier_version: str = "evidence-verifier-v1",
         formal_publish_guard: FormalPublishGuard | None = None,
+        consent_policy_version: str = CONSENT_POLICY_VERSION,
     ) -> None:
         if not dsn:
             raise ValueError("RunLifecycle 需要 PostgreSQL DSN")
@@ -122,6 +128,9 @@ class RunLifecycle:
         self._derived_evidence_recomputer = derived_evidence_recomputer
         self._formal_verifier_version = formal_verifier_version
         self._formal_publish_guard = formal_publish_guard
+        if not consent_policy_version.strip():
+            raise ValueError("consent_policy_version 不能为空")
+        self._consent_policy_version = consent_policy_version
         self._saver_cm = None
         self._saver: AsyncPostgresSaver | None = None
         self._profile_graph = None
@@ -2278,29 +2287,50 @@ class RunLifecycle:
         preview = snapshot.values.get("preview")
         if preview is None:
             preview = await self._build_algorithm_preview(conn, row)
+        revision = await (
+            await conn.execute(
+                """
+                SELECT fields
+                FROM profile_revision
+                WHERE profile_version = %s
+                """,
+                (row["confirmed_profile_version"],),
+            )
+        ).fetchone()
+        if revision is None:
+            raise RunLifecycleError("PROFILE_NOT_CONFIRMED")
+        await require_sensitive_consent(
+            conn,
+            principal_id=row["principal_id"],
+            fields=revision["fields"],
+            policy_version=self._consent_policy_version,
+        )
         artifact = await self._load_formal_gate_artifact(
             principal_id=row["principal_id"],
             run_id=row["run_id"],
         )
-        task_input = dict(row["task_input"])
+        profile = await (
+            await conn.execute(
+                """
+                SELECT lifecycle, fields
+                FROM profile_revision
+                WHERE profile_version = %s
+                """,
+                (row["confirmed_profile_version"],),
+            )
+        ).fetchone()
+        if profile is None or profile["lifecycle"] != "CONFIRMED":
+            raise RunLifecycleError("PROFILE_NOT_CONFIRMED")
+        fields = profile["fields"]
         try:
             package, report_payload = build_formal_report(
                 preview=preview,
                 artifact=artifact,
                 scope=VerificationScope(
-                    province=str(
-                        task_input.get("province")
-                        or preview["audit_basis"]["province"]
-                    ),
-                    application_year=int(
-                        task_input.get("application_year")
-                        or row["created_at"].year
-                    ),
-                    category=str(
-                        task_input.get("category")
-                        or preview["audit_basis"]["category"]
-                    ),
-                    batch=str(task_input.get("batch") or "本科批"),
+                    province=str(fields["province"]["value"]),
+                    application_year=int(fields["application_year"]["value"]),
+                    category=str(fields["category"]["value"]),
+                    batch=str(fields["batch"]["value"]),
                     school_id=None,
                 ),
                 applicable_as_of=row["created_at"].date(),
@@ -2368,6 +2398,12 @@ class RunLifecycle:
         ).fetchone()
         if revision is None:
             raise RunLifecycleError("PROFILE_NOT_CONFIRMED")
+        await require_sensitive_consent(
+            conn,
+            principal_id=row["principal_id"],
+            fields=revision["fields"],
+            policy_version=self._consent_policy_version,
+        )
         algo_input = self._profile.ToAlgoInput(
             profile_version=profile_version,
             lifecycle=revision["lifecycle"],
@@ -3337,6 +3373,9 @@ class RunLifecycle:
                         "RELEASE_REVOKED",
                         "NO_RELIABLE_DATA",
                         "EXECUTION_TIMEOUT",
+                        "CONSENT_REQUIRED",
+                        "CONSENT_REVOKED",
+                        "SENSITIVE_DATA_NOT_ALLOWED",
                     }:
                         raise
                     await self._park_claim(
@@ -3453,7 +3492,7 @@ class RunLifecycle:
                     else "profile.input.required"
                 ),
                 "profile_version": str(revision["profile_version"]),
-                "fields": validation.fields,
+                "fields": redact_sensitive_profile_fields(validation.fields),
                 "findings": list(validation.findings),
             }
             config = {"configurable": {"thread_id": str(run_id)}}

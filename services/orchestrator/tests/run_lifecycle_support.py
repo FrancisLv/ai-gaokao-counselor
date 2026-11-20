@@ -65,6 +65,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                     run_result_state_event,
                     run_verification_report,
                     run_evidence_package,
+                    consent_record,
                     eligibility_profile_field_template,
                     eligibility_profile_field,
                     rule_coverage,
@@ -173,9 +174,10 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await conn.execute(migration.read_text(encoding="utf-8"))
             migration = ROOT / "migrations" / "28_authoritative_formal_gate.sql"
             await conn.execute(migration.read_text(encoding="utf-8"))
-            if (ROOT / "migrations" / "36_principal_data_deletion.sql").exists():
-                migration = ROOT / "migrations" / "36_principal_data_deletion.sql"
-                await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "36_principal_data_deletion.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "37_consent_record.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS release_component (
@@ -243,6 +245,10 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                 conn,
                 "migrations/36_principal_data_deletion.sql",
             )
+            await self._apply_sql_file(
+                conn,
+                "migrations/37_consent_record.sql",
+            )
         finally:
             await conn.close()
 
@@ -295,6 +301,47 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             await conn.close()
+
+    async def seed_consent(
+        self,
+        *,
+        principal_id: str,
+        purpose: str = "SENSITIVE_ELIGIBILITY_EVALUATION",
+        data_classes=("SENSITIVE_ELIGIBILITY_DATA",),
+        policy_version: str = "m5b-consent-v1",
+        revoked: bool = False,
+        guardian_ack_recorded: bool = False,
+    ):
+        consent_id = uuid4()
+        conn = await self._connect()
+        try:
+            await conn.execute(
+                """
+                INSERT INTO consent_record (
+                    consent_id, principal_id, purpose, data_classes,
+                    policy_version, granted_at, revoked_at,
+                    guardian_ack_recorded
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s,
+                    NOW() - INTERVAL '1 minute',
+                    CASE WHEN %s THEN NOW() ELSE NULL END,
+                    %s
+                )
+                """,
+                (
+                    consent_id,
+                    principal_id,
+                    purpose,
+                    list(data_classes),
+                    policy_version,
+                    revoked,
+                    guardian_ack_recorded,
+                ),
+            )
+        finally:
+            await conn.close()
+        return consent_id
 
     async def revoke_release(self, release_id: str) -> None:
         conn = await self._connect()
