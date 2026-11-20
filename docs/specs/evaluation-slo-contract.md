@@ -300,6 +300,10 @@ P99 输入要求：
 - 同一 run 下存在 `PENDING_RECONCILIATION` attempt 时，预算证据不完整，发布门禁失败；
 - 100 个有效样本、固定环境、硬件、数据库数据量、模型路由、缓存状态和并发度必须
   同时存在；任一身份缺失或与 EvalRun 不一致都失败。
+- `RunSloSample` 必须携带 run 的 `release_id`；全部样本必须与 EvalDataset 的
+  `release_id` 一致，不得把不同 release 的运行耗时混入同一 P99。
+- baseline 必须保存与当前 RunSloSample 相同的 `performance_context`；环境、硬件、
+  数据库数据量、模型路由、缓存状态或并发度任一缺失/不一致时，禁止 P99 相对比较。
 
 P99 使用 nearest-rank 计算。active execution 任一 run 超过 600000ms 直接失败；P99
 相对同 dataset baseline 增加超过 10% 同样失败。

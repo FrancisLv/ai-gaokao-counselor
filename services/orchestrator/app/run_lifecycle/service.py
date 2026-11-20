@@ -317,6 +317,14 @@ class RunLifecycle:
                            report.report_json AS verification_report,
                            result_state.status AS result_state,
                            result_state.reason AS stale_reason,
+                           current_interrupt.interrupt_id,
+                           current_interrupt.interrupt_kind,
+                           current_interrupt.interrupt_state,
+                           current_interrupt.interrupt_question_key,
+                           current_interrupt.interrupt_payload_version,
+                           current_interrupt.interrupt_payload,
+                           current_interrupt.interrupt_created_at,
+                           current_interrupt.interrupt_expires_at,
                            r.created_at, r.updated_at, r.expires_at
                     FROM run r
                     LEFT JOIN run_result rr ON rr.result_version = r.result_version
@@ -331,6 +339,21 @@ class RunLifecycle:
                         ORDER BY state.event_id DESC
                         LIMIT 1
                     ) result_state ON TRUE
+                           LEFT JOIN LATERAL (
+                               SELECT interrupt_id,
+                                      kind AS interrupt_kind,
+                                      state AS interrupt_state,
+                                      question_key AS interrupt_question_key,
+                                      payload_version AS interrupt_payload_version,
+                                      payload AS interrupt_payload,
+                                      created_at AS interrupt_created_at,
+                                      expires_at AS interrupt_expires_at
+                               FROM run_interrupt
+                               WHERE run_id = r.run_id
+                                 AND state = 'OPEN'
+                               ORDER BY created_at DESC
+                               LIMIT 1
+                           ) current_interrupt ON TRUE
                     WHERE r.run_id = %s AND r.principal_id = %s
                     """,
                     (run_id, principal_id),
@@ -378,30 +401,17 @@ class RunLifecycle:
                     result_state=row["result_state"] or "ACTIVE",
                     stale_reason=row["stale_reason"],
                 )
-            interrupt_row = await (
-                await conn.execute(
-                    """
-                    SELECT interrupt_id, kind, state, question_key,
-                           payload_version, payload, created_at, expires_at
-                    FROM run_interrupt
-                    WHERE run_id = %s AND state = 'OPEN'
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                    """,
-                    (run_id,),
-                )
-            ).fetchone()
             current_interrupt = None
-            if interrupt_row is not None:
+            if row["interrupt_id"] is not None:
                 current_interrupt = InterruptView(
-                    interrupt_id=interrupt_row["interrupt_id"],
-                    kind=interrupt_row["kind"],
-                    state=interrupt_row["state"],
-                    question_key=interrupt_row["question_key"],
-                    payload_version=interrupt_row["payload_version"],
-                    payload=interrupt_row["payload"],
-                    created_at=interrupt_row["created_at"],
-                    expires_at=interrupt_row["expires_at"],
+                    interrupt_id=row["interrupt_id"],
+                    kind=row["interrupt_kind"],
+                    state=row["interrupt_state"],
+                    question_key=row["interrupt_question_key"],
+                    payload_version=row["interrupt_payload_version"],
+                    payload=row["interrupt_payload"],
+                    created_at=row["interrupt_created_at"],
+                    expires_at=row["interrupt_expires_at"],
                 )
             return RunView(
                 run_id=row["run_id"],

@@ -114,6 +114,7 @@ class RunTelemetryTests(RunLifecyclePostgresTest):
 
         self.assertEqual(len(samples), 1)
         sample = samples[0]
+        self.assertEqual(sample.release_id, release_id)
         self.assertEqual(sample.active_execution_ms, 10000)
         self.assertEqual(sample.provider_token_count, 123)
         self.assertEqual(sample.provider_cost_micro_usd, 456)

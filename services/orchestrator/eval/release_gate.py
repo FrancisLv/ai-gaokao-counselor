@@ -32,6 +32,7 @@ _RUN_REPRODUCIBILITY_RATE_MIN = 1.0
 class RunSloSample:
     run_id: str
     session_id: str
+    release_id: str
     active_execution_ms: int
     provider_token_count: int
     provider_cost_micro_usd: int
@@ -122,6 +123,11 @@ def evaluate_release_gate(
         failed_metrics.append("illegal_candidate_leak_rate")
     if len(run_samples) < _P99_SAMPLE_COUNT_MIN:
         failed_metrics.append("run_sample_count")
+    if any(
+        sample.release_id != dataset.manifest["release_id"]
+        for sample in run_samples
+    ):
+        failed_metrics.append("run_release_id")
     p99_ms = _p99(
         [sample.active_execution_ms for sample in run_samples]
     )
@@ -173,6 +179,9 @@ def evaluate_release_gate(
         performance_context.model_route_version,
         performance_context.cache_state,
     )
+    performance_payload = _performance_context_payload(
+        performance_context
+    )
     if (
         any(not str(value).strip() for value in performance_values)
         or performance_context.concurrency < 1
@@ -183,6 +192,11 @@ def evaluate_release_gate(
         != run_identity.get("model_route_version")
     ):
         failed_metrics.append("performance_context")
+    if (
+        baseline.get("performance_context")
+        != performance_payload
+    ):
+        failed_metrics.append("baseline_performance_context")
     baseline_dataset = baseline.get("dataset", {}).get("version")
     if baseline_dataset != dataset.manifest["dataset_version"]:
         failed_metrics.append("baseline_dataset_version")
@@ -261,6 +275,7 @@ def evaluate_release_gate(
             dataset=dataset,
             retrieval_report=retrieval_report,
             e2e_report=e2e_report,
+            run_samples=run_samples,
             performance_context=performance_context,
             baseline=baseline,
         ),
@@ -275,6 +290,19 @@ def _p99(values: list[int]) -> int:
     return ordered[rank - 1]
 
 
+def _performance_context_payload(
+    performance_context: PerformanceContext,
+) -> dict[str, str | int]:
+    return {
+        "environment": performance_context.environment,
+        "hardware_profile": performance_context.hardware_profile,
+        "database_data_size": performance_context.database_data_size,
+        "model_route_version": performance_context.model_route_version,
+        "cache_state": performance_context.cache_state,
+        "concurrency": performance_context.concurrency,
+    }
+
+
 def _gate_failure_details(
     failed_metrics: list[str],
     *,
@@ -283,6 +311,7 @@ def _gate_failure_details(
     dataset: JointEvalDataset,
     retrieval_report: RetrievalEvaluationReport,
     e2e_report: EndToEndEvaluationReport,
+    run_samples: tuple[RunSloSample, ...],
     performance_context: PerformanceContext,
     baseline: dict,
 ) -> tuple[dict, ...]:
@@ -302,6 +331,7 @@ def _gate_failure_details(
             _ILLEGAL_CANDIDATE_LEAK_RATE_MAX
         ),
         "run_sample_count": _P99_SAMPLE_COUNT_MIN,
+        "run_release_id": dataset.manifest["release_id"],
         "run_active_execution_timeout": _ACTIVE_EXECUTION_MAX_MS,
         "run_p99_regression": "baseline_p99 * 1.10",
         "session_token_count": _SESSION_TOKEN_COUNT_MAX,
@@ -310,6 +340,7 @@ def _gate_failure_details(
         "budget_reconciliation_pending": 0,
         "run_reproducibility_rate": _RUN_REPRODUCIBILITY_RATE_MIN,
         "performance_context": "complete fixed context",
+        "baseline_performance_context": "same fixed performance context",
         "retrieval_case_gate": "PASS",
         "e2e_case_gate": "PASS",
         "retrieval_quality_evidence": True,
@@ -329,14 +360,15 @@ def _gate_failure_details(
         "budget_reconciliation_pending": metrics[
             "budget_reconciliation_pending_count"
         ],
-        "performance_context": {
-            "environment": performance_context.environment,
-            "hardware_profile": performance_context.hardware_profile,
-            "database_data_size": performance_context.database_data_size,
-            "model_route_version": performance_context.model_route_version,
-            "cache_state": performance_context.cache_state,
-            "concurrency": performance_context.concurrency,
-        },
+        "performance_context": _performance_context_payload(
+            performance_context
+        ),
+        "baseline_performance_context": baseline.get(
+            "performance_context"
+        ),
+        "run_release_id": sorted(
+            {sample.release_id for sample in run_samples}
+        ),
         "dataset_owner_status": dataset.manifest["owner_status"],
         "baseline_dataset_version": baseline.get("dataset", {}).get(
             "version"
@@ -369,6 +401,10 @@ def _gate_failure_details(
         "baseline_dataset_version": baseline.get("dataset", {}).get(
             "version"
         ),
+        "baseline_performance_context": _performance_context_payload(
+            performance_context
+        ),
+        "run_release_id": dataset.manifest["release_id"],
     }
     return tuple(
         {

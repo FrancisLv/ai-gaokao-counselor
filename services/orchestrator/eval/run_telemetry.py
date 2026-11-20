@@ -25,7 +25,7 @@ async def load_run_slo_samples(
         rows = await (
             await conn.execute(
                 """
-                SELECT run.run_id, run.session_id,
+                SELECT run.run_id, run.session_id, run.release_id,
                        CASE
                            WHEN run.active_execution_remaining_ms <= 600000
                            THEN 600000 - run.active_execution_remaining_ms
@@ -70,6 +70,7 @@ async def load_run_slo_samples(
         RunSloSample(
             run_id=str(row["run_id"]),
             session_id=str(row["session_id"]),
+            release_id=str(row["release_id"]),
             active_execution_ms=int(row["active_execution_ms"]),
             provider_token_count=int(row["provider_token_count"]),
             provider_cost_micro_usd=int(

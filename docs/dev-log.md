@@ -2739,6 +2739,13 @@ case runner、最终 Claims 指标与不可变 EvalRun；不实现 #44 的质量
 - P99 至少 100 个样本，采用 nearest-rank；全部样本的 active execution 不得超过
   600000ms，P99 相对固定环境 baseline 增幅不得超过 10%。性能和模型路由、硬件、
   数据库数据量、缓存状态、并发度必须完整且身份一致。
+- 合并审查补强两项身份门禁：每个 `RunSloSample` 从 run 读取不可变 `release_id`，
+  所有样本必须与 EvalDataset release 完全一致；baseline 必须携带完整
+  `performance_context`，并逐字段匹配当前固定环境，缺失或漂移均失败。
+- 全量测试发现 `GetRun` 原先分开查询 run 与 open interrupt，worker 恰好切换
+  `RUNNING → WAITING_HITL` 时会返回 `RUNNING + 新 interrupt` 的混合快照，导致
+  合法 Resume 使用旧 state_version 并冲突。现在 run、结果状态和当前 interrupt
+  在单条查询中读取，保证同一数据库快照。
 - token 与成本从 `principal + session` 的 LLMGateway budget scope 已结算值读取；
   `BUDGET_OVERRUN` 计入预算违规，任何 `PENDING_RECONCILIATION` attempt 都表示预算
   证据不完整，发布结论不得 PASS。
@@ -2749,7 +2756,8 @@ case runner、最终 Claims 指标与不可变 EvalRun；不实现 #44 的质量
 
 - 新增门禁测试覆盖 pending signoff、绝对检索阈值、2 个百分点回归、case-level
   failure、非法候选、不可复现结果、样本不足、固定环境缺失、超时、P99 回归、
-  token/成本/预算超限与待对账。
+  token/成本/预算超限与待对账，以及跨 release SLO 样本和 baseline 固定环境
+  缺失/不一致。
 - 真实 PostgreSQL telemetry 测试通过 RunLifecycle run 与 LLMGateway budget/
   attempt 表验证 active execution、settled token/cost、overrun 与待对账采集。
 - `make py-check py-test` 通过；当前 commit 的完整真实 PostgreSQL 套件将在合并前

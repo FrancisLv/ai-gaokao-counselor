@@ -111,13 +111,14 @@ def _identity():
     }
 
 
-def _samples():
+def _samples(*, release_id: str = "rel-gate"):
     from eval.release_gate import RunSloSample
 
     return tuple(
         RunSloSample(
             run_id=f"run-{index:03d}",
             session_id=f"session-{index:03d}",
+            release_id=release_id,
             active_execution_ms=1000,
             provider_token_count=100,
             provider_cost_micro_usd=100,
@@ -151,6 +152,14 @@ def _baseline(
 ):
     return {
         "dataset": {"version": dataset_version},
+        "performance_context": {
+            "environment": "ci",
+            "hardware_profile": "linux-x86",
+            "database_data_size": "fixture-small",
+            "model_route_version": "route-v1",
+            "cache_state": "warm",
+            "concurrency": 1,
+        },
         "metrics": {
             "retrieval_recall_at_5": recall_at_5,
             "retrieval_mrr": mrr,
@@ -347,6 +356,104 @@ class ReleaseGateTests(unittest.TestCase):
 
         self.assertEqual(report.gate_status, "FAIL")
         self.assertIn("performance_context", report.failed_metrics)
+
+    def test_slo_samples_from_another_release_cannot_enter_the_gate(self):
+        from eval.release_gate import evaluate_release_gate
+
+        dataset, case = _datasets(owner_status="SIGNED_OFF")
+        retrieval, e2e = _reports(dataset, case)
+        samples = list(_samples())
+        samples[-1] = replace(
+            samples[-1],
+            release_id="rel-other",
+        )
+
+        report = evaluate_release_gate(
+            dataset=dataset,
+            retrieval_report=retrieval,
+            e2e_report=e2e,
+            run_identity=_identity(),
+            run_samples=tuple(samples),
+            performance_context=_performance_context(),
+            baseline=_baseline(),
+        )
+
+        self.assertEqual(report.gate_status, "FAIL")
+        self.assertIn("run_release_id", report.failed_metrics)
+        detail = next(
+            item
+            for item in report.failure_details
+            if item["metric"] == "run_release_id"
+        )
+        self.assertEqual(detail["actual"], ["rel-gate", "rel-other"])
+        self.assertEqual(detail["threshold"], "rel-gate")
+
+    def test_p99_baseline_requires_the_same_fixed_performance_context(self):
+        from eval.release_gate import evaluate_release_gate
+
+        dataset, case = _datasets(owner_status="SIGNED_OFF")
+        retrieval, e2e = _reports(dataset, case)
+        baseline = {
+            "dataset": _baseline()["dataset"],
+            "metrics": _baseline()["metrics"],
+        }
+
+        report = evaluate_release_gate(
+            dataset=dataset,
+            retrieval_report=retrieval,
+            e2e_report=e2e,
+            run_identity=_identity(),
+            run_samples=_samples(),
+            performance_context=_performance_context(),
+            baseline=baseline,
+        )
+
+        self.assertEqual(report.gate_status, "FAIL")
+        self.assertIn(
+            "baseline_performance_context",
+            report.failed_metrics,
+        )
+        detail = next(
+            item
+            for item in report.failure_details
+            if item["metric"] == "baseline_performance_context"
+        )
+        self.assertIsNone(detail["actual"])
+        self.assertEqual(
+            detail["baseline"],
+            {
+                "environment": "ci",
+                "hardware_profile": "linux-x86",
+                "database_data_size": "fixture-small",
+                "model_route_version": "route-v1",
+                "cache_state": "warm",
+                "concurrency": 1,
+            },
+        )
+
+    def test_p99_baseline_with_a_different_cache_state_cannot_be_compared(self):
+        from eval.release_gate import evaluate_release_gate
+
+        dataset, case = _datasets(owner_status="SIGNED_OFF")
+        retrieval, e2e = _reports(dataset, case)
+        baseline = _baseline()
+        baseline["performance_context"]["cache_state"] = "cold"
+
+        report = evaluate_release_gate(
+            dataset=dataset,
+            retrieval_report=retrieval,
+            e2e_report=e2e,
+            run_identity=_identity(),
+            run_samples=_samples(),
+            performance_context=_performance_context(),
+            baseline=baseline,
+        )
+
+        self.assertEqual(report.gate_status, "FAIL")
+        self.assertIn(
+            "baseline_performance_context",
+            report.failed_metrics,
+        )
 
     def test_nonreproducible_sample_fails_release_gate(self):
         from eval.release_gate import evaluate_release_gate
