@@ -288,6 +288,22 @@ P99 输入要求：
 
 首次评测没有基线时，先建立基线；建立基线不等于自动通过发布，安全指标仍必须达标。
 
+### 7.3 实现口径
+
+发布门禁从 RunLifecycle 与 LLMGateway 的权威记录构造 `RunSloSample`，不接受调用方
+直接提交一组“看起来合格”的预算数字：
+
+- active execution 样本由 `600000 - active_execution_remaining_ms` 得到；
+- provider token 与成本取对应 `principal + session` 的 LLMGateway budget scope
+  已结算值；
+- `budget_status=BUDGET_OVERRUN` 计为预算违规；
+- 同一 run 下存在 `PENDING_RECONCILIATION` attempt 时，预算证据不完整，发布门禁失败；
+- 100 个有效样本、固定环境、硬件、数据库数据量、模型路由、缓存状态和并发度必须
+  同时存在；任一身份缺失或与 EvalRun 不一致都失败。
+
+P99 使用 nearest-rank 计算。active execution 任一 run 超过 600000ms 直接失败；P99
+相对同 dataset baseline 增加超过 10% 同样失败。
+
 ## 8. 基线比较
 
 ```text
@@ -341,6 +357,15 @@ EvalThresholds
   scope_leak_rate_max: 0
   contradiction_rate_max: 0
   critical_unverifiable_rate_max: 0
+  citation_coverage_min: 1
+  citation_accuracy_min: 1
+  hallucination_rate_max: 0
+  illegal_candidate_leak_rate_max: 0
+  run_reproducibility_rate_min: 1
+  run_sample_count_min: 100
+  run_active_execution_max_ms: 600000
+  session_token_count_max: 50000
+  session_cost_micro_usd_max: 150000
   budget_violations_max: 0
 ```
 
@@ -402,6 +427,10 @@ CI 失败不能只输出“评测不通过”。
 | ES-12 | 安全通过但质量退化 | 仍可能因回归阻断 |
 | ES-13 | 真实 provider 评测失败 | EvalRun 记录失败，不回退成通过 |
 | ES-14 | 基线 dataset 改变 | 必须新建 baseline，禁止跨版本比较 |
+| ES-15 | P99 少于 100 个有效样本 | `run_sample_count` 失败，禁止 PASS |
+| ES-16 | 预算账本存在待对账 attempt | `budget_reconciliation_pending` 失败 |
+| ES-17 | 一个可复现 case 二次结果不同 | `run_reproducibility_rate` 失败 |
+| ES-18 | 不允许的候选进入正式结果 | `illegal_candidate_leak_rate` 失败 |
 
 ## 14. 非目标
 

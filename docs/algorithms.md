@@ -362,3 +362,19 @@ Profile、release、输出字段、值、单位、精度或样本年份不一致
 unverifiable 和 hallucination 均为 0。联合 EvalRun 还记录 dataset hash、release、
 检索指标、报告指标、最终 run/result 身份、失败 case 与 first diff；只有
 `owner_status=SIGNED_OFF` 时 `release_gate_status` 才可能为 PASS。
+
+### 11.2 发布门禁
+
+发布门禁把检索 case-level gate、端到端 case-level gate、签字数据、质量回归、报告事实
+指标、可复现性、P99、环境身份和预算账本合并为一个 `gate_status`：
+
+- 任一 case-level gate 失败都不能被平均指标覆盖；
+- 非法候选 leak 与 reproducibility 是绝对门禁；
+- 质量只允许相对同 dataset baseline 下降最多 2 个百分点；
+- P99 至少 100 个 active execution 样本，任一 run 超过 600000ms 失败，P99 相对
+  baseline 增幅超过 10% 失败；
+- token、成本与 budget status 读取 LLMGateway budget scope；存在未知计费待对账时，
+  budget evidence 不完整；
+- 失败输出 `failed_metrics` 与逐项 actual/threshold/baseline；当数据未签字时，
+  diagnostic gate 可以记录，但 `release_gate_status` 固定为
+  `BLOCKED_PENDING_SIGNOFF`。
