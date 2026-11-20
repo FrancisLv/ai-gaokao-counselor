@@ -68,6 +68,13 @@
 | 数据分类（data classification） | PUBLIC / PRINCIPAL / INQUIRY / SENSITIVE_ELIGIBILITY / OPERATIONAL / SECRET | 敏感原文默认不进云模型 |
 | 删除 tombstone | 记录删除请求已完成范围的最小审计标记，不含被删内容 | 备份恢复前必须重放 |
 
+## 前端交互术语
+
+| 术语 | 定义 | 避免 / 备注 |
+| --- | --- | --- |
+| 对话（chat） | 用户界面中一条连续的聊天记录；内部对应一个 session，可包含多次生成或修订产生的 run | 面向用户不显示 runId / stateVersion；避免把每次 run 当成一条新对话 |
+| 静态推荐报告 | 从已发布 result_version 生成的不可变 HTML 视图，包含一个志愿方案汇总页和每所推荐学校的详情页，可通过固定链接直接打开 | 不是重新查询后实时渲染的页面；避免与内部 verification_report 混用 |
+
 ## 已拍板决策索引（详见 `docs/adr/`）
 
 | ADR | 决策 |
@@ -78,3 +85,4 @@
 | [0004](docs/adr/0004-immutable-content-hash-release-id.md) | 内容哈希不可变 release_id |
 | [0005](docs/adr/0005-golden-set-human-labeled.md) | golden set 由 domain owner 定标 |
 | [0006](docs/adr/0006-consolidate-policy-tables-drop-charter.md) | 收口 policy_*，废弃 charter_* |
+| [0007](docs/adr/0007-static-html-recommendation-report.md) | 推荐结果生成不可变静态 HTML 汇总页与学校详情页 |

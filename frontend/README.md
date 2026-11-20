@@ -1,16 +1,18 @@
-# M2/M3 Run 验收控制台
+# 知愿对话式志愿助手
 
-Vue 3 + Vite 前端，只通过 svc-gateway 验证 M2/M3：
+Vue 3 + Vite 前端，采用桌面端三栏对话布局：
 
-- 结构化画像提交
-- run 状态恢复
-- SSE 事件时间线
-- 画像 interrupt 确认
-- ALGORITHM_PREVIEW
-- 取消与稳定错误状态
+- 左侧：匿名对话历史与新对话
+- 中间：DeepSeek 式对话、画像确认和结果卡
+- 右侧：当前画像与处理进度
 
-不直接连接 svc-orchestrator，不实现 M4 的资格规则、在线 RAG、LLM
-Gateway、Strategy/Critic 或正式报告。
+最终推荐使用两个独立 HTML 页面展示：
+
+- `report.html?run=<run_id>`：不可变声明报告汇总页
+- `school.html?run=<run_id>&section=<section_key>`：推荐学校详情页
+
+页面只通过 svc-gateway 访问 `SubmitRun / ResumeRun / GetRun`，不直接连接
+orchestrator、算法或 LLM Gateway。
 
 ## 环境变量
 
@@ -20,17 +22,11 @@ Gateway、Strategy/Critic 或正式报告。
 VITE_PRINCIPAL_ID=frontend-verifier
 ```
 
-该变量只用于本地验收。它会通过 `x-principal-id` 请求头发送，不写入 URL、
-sessionStorage 或请求正文。公网部署必须替换为真实认证。
+该变量仅用于本地演示，通过 `x-principal-id` 请求头发送，不写入 URL 或请求正文。
 
 ## 启动
 
-后端需要：
-
-- svc-gateway：`localhost:8000`
-- svc-orchestrator：`localhost:9100`
-- svc-algo：`localhost:9002`
-- PostgreSQL：已应用 `00` 到 `14` 迁移
+后端需要可用的 svc-gateway；Vite 默认将 `/v1` 代理到 `http://localhost:8000`。
 
 ```bash
 cd frontend
@@ -38,29 +34,34 @@ npm install
 npm run dev
 ```
 
-打开 <http://localhost:5173>。Vite 会把 `/v1` 代理到
-`http://localhost:8000`。
+打开 <http://localhost:5173>。
 
-## 手工验收
+## 对话流程
 
-1. 选择湖南、2025、物理类或历史类、本科批。
-2. 填写分数和 3+1+2 选科。
-3. 提交后记录 `runId`。
-4. 等待 `WAITING_HITL`，检查画像卡和 `DEFAULT` 批次。
-5. 确认画像。
-6. 等待 `SUCCEEDED`，检查非空 ALGORITHM_PREVIEW。
-7. 检查全部未核验条件、风险提示和免责声明。
-8. 刷新页面，确认通过 URL 中的 `run` 参数恢复同一 run。
-9. 对终态再次取消，应显示 `RUN_ALREADY_TERMINAL`。
+1. 从欢迎页选择示例或输入分数、选科。
+2. 系统继续追问缺失的科类、分数、选科、城市、专业兴趣和风险偏好。
+3. 前端把已收集的强结构化画像提交给现有 `CreatePlan` / `SubmitRun`。
+4. 后端进入 `WAITING_HITL` 后，页面展示服务端画像确认卡。
+5. 用户确认后调用 `ResumeRun`，页面轮询 `GetRun` 直到正式结果或稳定失败。
+6. 结果卡打开独立静态报告；报告中的学校继续跳转学校详情页。
+
+当前对话追问由前端受控状态机驱动，不会伪造 LLM 输出；真正的自然语言画像解析仍
+需要后续接入 orchestrator 的 intake / llm-gateway 路径。
+
+## 原型
+
+三套设计原型保留用于评审：
+
+```bash
+npm run prototype
+```
 
 ## 测试
 
 ```bash
 npm test
 npm run build
-npx playwright install chromium
 npm run e2e
 ```
 
-Vitest 在 HTTP/SSE 边界 mock，不 mock composable 内部实现。Playwright
-访问真实 Vue 页面，并在浏览器网络边界提供验收响应。
+Vitest 在 HTTP 边界 mock，Playwright 覆盖完整对话、画像确认、静态报告和学校详情跳转。

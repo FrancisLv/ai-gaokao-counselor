@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>知愿 · 学校推荐详情原型</title>
+    <link rel="stylesheet" href="/prototype.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+      // THROWAWAY PROTOTYPE — answers how a school detail should read.
+      const params = new URLSearchParams(location.search);
+      const variants = ["A", "B", "C"];
+      const variant = variants.includes(params.get("variant"))
+        ? params.get("variant")
+        : "A";
+      const variantNames = {
+        A: "阅读型文章",
+        B: "筛选型仪表台",
+        C: "杂志式展示",
+      };
+      const details = {
+        csu: ["冲", "中南大学", "专业组 03", "34%", "长沙", "计算机类、软件工程、电子信息类", "双一流高校，专业组内热门专业较多，近年位次波动较大。适合作为方案前段的冲刺选项。"],
+        hnu: ["冲", "湖南大学", "专业组 07", "38%", "长沙", "电子信息工程、计算机科学与技术", "综合性高校，专业方向与画像匹配，但热门专业组竞争较激烈。"],
+        hunnu: ["稳", "湖南师范大学", "专业组 12", "57%", "长沙", "计算机科学与技术、人工智能", "师范类院校中信息技术方向较完整，城市与专业偏好均匹配。"],
+        xtu: ["稳", "湘潭大学", "专业组 06", "61%", "湘潭", "软件工程、网络空间安全", "计算机相关专业实力稳定，距离长沙较近，可作为稳妥院校主体。"],
+        csust: ["稳", "长沙理工大学", "专业组 05", "65%", "长沙", "自动化、电子信息工程", "工科方向与选科匹配，专业组计划相对充足。"],
+        csuft: ["稳", "中南林业科技大学", "专业组 09", "69%", "长沙", "计算机科学与技术、电子信息工程", "长沙本地院校，专业方向覆盖面较广，适合作为稳妥梯度。"],
+        hunau: ["保", "湖南农业大学", "专业组 04", "76%", "长沙", "人工智能、信息工程", "长沙公办院校，专业选择与当前方向接近，适合补充保底梯度。"],
+        usc: ["保", "南华大学", "专业组 08", "80%", "衡阳", "软件工程、电气工程及其自动化", "工科专业基础较完整，录取位次相对稳定。"],
+        hnust: ["保", "湖南科技大学", "专业组 11", "82%", "湘潭", "计算机科学与技术、通信工程", "专业方向与选科要求适配，可作为保底院校之一。"],
+        hutb: ["保", "湖南工商大学", "专业组 03", "85%", "长沙", "信息管理与信息系统、电子商务", "偏信息管理方向，适合对技术应用与商科交叉感兴趣的考生。"],
+        hnu_e: ["保", "湖南工程学院", "专业组 06", "88%", "湘潭", "自动化、电子信息工程", "应用型工科方向明确，专业接受度需结合个人偏好确认。"],
+        hnist: ["保", "湖南理工学院", "专业组 02", "90%", "岳阳", "计算机科学与技术、机械电子工程", "录取位次相对稳定，作为保底梯度时仍需核对专业组内限制。"],
+      };
+      const selected = details[params.get("school")] ? params.get("school") : "csu";
+      const [tier, name, group, probability, city, majors, reason] = details[selected];
+
+      function tierClass(value) {
+        return value === "稳" ? "stable" : value === "保" ? "safe" : "";
+      }
+
+      function switcher() {
+        return `
+          <div class="prototype-badge">
+            <b>学校详情原型</b>
+            <span>${variant} · ${variantNames[variant]} · 演示数据</span>
+          </div>
+          <div class="prototype-switcher">
+            <button data-variant-step="-1">←</button>
+            <span>${variant} · ${variantNames[variant]}</span>
+            <button data-variant-step="1">→</button>
+          </div>
+        `;
+      }
+
+      function render() {
+        document.querySelector("#app").innerHTML = `
+          <div class="report-page">
+            <header class="report-topbar">
+              <a class="back-link" href="prototype-report.html?variant=${variant}">← 返回汇总报告</a>
+              <strong>${name}</strong>
+              <span class="muted">湖南 2025 · 物理类</span>
+            </header>
+            <main class="school-detail">
+              <div class="back-row">
+                <span class="tier ${tierClass(tier)}">${tier}档推荐</span>
+                <span class="muted">静态学校详情页 · ${selected}</span>
+              </div>
+              <section class="school-detail-hero">
+                <div>
+                  <span class="report-kicker">${city} · 湖南 2025</span>
+                  <h1>${name}</h1>
+                  <p>${group} · ${majors}</p>
+                  <p style="margin-top: 14px">${reason}</p>
+                </div>
+                <div class="detail-score">
+                  <div>
+                    <strong>${probability}</strong>
+                    <small>历史数据估算概率</small>
+                  </div>
+                </div>
+              </section>
+              <div class="detail-grid">
+                <div class="detail-main">
+                  <section class="detail-block">
+                    <h2>为什么推荐</h2>
+                    <p>${reason}</p>
+                    <p class="muted">系统先在算法生成的候选池中核对选科和资格限制，再由确定性模板把学校、专业组、概率和证据写入报告。</p>
+                  </section>
+                  <section class="detail-block">
+                    <h2>专业组内可关注专业</h2>
+                    <div class="major-list">
+                      ${majors
+                        .split("、")
+                        .map(
+                          (major) => `
+                            <div class="major-row"><strong>${major}</strong><span class="muted">选科要求已匹配 · 待核对当年计划</span></div>
+                          `,
+                        )
+                        .join("")}
+                    </div>
+                  </section>
+                  <section class="detail-block">
+                    <h2>需要重点核对</h2>
+                    <ul>
+                      <li>专业组内各专业是否在 2025 年实际招生。</li>
+                      <li>体检色觉、单科成绩或语种要求是否存在额外限制。</li>
+                      <li>热门专业可能采用专业级录取规则，不能只看专业组投档线。</li>
+                    </ul>
+                  </section>
+                </div>
+                <aside class="detail-side">
+                  <section class="detail-block">
+                    <h2>画像匹配</h2>
+                    <div class="inspector-kv"><span>省份年份</span><strong>湖南 2025</strong></div>
+                    <div class="inspector-kv"><span>科类</span><strong>物理类</strong></div>
+                    <div class="inspector-kv"><span>选科</span><strong>物化生</strong></div>
+                    <div class="inspector-kv"><span>分数</span><strong>612</strong></div>
+                    <div class="inspector-kv"><span>城市</span><strong>${city}</strong></div>
+                  </section>
+                  <section class="detail-block">
+                    <h2>数据出处</h2>
+                    <ul class="citation-list">
+                      <li><a href="#">湖南省 2025 招生计划</a><p>学校、专业组、计划人数与选科要求。</p></li>
+                      <li><a href="#">近年投档位次样本</a><p>用于估算历史命中概率，年份与样本范围随报告保存。</p></li>
+                      <li><a href="#">学校招生章程</a><p>体检、单科、语种和录取规则原文。</p></li>
+                    </ul>
+                  </section>
+                  <div class="risk-note">
+                    这是静态原型数据，不构成录取承诺。正式报告中的来源链接应指向同一 release 的原文或结构化记录。
+                  </div>
+                </aside>
+              </div>
+            </main>
+          </div>
+          ${switcher()}
+        `;
+      }
+
+      document.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-variant-step]");
+        if (!button) return;
+        const current = variants.indexOf(variant);
+        const direction = Number(button.dataset.variantStep);
+        const next = variants[(current + direction + variants.length) % variants.length];
+        const query = new URLSearchParams(location.search);
+        query.set("variant", next);
+        location.search = query.toString();
+      });
+
+      render();
+    </script>
+  </body>
+</html>

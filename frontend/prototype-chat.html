@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>知愿 · 对话原型</title>
+    <link rel="stylesheet" href="/prototype.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+      // THROWAWAY PROTOTYPE — answers: how should the conversation feel?
+      const params = new URLSearchParams(location.search);
+      const variants = ["A", "B", "C"];
+      const stages = [
+        ["welcome", "欢迎"],
+        ["collect", "追问"],
+        ["confirm", "确认"],
+        ["progress", "生成"],
+        ["result", "结果"],
+      ];
+      const variantNames = {
+        A: "聊天主界面",
+        B: "聊天 + 信息面板",
+        C: "引导式工作台",
+      };
+      const conversationHistory = [
+        ["湖南物理类 612 分志愿方案", true],
+        ["历史类 586 分能报什么", false],
+        ["计算机专业就业方向咨询", false],
+        ["长沙公办本科筛选", false],
+      ];
+
+      const state = {
+        variant: variants.includes(params.get("variant"))
+          ? params.get("variant")
+          : "A",
+        stage: stages.some(([key]) => key === params.get("step"))
+          ? params.get("step")
+          : "confirm",
+      };
+
+      function updateParam(key, value) {
+        const next = new URLSearchParams(location.search);
+        next.set(key, value);
+        history.replaceState({}, "", `${location.pathname}?${next}`);
+        state[key === "variant" ? "variant" : "stage"] = value;
+        render();
+      }
+
+      function reportUrl() {
+        return `prototype-report.html?variant=${state.variant}`;
+      }
+
+      function switcher() {
+        return `
+          <div class="prototype-badge">
+            <b>桌面原型</b>
+            <span>1440 × 900 · 匿名会话 · 仅用于方案评审</span>
+          </div>
+          <div class="stage-switcher">
+            ${stages
+              .map(
+                ([key, label]) => `
+                  <button class="${state.stage === key ? "active" : ""}" data-stage="${key}">
+                    ${label}
+                  </button>
+                `,
+              )
+              .join("")}
+          </div>
+          <div class="prototype-switcher">
+            <button data-variant-step="-1" aria-label="上一个方案">←</button>
+            <span>${state.variant} · ${variantNames[state.variant]}</span>
+            <button data-variant-step="1" aria-label="下一个方案">→</button>
+          </div>
+        `;
+      }
+
+      function brand(compact = false) {
+        return `
+          <div class="brand">
+            <span class="brand-mark">愿</span>
+            <div>
+              <strong>${compact ? "知愿" : "知愿 · 志愿规划"}</strong>
+              <small>${compact ? "" : "对话式高考志愿助手"}</small>
+            </div>
+          </div>
+        `;
+      }
+
+      function historyList() {
+        return `
+          <button class="new-chat">＋ 新对话</button>
+          <div class="history-label">最近对话</div>
+          <ul class="history-list">
+            ${conversationHistory
+              .map(
+                ([title, active]) => `
+                  <li class="${active ? "active" : ""}">${title}</li>
+                `,
+              )
+              .join("")}
+          </ul>
+          <div class="sidebar-foot">
+            对话仅保存在当前浏览器<br />
+            录取概率均为历史数据估算
+          </div>
+        `;
+      }
+
+      function composer(extra = "") {
+        return `
+          <div class="composer">
+            <textarea aria-label="输入消息" placeholder="继续回答问题，或补充你的偏好…">${extra}</textarea>
+            <button class="send-button" aria-label="发送">↑</button>
+          </div>
+        `;
+      }
+
+      function welcomeContent() {
+        return `
+          <div class="welcome">
+            <div class="welcome-logo">愿</div>
+            <h1>把复杂的志愿填报，聊明白。</h1>
+            <p>我会先了解你的分数、选科和偏好，再逐步核验数据并生成推荐报告。</p>
+            <div class="prompt-grid">
+              <button class="prompt-card" data-stage="collect">
+                <b>帮我生成志愿方案</b>
+                <small>从分数和选科开始，一步步完成画像</small>
+              </button>
+              <button class="prompt-card" data-stage="collect">
+                <b>我的分数能报什么学校？</b>
+                <small>结合湖南 2025 招生数据做冲稳保分析</small>
+              </button>
+              <button class="prompt-card" data-stage="collect">
+                <b>我还没想好专业方向</b>
+                <small>先聊兴趣和城市偏好，再逐步缩小范围</small>
+              </button>
+            </div>
+          </div>
+        `;
+      }
+
+      function profileCard() {
+        return `
+          <div class="profile-card">
+            <div class="card-heading">
+              <div>
+                <h3>我先确认一下你的基本情况</h3>
+                <small>这些信息会决定可报范围和位次换算</small>
+              </div>
+              <span class="choice-chip primary">已理解 6 项</span>
+            </div>
+            <div class="data-grid">
+              <div class="data-item"><small>省份</small><strong>湖南</strong></div>
+              <div class="data-item"><small>报考年份</small><strong>2025</strong></div>
+              <div class="data-item"><small>科类</small><strong>物理类</strong></div>
+              <div class="data-item"><small>批次</small><strong>本科批</strong></div>
+              <div class="data-item"><small>高考分数</small><strong>612 分</strong></div>
+              <div class="data-item"><small>选科组合</small><strong>物 + 化 + 生</strong></div>
+            </div>
+            <div class="preference-block">
+              <span>城市偏好 · 可多选</span>
+              <div class="choice-row">
+                <button class="choice-chip primary">长沙</button>
+                <button class="choice-chip">武汉</button>
+                <button class="choice-chip">广州</button>
+                <button class="choice-chip">不限城市</button>
+              </div>
+            </div>
+            <div class="preference-block">
+              <span>专业兴趣</span>
+              <div class="choice-row">
+                <button class="choice-chip primary">计算机</button>
+                <button class="choice-chip primary">电子信息</button>
+                <button class="choice-chip">自动化</button>
+                <button class="choice-chip">还没想好</button>
+              </div>
+            </div>
+            <div class="report-cta">
+              <p>确认后，我会核对选科限制、招生计划和历史位次。</p>
+              <button class="primary-button" data-stage="progress">确认并生成</button>
+            </div>
+          </div>
+        `;
+      }
+
+      function progressCard() {
+        return `
+          <div class="progress-card">
+            <div class="card-heading">
+              <div>
+                <h3>正在生成你的志愿方案</h3>
+                <small>预计 20–40 秒，可以继续留在当前对话</small>
+              </div>
+              <span class="choice-chip">处理中</span>
+            </div>
+            <div class="progress-row"><span class="status-dot done"></span>画像已确认：湖南 · 2025 · 物理类 · 612 分</div>
+            <div class="progress-row"><span class="status-dot done"></span>位次换算与历史样本匹配完成</div>
+            <div class="progress-row"><span class="status-dot active"></span>正在核对招生计划、选科和资格限制</div>
+            <div class="progress-row"><span class="status-dot"></span>正在生成冲稳保梯度与静态报告</div>
+            <div class="report-cta">
+              <p>原型演示按钮：模拟后台处理完成</p>
+              <button class="primary-button" data-stage="result">查看生成结果</button>
+            </div>
+          </div>
+        `;
+      }
+
+      function resultRows() {
+        return [
+          ["冲", "中南大学", "专业组 03 · 计算机类", "34%", ""],
+          ["稳", "湖南大学", "专业组 07 · 电子信息类", "57%", "stable"],
+          ["稳", "湖南师范大学", "专业组 12 · 计算机科学与技术", "63%", "stable"],
+          ["保", "长沙理工大学", "专业组 05 · 自动化", "78%", "safe"],
+        ]
+          .map(
+            ([tier, school, meta, probability, cls]) => `
+              <div class="preview-row">
+                <span class="tier ${cls}">${tier}</span>
+                <div>
+                  <strong>${school}</strong>
+                  <small>${meta}</small>
+                </div>
+                <span class="probability">${probability}</span>
+              </div>
+            `,
+          )
+          .join("");
+      }
+
+      function resultCard() {
+        return `
+          <div class="result-card">
+            <div class="result-hero">
+              <small>正式推荐报告 · RESULT 2025-07-18-001</small>
+              <h3>你的冲稳保方案已生成</h3>
+              <span>共 12 所推荐学校 · 已核验选科与关键招生限制</span>
+            </div>
+            <div class="preview-list">${resultRows()}</div>
+            <div class="report-cta">
+              <p>完整报告包含 12 所学校、专业详情、证据出处和风险提示。</p>
+              <a class="primary-link" href="${reportUrl()}" target="_blank">查看完整推荐报告 ↗</a>
+            </div>
+          </div>
+        `;
+      }
+
+      function threadContent() {
+        if (state.stage === "welcome") return welcomeContent();
+
+        const intro =
+          state.stage === "collect"
+            ? `
+              <div class="chat-message user">
+                <div class="avatar">你</div>
+                <div class="bubble">我物理类 612 分，选的是物化生，想看看能报什么学校。</div>
+              </div>
+              <div class="chat-message">
+                <div class="avatar">愿</div>
+                <div class="bubble">
+                  <h2>可以。我先确认几个会影响推荐范围的信息。</h2>
+                  <p>湖南 2025 本科批我按默认处理。城市和专业可以先选，也可以之后再调整。</p>
+                  ${profileCard()}
+                </div>
+              </div>
+            `
+            : `
+              <div class="chat-message user">
+                <div class="avatar">你</div>
+                <div class="bubble">我物理类 612 分，选的是物化生，想看看能报什么学校。</div>
+              </div>
+              <div class="chat-message">
+                <div class="avatar">愿</div>
+                <div class="bubble">
+                  <h2>${state.stage === "confirm" ? "请确认我理解的画像信息。" : state.stage === "progress" ? "信息已确认，开始生成方案。" : "方案已经整理好了。"}</h2>
+                  <p>${state.stage === "confirm" ? "如果有一项不对，可以直接在对话里告诉我修改。" : state.stage === "progress" ? "我会先核对数据和资格限制，再生成静态推荐报告。" : "下面先展示部分推荐，完整内容可打开独立报告页。"}</p>
+                  ${state.stage === "confirm" ? profileCard() : state.stage === "progress" ? progressCard() : resultCard()}
+                </div>
+              </div>
+            `;
+
+        return intro + `
+          <div class="chat-message">
+            <div class="avatar">愿</div>
+            <div class="bubble muted">
+              本报告基于历史公开数据估算，不构成录取承诺。系统不会修改算法给出的概率和候选顺序。
+            </div>
+          </div>
+        `;
+      }
+
+      function inspector() {
+        return `
+          <aside class="inspector-b">
+            <h2>画像与进度</h2>
+            <p>右侧持续展示系统当前理解，减少反复确认。</p>
+            <section class="inspector-section">
+              <h3>当前画像</h3>
+              <div class="inspector-kv"><span>地区</span><strong>湖南 · 2025</strong></div>
+              <div class="inspector-kv"><span>科类</span><strong>物理类</strong></div>
+              <div class="inspector-kv"><span>分数</span><strong>612 分</strong></div>
+              <div class="inspector-kv"><span>选科</span><strong>物 / 化 / 生</strong></div>
+              <div class="inspector-kv"><span>城市</span><strong>长沙优先</strong></div>
+              <div class="inspector-kv"><span>方向</span><strong>计算机 / 电子信息</strong></div>
+            </section>
+            <section class="inspector-section">
+              <h3>处理进度</h3>
+              <div class="pipeline">
+                <div class="pipeline-step done"><span>✓</span><p>提取分数与选科</p></div>
+                <div class="pipeline-step done"><span>✓</span><p>确认湖南 2025 本科批</p></div>
+                <div class="pipeline-step ${state.stage === "progress" ? "active" : "done"}"><span>${state.stage === "progress" ? "…" : "✓"}</span><p>计算位次与候选范围</p></div>
+                <div class="pipeline-step ${state.stage === "result" ? "done" : ""}"><span>${state.stage === "result" ? "✓" : "4"}</span><p>核验数据并生成报告</p></div>
+              </div>
+            </section>
+            <section class="inspector-section">
+              <h3>数据说明</h3>
+              <p class="muted">演示固定使用湖南 2025 本科批。概率为历史数据估算，不是录取保证。</p>
+            </section>
+          </aside>
+        `;
+      }
+
+      function layoutA() {
+        return `
+          <div class="app-a">
+            <aside class="sidebar-a">${brand()}${historyList()}</aside>
+            <main class="main-a">
+              <header class="topbar">
+                <span class="topbar-title">湖南物理类 612 分志愿方案</span>
+                <span class="topbar-meta">浏览器本地会话</span>
+              </header>
+              <div class="chat-scroll-a"><div class="thread-a">${threadContent()}</div></div>
+              <div class="composer-wrap">${composer()}</div>
+            </main>
+          </div>
+        `;
+      }
+
+      function layoutB() {
+        return `
+          <div class="app-b">
+            <aside class="sidebar-a sidebar-b">
+              ${brand()}
+              ${historyList()}
+            </aside>
+            <main class="main-b">
+              <header class="topbar">
+                <span class="topbar-title">志愿规划对话</span>
+                <span class="topbar-meta">系统当前阶段 · ${state.stage === "result" ? "已完成" : "信息确认"}</span>
+              </header>
+              <div class="thread-b" style="padding-top: 38px">${threadContent()}</div>
+              <div class="composer-b">${composer()}</div>
+            </main>
+            ${inspector()}
+          </div>
+        `;
+      }
+
+      function layoutC() {
+        return `
+          <div class="app-c">
+            <aside class="sidebar-c">
+              ${brand()}
+              <div class="case-nav">
+                <a class="active">本次志愿方案</a>
+                <a>画像信息</a>
+                <a>推荐结果</a>
+                <a>数据依据</a>
+              </div>
+              <div class="sidebar-foot">
+                当前对话对应一个 session。<br />
+                生成与修订任务不会展示给考生。
+              </div>
+            </aside>
+            <main class="workspace-c">
+              <div class="workspace-head-c">
+                <div>
+                  <h1>逐步完成你的志愿方案</h1>
+                  <p>系统会追问缺失信息，并在生成前请你确认。</p>
+                </div>
+                <span class="choice-chip">草稿</span>
+              </div>
+              <div class="stepper">
+                <div class="${state.stage !== "welcome" ? "active" : ""}">1 · 分数选科</div>
+                <div class="${["confirm", "progress", "result"].includes(state.stage) ? "active" : ""}">2 · 偏好画像</div>
+                <div class="${state.stage === "confirm" ? "active" : ""}">3 · 用户确认</div>
+                <div class="${state.stage === "progress" ? "active" : ""}">4 · 生成核验</div>
+                <div class="${state.stage === "result" ? "active" : ""}">5 · 推荐报告</div>
+              </div>
+              <div class="paper-c">${threadContent()}</div>
+              <div class="composer-c">${composer()}</div>
+            </main>
+            <aside class="context-c">
+              <h2>信息完整度</h2>
+              <p>还差偏好信息，即可生成报告。</p>
+              <div class="readiness"><div><strong>${state.stage === "result" ? "100%" : "86%"}</strong><small>画像完整度</small></div></div>
+              <section class="inspector-section">
+                <h3>已确认</h3>
+                <div class="inspector-kv"><span>湖南</span><strong>2025</strong></div>
+                <div class="inspector-kv"><span>物理类</span><strong>612 分</strong></div>
+                <div class="inspector-kv"><span>选科</span><strong>物化生</strong></div>
+              </section>
+              <div class="note-box">
+                在生成正式报告前，所有画像字段都需要你明确确认。没有可靠数据时会提示“不予推荐”，不会自动补造。
+              </div>
+            </aside>
+          </div>
+        `;
+      }
+
+      function render() {
+        const layout =
+          state.variant === "A"
+            ? layoutA()
+            : state.variant === "B"
+              ? layoutB()
+              : layoutC();
+        document.querySelector("#app").innerHTML = layout + switcher();
+      }
+
+      document.addEventListener("click", (event) => {
+        const stageButton = event.target.closest("[data-stage]");
+        if (stageButton) {
+          updateParam("step", stageButton.dataset.stage);
+          return;
+        }
+        const variantButton = event.target.closest("[data-variant-step]");
+        if (variantButton) {
+          const current = variants.indexOf(state.variant);
+          const direction = Number(variantButton.dataset.variantStep);
+          const next = (current + direction + variants.length) % variants.length;
+          updateParam("variant", variants[next]);
+        }
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (
+          event.target instanceof HTMLInputElement ||
+          event.target instanceof HTMLTextAreaElement ||
+          event.target.isContentEditable
+        ) {
+          return;
+        }
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        const current = variants.indexOf(state.variant);
+        const direction = event.key === "ArrowRight" ? 1 : -1;
+        updateParam("variant", variants[(current + direction + variants.length) % variants.length]);
+      });
+
+      render();
+    </script>
+  </body>
+</html>

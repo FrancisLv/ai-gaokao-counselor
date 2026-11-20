@@ -1,401 +1,411 @@
-<template>
-  <main class="shell">
-    <header class="hero">
-      <div>
-        <p class="eyebrow">M2 / M3 / M4a 内部验收</p>
-        <h1>Run 验收控制台</h1>
-        <p class="lead">
-          通过 gateway 验证结构化画像、HITL 恢复、SSE 事件与
-          ALGORITHM_PREVIEW，以及 POLICY_QA 的文档证据检索。
-        </p>
-      </div>
-      <span class="principal">principal: {{ lifecycle.principalId }}</span>
-    </header>
-
-    <div class="mode-switch" role="tablist" aria-label="验收任务类型">
-      <button
-        :class="{ active: lifecycle.taskMode.value === 'plan' }"
-        data-testid="mode-plan"
-        type="button"
-        @click="lifecycle.taskMode.value = 'plan'"
-      >
-        志愿方案预览
-      </button>
-      <button
-        :class="{ active: lifecycle.taskMode.value === 'policy' }"
-        data-testid="mode-policy"
-        type="button"
-        @click="lifecycle.taskMode.value = 'policy'"
-      >
-        政策证据检索
-      </button>
-    </div>
-
-    <form
-      v-if="lifecycle.taskMode.value === 'plan'"
-      class="panel form-grid"
-      @submit.prevent="lifecycle.submit"
-    >
-      <label>
-        省份
-        <select v-model="lifecycle.profile.province" data-testid="province">
-          <option value="湖南">湖南</option>
-        </select>
-      </label>
-      <label>
-        报考年
-        <input
-          v-model.number="lifecycle.profile.applicationYear"
-          data-testid="application-year"
-          min="2020"
-          type="number"
-        />
-      </label>
-      <label>
-        科类
-        <select v-model="lifecycle.profile.category" data-testid="category">
-          <option value="物理类">物理类</option>
-          <option value="历史类">历史类</option>
-        </select>
-      </label>
-      <label>
-        批次
-        <input v-model="lifecycle.profile.batch" data-testid="batch" />
-      </label>
-      <label>
-        分数
-        <input
-          v-model.number="lifecycle.profile.score"
-          data-testid="score"
-          min="0"
-          max="750"
-          type="number"
-        />
-      </label>
-      <fieldset class="subjects">
-        <legend>选科组合</legend>
-        <label v-for="subject in subjects" :key="subject">
-          <input
-            v-model="lifecycle.profile.subjects"
-            :data-testid="`subject-${subjectKey(subject)}`"
-            :value="subject"
-            type="checkbox"
-          />
-          {{ subject }}
-        </label>
-      </fieldset>
-      <button data-testid="submit-run" :disabled="lifecycle.submitting.value">
-        {{ lifecycle.submitting.value ? "提交中…" : "提交任务" }}
-      </button>
-    </form>
-
-    <form
-      v-else
-      class="panel form-grid policy-form"
-      data-testid="policy-form"
-      @submit.prevent="lifecycle.submitPolicy"
-    >
-      <label class="wide-field">
-        政策问题
-        <textarea
-          v-model="lifecycle.policy.queryText"
-          data-testid="policy-query"
-          rows="3"
-        />
-      </label>
-      <label>
-        省份
-        <select v-model="lifecycle.policy.province" data-testid="policy-province">
-          <option value="湖南">湖南</option>
-        </select>
-      </label>
-      <label>
-        报考年
-        <input
-          v-model.number="lifecycle.policy.applicationYear"
-          data-testid="policy-application-year"
-          min="2020"
-          type="number"
-        />
-      </label>
-      <label>
-        科类
-        <select v-model="lifecycle.policy.category" data-testid="policy-category">
-          <option value="物理类">物理类</option>
-          <option value="历史类">历史类</option>
-          <option value="不限">不限</option>
-        </select>
-      </label>
-      <label>
-        批次
-        <select v-model="lifecycle.policy.batch" data-testid="policy-batch">
-          <option value="本科批">本科批</option>
-          <option value="不限">不限</option>
-        </select>
-      </label>
-      <label>
-        学校 ID（可选，逗号分隔）
-        <input v-model="lifecycle.policy.schoolIds" data-testid="policy-schools" />
-      </label>
-      <label>
-        文档类型（可选，逗号分隔）
-        <input
-          v-model="lifecycle.policy.documentTypes"
-          data-testid="policy-document-types"
-        />
-      </label>
-      <label>
-        检索模式
-        <select v-model="lifecycle.policy.mode" data-testid="policy-mode">
-          <option value="hybrid">hybrid</option>
-          <option value="vector">vector</option>
-          <option value="keyword">keyword</option>
-        </select>
-      </label>
-      <button
-        data-testid="submit-policy"
-        :disabled="lifecycle.submitting.value"
-      >
-        {{ lifecycle.submitting.value ? "检索中…" : "检索政策证据" }}
-      </button>
-    </form>
-
-    <p v-if="lifecycle.error.value" class="error" role="alert">
-      {{ lifecycle.error.value }}
-    </p>
-
-    <section v-if="lifecycle.run.value" class="panel">
-      <h2>Run 状态</h2>
-      <dl class="facts">
-        <dt>runId</dt>
-        <dd data-testid="run-id">{{ lifecycle.run.value.runId }}</dd>
-        <dt>sessionId</dt>
-        <dd>{{ lifecycle.run.value.sessionId }}</dd>
-        <dt>状态</dt>
-        <dd data-testid="run-state">{{ lifecycle.run.value.state }}</dd>
-        <dt>阶段</dt>
-        <dd>{{ lifecycle.run.value.stage }}</dd>
-        <dt>releaseId</dt>
-        <dd>{{ lifecycle.run.value.releaseId }}</dd>
-        <dt>stateVersion</dt>
-        <dd>{{ lifecycle.run.value.stateVersion }}</dd>
-        <dt>过期时间</dt>
-        <dd>{{ lifecycle.run.value.expiresAt ?? "-" }}</dd>
-      </dl>
-      <p
-        v-if="lifecycle.run.value.terminalReason"
-        class="terminal-reason"
-      >
-        terminal reason：
-        <strong data-testid="terminal-reason">
-          {{ lifecycle.run.value.terminalReason }}
-        </strong>
-      </p>
-      <p
-        v-if="lifecycle.run.value.state === 'FAILED'"
-        class="error"
-        data-testid="policy-failure"
-      >
-        {{ failureMessage(lifecycle.run.value.terminalReason) }}
-      </p>
-      <div class="actions">
-        <button
-          v-if="lifecycle.run.value.state !== 'CANCELLED'"
-          class="secondary danger"
-          data-testid="cancel-run"
-          :disabled="lifecycle.cancelling.value"
-          type="button"
-          @click="lifecycle.cancel"
-        >
-          {{ lifecycle.cancelling.value ? "取消中…" : "取消 Run" }}
-        </button>
-      </div>
-      <p
-        v-if="lifecycle.cancelReceipt.value"
-        class="cancel-receipt"
-        data-testid="cancel-receipt"
-      >
-        {{
-          lifecycle.cancelReceipt.value.accepted
-            ? `已取消：${lifecycle.cancelReceipt.value.state}`
-            : `未取消：${lifecycle.cancelReceipt.value.reason ?? "REJECTED"}；当前终态保持 ${lifecycle.cancelReceipt.value.state}`
-        }}
-      </p>
-    </section>
-
-    <section
-      v-if="lifecycle.run.value?.currentInterrupt"
-      class="panel confirm-card"
-      data-testid="profile-card"
-    >
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">{{ lifecycle.run.value.currentInterrupt.kind }}</p>
-          <h2>画像确认</h2>
-        </div>
-        <span class="badge open">OPEN</span>
-      </div>
-      <dl class="facts">
-        <dt>interruptId</dt>
-        <dd>{{ lifecycle.run.value.currentInterrupt.interruptId }}</dd>
-        <dt>profileVersion</dt>
-        <dd>{{ lifecycle.run.value.currentInterrupt.profileVersion }}</dd>
-        <dt>stateVersion</dt>
-        <dd>{{ lifecycle.run.value.stateVersion }}</dd>
-      </dl>
-      <div class="profile-fields">
-        <article
-          v-for="(field, key) in lifecycle.run.value.currentInterrupt.fields"
-          :key="key"
-          :data-testid="`profile-field-${key}`"
-          class="profile-field"
-        >
-          <span class="field-key">{{ fieldLabel(String(key)) }}</span>
-          <strong>{{ fieldValue(field) }}</strong>
-          <span class="badge" :class="String(field.state).toLowerCase()">
-            {{ field.state }}
-          </span>
-          <small>{{ field.source }}</small>
-        </article>
-      </div>
-      <ul
-        v-if="lifecycle.run.value.currentInterrupt.findings?.length"
-        class="findings"
-      >
-        <li
-          v-for="finding in lifecycle.run.value.currentInterrupt.findings"
-          :key="finding.code"
-        >
-          {{ finding.code }} / {{ finding.messageKey }}
-        </li>
-      </ul>
-      <div
-        v-if="lifecycle.run.value.currentInterrupt.kind === 'PROFILE_CONFIRM'"
-        class="actions"
-      >
-        <button
-          data-testid="confirm-profile"
-          :disabled="lifecycle.confirming.value"
-          type="button"
-          @click="lifecycle.confirm"
-        >
-          {{ lifecycle.confirming.value ? "确认中…" : "确认画像" }}
-        </button>
-      </div>
-    </section>
-
-    <section v-if="lifecycle.events.value.length" class="panel">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">SSE</p>
-          <h2>事件时间线</h2>
-        </div>
-        <span class="badge" :class="lifecycle.connected.value ? 'open' : 'default'">
-          {{ lifecycle.connected.value ? "CONNECTED" : "RECONNECTING" }}
-        </span>
-      </div>
-      <ol class="event-list">
-        <li
-          v-for="event in lifecycle.events.value"
-          :key="event.eventSeq"
-          data-testid="event-row"
-          class="event-row"
-        >
-          <div class="event-heading">
-            <strong>#{{ event.eventSeq }}</strong>
-            <span class="badge open">{{ event.type }}</span>
-            <span>{{ event.stage }}</span>
-            <small>stateVersion {{ event.stateVersion }}</small>
-          </div>
-          <details v-if="event.payload" class="event-payload">
-            <summary>查看 payload</summary>
-            <pre>{{ stringify(event.payload) }}</pre>
-          </details>
-        </li>
-      </ol>
-    </section>
-
-    <AlgorithmPreview
-      v-if="lifecycle.run.value?.resultPreview"
-      :preview="lifecycle.run.value.resultPreview"
-    />
-    <PolicyEvidence
-      v-if="lifecycle.run.value?.policyEvidence"
-      :result="lifecycle.run.value.policyEvidence"
-    />
-  </main>
-</template>
-
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { computed } from "vue";
 
-import AlgorithmPreview from "./components/AlgorithmPreview.vue";
-import PolicyEvidence from "./components/PolicyEvidence.vue";
-import { useRunLifecycle } from "./composables/useRunLifecycle";
-import type { ProfileFieldView } from "./api/types";
+import type { FormalReportSection } from "./api/types";
+import { useConversation } from "./composables/useConversation";
 
-const lifecycle = useRunLifecycle();
-const subjects = ["物理", "历史", "化学", "生物", "政治", "地理"];
-const fieldLabels: Record<string, string> = {
-  province: "省份",
-  application_year: "报考年",
-  category: "科类",
-  batch: "批次",
-  score: "分数",
-  subjects: "选科组合",
-};
+const chat = useConversation();
+const cityOptions = ["长沙", "武汉", "广州", "不限城市"];
+const majorOptions = ["计算机", "电子信息", "自动化", "还没想好"];
+const riskOptions = ["均衡", "偏冲刺", "偏稳妥"];
 
-onMounted(() => {
-  void lifecycle.restore();
+const isWelcome = computed(() => chat.stage === "welcome");
+const showComposer = computed(
+  () =>
+    !["welcome", "preferences", "running", "confirm", "done", "failed"].includes(
+      chat.stage,
+    ),
+);
+const reportSections = computed(
+  () => chat.run?.formalResult?.report.sections ?? [],
+);
+const candidateSections = computed(() =>
+  reportSections.value
+    .filter((section) => section.sectionKey.startsWith("candidate:"))
+    .slice(0, 4)
+    .map(parseCandidateSection),
+);
+const profileStep = computed(() => {
+  if (chat.stage === "welcome") return 0;
+  if (chat.stage === "category") return 1;
+  if (chat.stage === "score") return 2;
+  if (chat.stage === "subjects") return 3;
+  if (chat.stage === "preferences") return 4;
+  if (chat.stage === "confirm") return 5;
+  if (chat.stage === "done") return 6;
+  return 5;
 });
 
-function subjectKey(subject: string): string {
+function parseCandidateSection(section: FormalReportSection) {
   return {
-    物理: "physics",
-    历史: "history",
-    化学: "chemistry",
-    生物: "biology",
-    政治: "politics",
-    地理: "geography",
-  }[subject]!;
+    ...section,
+    probability:
+      section.body.match(/录取概率约\s*(\d+)%/)?.[1] ?? "—",
+    tier: section.body.match(/策略分档：([^\s，。]+)/)?.[1] ?? "方案",
+    planCount:
+      section.body.match(/招生计划数：(\d+)/)?.[1] ?? "待核验",
+  };
+}
+
+function subjectDisabled(subject: string): boolean {
+  if (subject === "物理") return chat.category === "历史类";
+  if (subject === "历史") return chat.category === "物理类";
+  return false;
+}
+
+function submitPrompt(): void {
+  if (chat.stage === "welcome") {
+    chat.startConversation(chat.prompt.trim());
+  } else {
+    void chat.sendPrompt();
+  }
+}
+
+function choosePrompt(text: string): void {
+  chat.startConversation(text);
 }
 
 function fieldLabel(key: string): string {
-  return fieldLabels[key] ?? key;
+  const labels: Record<string, string> = {
+    province: "省份",
+    application_year: "报考年份",
+    category: "科类",
+    batch: "批次",
+    score: "高考分数",
+    subjects: "选科组合",
+    physical_exam: "体检条件",
+    tuition_budget: "学费预算",
+  };
+  return labels[key] || key.replaceAll("_", " ");
 }
 
-function fieldValue(field: ProfileFieldView): string {
-  if (field.stringList) return field.stringList.values.join("、");
+function fieldValue(field: {
+  stringValue?: string;
+  intValue?: number;
+  stringList?: { values: string[] };
+}): string {
+  if (field.stringList) return field.stringList.values.join(" / ");
   if (field.intValue !== undefined) return String(field.intValue);
-  if (field.stringValue !== undefined) return field.stringValue;
-  return "UNKNOWN";
-}
-
-function stringify(value: unknown): string {
-  return JSON.stringify(value, null, 2);
-}
-
-function failureMessage(reason?: string): string {
-  switch (reason) {
-    case "UNSUPPORTED_SCOPE":
-      return "当前适用范围不受支持，请修正省份、报考年、科类或批次。";
-    case "RELEASE_UNAVAILABLE":
-    case "RELEASE_REVOKED":
-      return "当前发布版本不可用，请稍后重试或联系管理员。";
-    case "RETRIEVAL_UNAVAILABLE":
-      return "检索服务暂不可用，本次没有生成可靠证据。";
-    case "VECTOR_UNAVAILABLE":
-      return "向量检索不可用，请切换为 hybrid 或 keyword 后重试。";
-    case "KEYWORD_UNAVAILABLE":
-      return "关键词检索不可用，请切换为 hybrid 或 vector 后重试。";
-    case "INDEX_MODEL_MISMATCH":
-      return "检索索引与查询模型版本不一致，当前不能返回证据。";
-    case "RETRIEVAL_QUERY_REQUIRED":
-      return "请输入需要检索的政策问题。";
-    case "RETRIEVAL_SCOPE_REQUIRED":
-      return "请补充完整的省份、报考年、科类和批次。";
-    default:
-      return reason ? `任务失败：${reason}` : "任务失败。";
-  }
+  return field.stringValue || "未提供";
 }
 </script>
+
+<template>
+  <div class="chat-app">
+    <aside class="chat-sidebar">
+      <div class="chat-brand">
+        <span class="brand-mark">愿</span>
+        <div>
+          <strong>知愿 · 志愿规划</strong>
+          <small>对话式高考志愿助手</small>
+        </div>
+      </div>
+      <button class="new-chat" type="button" @click="chat.resetConversation">
+        ＋ 新对话
+      </button>
+      <p class="history-label">最近对话</p>
+      <ul v-if="chat.historyEntries.length" class="history-list">
+        <li v-for="entry in chat.historyEntries" :key="entry.runId">
+          <button type="button" @click="chat.openHistory(entry)">
+            {{ entry.title }}
+          </button>
+        </li>
+      </ul>
+      <p v-else class="history-empty">生成第一条志愿方案后，会在这里留下记录。</p>
+      <div class="sidebar-foot">
+        对话仅保存在当前浏览器<br />
+        概率为历史数据估算，不构成录取承诺
+      </div>
+    </aside>
+
+    <main class="chat-main">
+      <header class="chat-topbar">
+        <div>
+          <strong>{{ isWelcome ? "新的志愿规划" : "湖南 2025 志愿方案" }}</strong>
+          <small>湖南 · 2025 · 本科批</small>
+        </div>
+        <span class="session-badge">匿名演示会话</span>
+      </header>
+
+      <div v-if="isWelcome" class="welcome-stage">
+        <div class="welcome-logo">愿</div>
+        <h1>把复杂的志愿填报，聊明白。</h1>
+        <p>我会先了解你的分数、选科和偏好，再逐步核验数据并生成推荐报告。</p>
+        <div class="welcome-prompts">
+          <button
+            type="button"
+            @click="choosePrompt('我物理类 612 分，选的是物化生，帮我看看能报什么学校')"
+          >
+            <b>帮我生成志愿方案</b>
+            <span>从分数和选科开始</span>
+          </button>
+          <button
+            type="button"
+            @click="choosePrompt('我想先看看物理类能报哪些计算机专业')"
+          >
+            <b>我的分数能报什么学校？</b>
+            <span>结合湖南 2025 招生数据</span>
+          </button>
+          <button
+            type="button"
+            @click="choosePrompt('我还没想好专业方向，先帮我梳理一下')"
+          >
+            <b>我还没想好专业方向</b>
+            <span>先聊兴趣和城市偏好</span>
+          </button>
+        </div>
+      </div>
+
+      <div v-else class="thread-scroll">
+        <div class="thread">
+          <div
+            v-for="message in chat.messages"
+            :key="message.id"
+            class="chat-message"
+            :class="message.role"
+          >
+            <div class="avatar">{{ message.role === "user" ? "你" : "愿" }}</div>
+            <div class="bubble">{{ message.text }}</div>
+          </div>
+
+          <div v-if="chat.stage === 'category'" class="chat-message assistant">
+            <div class="avatar">愿</div>
+            <div class="bubble">
+              <p>先确认你的科类。</p>
+              <div class="choice-row">
+                <button class="choice-chip primary" @click="chat.chooseCategory('物理类')">
+                  物理类
+                </button>
+                <button class="choice-chip" @click="chat.chooseCategory('历史类')">
+                  历史类
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="chat.stage === 'score'" class="chat-message assistant">
+            <div class="avatar">愿</div>
+            <div class="inline-card">
+              <label>
+                高考分数
+                <input v-model.number="chat.score" max="750" min="0" type="number" />
+              </label>
+              <button class="primary-button" type="button" @click="chat.submitScore">
+                确认分数
+              </button>
+            </div>
+          </div>
+
+          <div v-if="chat.stage === 'subjects'" class="chat-message assistant">
+            <div class="avatar">愿</div>
+            <div class="inline-card">
+              <p>选择你的 3+1+2 组合，已选 {{ chat.subjects.length }}/3。</p>
+              <div class="choice-row">
+                <button
+                  v-for="subject in chat.allSubjects"
+                  :key="subject"
+                  class="choice-chip"
+                  :class="{ primary: chat.subjects.includes(subject) }"
+                  :disabled="subjectDisabled(subject)"
+                  type="button"
+                  @click="chat.toggleSubject(subject)"
+                >
+                  {{ subject }}
+                </button>
+              </div>
+              <button class="primary-button" type="button" @click="chat.submitSubjects">
+                下一步
+              </button>
+            </div>
+          </div>
+
+          <div v-if="chat.stage === 'preferences'" class="chat-message assistant">
+            <div class="avatar">愿</div>
+            <div class="preference-card">
+              <section>
+                <span>城市偏好</span>
+                <div class="choice-row">
+                  <button
+                    v-for="city in cityOptions"
+                    :key="city"
+                    class="choice-chip"
+                    :class="{ primary: chat.cityPreferences.includes(city) }"
+                    type="button"
+                    @click="chat.togglePreference('city', city)"
+                  >
+                    {{ city }}
+                  </button>
+                </div>
+              </section>
+              <section>
+                <span>专业兴趣</span>
+                <div class="choice-row">
+                  <button
+                    v-for="major in majorOptions"
+                    :key="major"
+                    class="choice-chip"
+                    :class="{ primary: chat.majorPreferences.includes(major) }"
+                    type="button"
+                    @click="chat.togglePreference('major', major)"
+                  >
+                    {{ major }}
+                  </button>
+                </div>
+              </section>
+              <section>
+                <span>风险偏好</span>
+                <div class="choice-row">
+                  <button
+                    v-for="risk in riskOptions"
+                    :key="risk"
+                    class="choice-chip"
+                    :class="{ primary: chat.riskPreference === risk }"
+                    type="button"
+                    @click="chat.riskPreference = risk"
+                  >
+                    {{ risk }}
+                  </button>
+                </div>
+              </section>
+              <button class="primary-button" type="button" @click="chat.finishPreferences">
+                开始生成方案
+              </button>
+            </div>
+          </div>
+
+          <div v-if="chat.stage === 'running'" class="chat-message assistant">
+            <div class="avatar">愿</div>
+            <div class="progress-card">
+              <div class="progress-row"><span class="status-dot done"></span>画像信息已提交</div>
+              <div class="progress-row"><span class="status-dot done"></span>正在核对选科与招生限制</div>
+              <div class="progress-row"><span class="status-dot active"></span>正在计算冲稳保并生成报告</div>
+              <p class="muted">可以留在当前页面，结果会自动出现。</p>
+            </div>
+          </div>
+
+          <div
+            v-if="chat.stage === 'confirm' && chat.currentInterrupt"
+            class="chat-message assistant"
+          >
+            <div class="avatar">愿</div>
+            <div class="profile-confirm-card">
+              <div class="card-heading">
+                <h3>请确认我理解的画像</h3>
+                <span class="session-badge">待确认</span>
+              </div>
+              <div class="profile-grid">
+                <div
+                  v-for="(field, key) in chat.currentInterrupt.fields"
+                  :key="key"
+                  class="profile-field"
+                >
+                  <small>{{ fieldLabel(String(key)) }}</small>
+                  <strong>{{ fieldValue(field) }}</strong>
+                  <span>{{ field.state }}</span>
+                </div>
+              </div>
+              <button
+                class="primary-button"
+                :disabled="chat.busy"
+                type="button"
+                @click="chat.confirmProfileCard"
+              >
+                确认画像并继续
+              </button>
+            </div>
+          </div>
+
+          <div v-if="chat.stage === 'done' && chat.run?.formalResult" class="chat-message assistant">
+            <div class="avatar">愿</div>
+            <div class="result-card">
+              <div class="result-hero">
+                <small>正式推荐报告 · {{ chat.run.formalResult.resultVersion }}</small>
+                <h2>你的冲稳保方案已生成</h2>
+                <p>
+                  已通过 {{ chat.run.formalResult.verificationStatus }} 事实校验，
+                  引用覆盖率 {{ Math.round(chat.run.formalResult.citationCoverage * 100) }}%。
+                </p>
+              </div>
+              <div class="preview-list">
+                <div v-for="candidate in candidateSections" :key="candidate.sectionKey" class="preview-row">
+                  <span class="tier" :class="candidate.tier === '稳' ? 'stable' : candidate.tier === '保' ? 'safe' : ''">
+                    {{ candidate.tier }}
+                  </span>
+                  <div>
+                    <strong>{{ candidate.title.replace(/^\d+\.\s*/, "") }}</strong>
+                    <small>计划数 {{ candidate.planCount }} · 已核验关键事实</small>
+                  </div>
+                  <span class="probability">{{ candidate.probability }}%</span>
+                </div>
+              </div>
+              <div class="result-footer">
+                <p>{{ chat.run.formalResult.riskNotice }}</p>
+                <a class="primary-button" :href="`report.html?run=${chat.run.runId}`" target="_blank">
+                  查看完整推荐报告 ↗
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="chat.error" class="error-card">
+            <strong>本次任务未完成</strong>
+            <p>{{ chat.error }}</p>
+            <button class="secondary-button" type="button" @click="chat.resetConversation">
+              开始新对话
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <form v-if="isWelcome" class="composer welcome-composer" @submit.prevent="submitPrompt">
+        <textarea
+          v-model="chat.prompt"
+          aria-label="输入消息"
+          placeholder="描述你的分数、选科或想了解的问题…"
+          rows="1"
+          @keydown.enter.exact.prevent="submitPrompt"
+        />
+        <button aria-label="发送" type="submit">↑</button>
+      </form>
+      <form v-else-if="showComposer" class="composer" @submit.prevent="submitPrompt">
+        <textarea
+          v-model="chat.prompt"
+          aria-label="输入消息"
+          placeholder="继续回答问题，或补充你的偏好…"
+          rows="1"
+          @keydown.enter.exact.prevent="submitPrompt"
+        />
+        <button aria-label="发送" type="submit">↑</button>
+      </form>
+    </main>
+
+    <aside class="chat-inspector">
+      <h2>画像与进度</h2>
+      <p>右侧展示系统当前理解，生成前必须由你确认。</p>
+      <section class="inspector-section">
+        <h3>当前画像</h3>
+        <div class="inspector-kv"><span>地区</span><strong>湖南 · 2025</strong></div>
+        <div class="inspector-kv"><span>科类</span><strong>{{ chat.profileFields.category }}</strong></div>
+        <div class="inspector-kv"><span>分数</span><strong>{{ chat.profileFields.score }}</strong></div>
+        <div class="inspector-kv"><span>选科</span><strong>{{ chat.profileFields.subjects }}</strong></div>
+        <div class="inspector-kv"><span>城市</span><strong>{{ chat.profileFields.city }}</strong></div>
+        <div class="inspector-kv"><span>专业</span><strong>{{ chat.profileFields.major }}</strong></div>
+      </section>
+      <section class="inspector-section">
+        <h3>处理进度</h3>
+        <div class="pipeline">
+          <div class="pipeline-step" :class="{ done: profileStep > 0, active: profileStep === 0 }"><span>1</span><p>理解分数与选科</p></div>
+          <div class="pipeline-step" :class="{ done: profileStep > 3, active: profileStep === 3 }"><span>2</span><p>整理偏好</p></div>
+          <div class="pipeline-step" :class="{ done: profileStep > 4, active: profileStep === 4 }"><span>3</span><p>确认画像</p></div>
+          <div class="pipeline-step" :class="{ done: profileStep > 5, active: profileStep === 5 }"><span>4</span><p>核验数据并生成</p></div>
+        </div>
+      </section>
+      <section class="inspector-section">
+        <h3>数据说明</h3>
+        <p class="muted">
+          固定使用湖南 2025 本科批。报告中的概率是历史数据估算，不构成录取承诺。
+        </p>
+      </section>
+    </aside>
+  </div>
+</template>

@@ -144,6 +144,46 @@ export interface CandidateWithProb {
   };
 }
 
+export interface FormalEvidenceCitation {
+  evidenceId: string;
+  evidenceType: string;
+  contentSha256: string;
+  label: string;
+  sourceUri?: string;
+  sectionPath?: string;
+  releaseId: string;
+}
+
+export interface FormalReportSection {
+  sectionKey: string;
+  title: string;
+  body: string;
+  citations: FormalEvidenceCitation[];
+}
+
+export interface FormalReport {
+  reportVersion: string;
+  generationMode: string;
+  sections: FormalReportSection[];
+  claimIds: string[];
+  unverifiedFacts: string[];
+}
+
+export interface FormalResult {
+  resultVersion: string;
+  resultKind: "V1_FORMAL";
+  releaseId: string;
+  confirmedProfileVersion: string;
+  verificationStatus: string;
+  citationCoverage: number;
+  resultState: string;
+  staleReason?: string;
+  disclaimer: string;
+  riskNotice: string;
+  noAdmissionGuarantee: string;
+  report: FormalReport;
+}
+
 export interface RejectedCandidate {
   candidate?: CandidateWithProb;
   rule: string;
@@ -170,6 +210,7 @@ export interface RunView {
   currentInterrupt?: InterruptView;
   resultPreview?: AlgorithmPreview;
   policyEvidence?: PolicyEvidenceResult;
+  formalResult?: FormalResult;
   expiresAt?: string;
 }
 
