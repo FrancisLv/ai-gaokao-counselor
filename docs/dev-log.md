@@ -2471,3 +2471,51 @@ LLM、不新增 golden set/EvalRun，不改检索器、资格规则或第二业�
   算法派生事实伪装为文档事实。
 - `ALGORITHM_PREVIEW` 标识与存储能力为兼容保留，但已确认画像的正常成功路径现在
   发布 `V1_FORMAL`；需要预览的独立产品入口不在本票范围。
+
+## 70. M5b-06 principal 删除即时封锁、tombstone 与资源 ledger
+
+**日期与范围**：2026-11-20，issue #46。实现 `DeletePrincipalData` 控制面
+adapter；不实现保留清理（#47）或备份恢复重放（#48），不新增公开业务 seam。
+
+### 行为与安全边界
+
+- 删除请求在可信 principal、绑定请求的一次性确认和稳定 `request_id` 通过后，
+  先原子写入 `DELETION_PENDING`、最小 tombstone 与请求 ledger，再执行资源清理。
+  同一 `request_id` 已完成时重放原 receipt；部分失败时保持 pending，后续重试
+  继续清理且不重新消费确认。
+- `RunLifecycle` 的 `SubmitRun`、`ResumeRun`、`GetRun`、`WatchRun`、`CancelRun`
+  与 run-bound 检索 binding 在私有访问前检查 principal 状态。删除中返回
+  `DELETION_IN_PROGRESS`，删除完成后返回 `PRINCIPAL_DELETED`，不会先泄露 run
+  是否存在。
+- 清理覆盖 Profile revision/confirmation、interrupt、event、命令 receipt、
+  `plan_checkpoint`、官方 LangGraph checkpoint、正式结果、证据包、验证报告、
+  资格 artifact 与状态事件。run/session 保留最小去标识化 stub 以维持调用账本
+  引用；LLM logical call/预算/兼容投影去除 principal/session 关联、响应原文和
+  错误文本。
+- tombstone 只保存 principal 的 SHA-256 不可逆引用、request id、稳定原因码和
+  时间；用户提交的自由文本 `reason` 与确认 token 不进入 tombstone/ledger。
+- 正式结果默认仍不可改写；新迁移只在显式开启
+  `app.principal_deletion=on` 的删除事务中允许受控 DELETE，防止以删除实现绕过
+  ACTIVE/STALE 追加状态。
+
+### 验证
+
+- 测试从 `SubmitRun → GetRun` 观察删除前可读、删除中不可读、删除后不可见；
+  同时验证已删除 principal 不能重新 `SubmitRun`。
+- 删除已发布 `V1_FORMAL` 后，`run_result / run_evidence_package /
+  run_verification_report / run_formal_gate_artifact` 均清零；公开 release
+  保持存在。
+- 覆盖幂等重放且确认只消费一次、部分失败保持 pending 后重试成功、无效确认
+  稳定拒绝且保持原访问、Profile/task input/event/checkpoint 清理，以及敏感
+  reason 不落入审计表。
+- `ORCHESTRATOR_TEST_DSN=...` 下 #46 集成测试通过；
+  `make py-check` 通过。
+
+### 边界与风险
+
+- 本票只关闭删除请求与即时封锁；7/30/180 天定时保留策略由 #47 完成，
+  备份恢复时 tombstone/ledger 重放由 #48 完成。
+- Redis 投影未直接清理；现状没有按 principal 存储的权威 Redis 对象，最终恢复
+  与投影重建仍须在 #48 验证。
+- 确认签发与重新认证服务不在本票范围；控制面通过
+  `DeletionConfirmationAuthority` 注入，生产未接线时不能放行删除。
