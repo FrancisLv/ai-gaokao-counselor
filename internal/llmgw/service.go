@@ -187,14 +187,14 @@ func (s *Service) Chat(ctx context.Context, req *llmgwv1.ChatRequest) (*llmgwv1.
 	if replayed != nil {
 		return replayed, nil
 	}
-	if err := s.startAttempt(ctx, prepared); err != nil {
-		return nil, err
-	}
 
 	providerCtx, cancel := context.WithTimeout(ctx, time.Duration(prepared.providerRequest.Timeout))
 	defer cancel()
 	providerResponse, providerErr := s.provider.Chat(providerCtx, prepared.providerRequest)
 	if providerErr != nil {
+		if errors.Is(providerErr, ErrProviderNotCharged) {
+			return nil, s.releaseUnchargedCall(ctx, prepared)
+		}
 		return nil, s.markProviderUnknown(ctx, prepared, providerErr)
 	}
 	result := providerResult{
@@ -220,8 +220,7 @@ func (s *Service) Chat(ctx context.Context, req *llmgwv1.ChatRequest) (*llmgwv1.
 		return nil, s.markProviderUnknown(ctx, prepared, err)
 	}
 	if actualCostMicroUSD > prepared.reservedCost || actualTokens > prepared.reservedTokens {
-		_ = s.markProviderUnknown(ctx, prepared, errors.New("provider usage exceeds reservation"))
-		return nil, newStableError(codes.ResourceExhausted, 429, ReasonBudgetOverrun, "调用用量超过预算预留，已停止后续模型调用")
+		return nil, s.markBudgetOverrun(ctx, prepared, result, actualCostMicroUSD)
 	}
 
 	response, err := s.settleCall(ctx, prepared, result, actualCostMicroUSD, actualTokens)
@@ -521,6 +520,7 @@ func (s *Service) reserveCall(
 		attemptTokenCap: attemptTokens,
 		attemptCostCap:  attemptCost,
 		traceID:         req.TraceID,
+		startedAt:       s.now(),
 	}
 	prepared.providerRequest = ProviderRequest{
 		LogicalCallID:   req.LogicalCallID,
@@ -548,13 +548,20 @@ func (s *Service) reserveCall(
 	); err != nil {
 		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "初始化预算作用域失败")
 	}
+	var budgetStatus string
 	if err := tx.QueryRow(ctx, `
-		SELECT budget_scope_id::text
+		SELECT budget_scope_id::text, budget_status
 		FROM llm_budget_scope
 		WHERE principal_id = $1 AND session_id = $2`,
 		req.PrincipalID, req.SessionID,
-	).Scan(&budgetScopeID); err != nil {
+	).Scan(&budgetScopeID, &budgetStatus); err != nil {
 		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "读取预算作用域失败")
+	}
+	if budgetStatus == "BUDGET_OVERRUN" {
+		return nil, nil, newStableError(
+			codes.ResourceExhausted, 429, ReasonBudgetOverrun,
+			"预算作用域已因实际用量超预留而停止后续模型调用",
+		)
 	}
 
 	_, err = tx.Exec(ctx, `
@@ -566,7 +573,7 @@ func (s *Service) reserveCall(
 			reserved_cost_micro_usd
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-			'RESERVED', $14, $15, $16
+			'IN_PROGRESS', $14, $15, $16
 		)`,
 		prepared.logicalCallPK, prepared.ledgerEntryID, req.LogicalCallID,
 		req.PrincipalID, req.SessionID, req.RunID, req.Role, req.ReleaseID,
@@ -587,6 +594,7 @@ func (s *Service) reserveCall(
 		    cost_reserved_micro_usd = cost_reserved_micro_usd + $2,
 		    updated_at = NOW()
 		WHERE budget_scope_id = $3
+		  AND budget_status = 'ACTIVE'
 		  AND provider_tokens_settled + provider_tokens_reserved + $1 <= token_limit
 		  AND cost_settled_micro_usd + cost_reserved_micro_usd + $2 <= cost_limit_micro_usd`,
 		reservedTokens, reservedCost, budgetScopeID,
@@ -595,6 +603,20 @@ func (s *Service) reserveCall(
 		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "原子预占预算失败")
 	}
 	if tag.RowsAffected() != 1 {
+		if err := tx.QueryRow(ctx, `
+			SELECT budget_status
+			FROM llm_budget_scope
+			WHERE budget_scope_id = $1`,
+			budgetScopeID,
+		).Scan(&budgetStatus); err != nil {
+			return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "读取预算拒绝原因失败")
+		}
+		if budgetStatus == "BUDGET_OVERRUN" {
+			return nil, nil, newStableError(
+				codes.ResourceExhausted, 429, ReasonBudgetOverrun,
+				"预算作用域已因实际用量超预留而停止后续模型调用",
+			)
+		}
 		return nil, nil, newStableError(codes.ResourceExhausted, 429, ReasonBudgetExceeded, "会话预算不足")
 	}
 
@@ -602,43 +624,18 @@ func (s *Service) reserveCall(
 		INSERT INTO llm_provider_attempt (
 			attempt_id, logical_call_pk, logical_call_id, attempt_no,
 			model_id, provider, status, reserved_tokens,
-			reserved_cost_micro_usd
-		) VALUES ($1, $2, $3, 1, $4, $5, 'RESERVED', $6, $7)`,
+			reserved_cost_micro_usd, started_at
+		) VALUES ($1, $2, $3, 1, $4, $5, 'IN_PROGRESS', $6, $7, $8)`,
 		prepared.attemptID, prepared.logicalCallPK, req.LogicalCallID,
 		prepared.selected.modelID, prepared.selected.provider,
-		attemptTokens, attemptCost,
+		attemptTokens, attemptCost, prepared.startedAt,
 	); err != nil {
 		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "创建供应商 attempt 失败")
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE llm_logical_call
-		SET status = 'IN_PROGRESS', updated_at = NOW()
-		WHERE logical_call_pk = $1 AND status = 'RESERVED'`,
-		prepared.logicalCallPK,
-	); err != nil {
-		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "推进逻辑调用状态失败")
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "提交预算预占失败")
 	}
 	return prepared, nil, nil
-}
-
-func (s *Service) startAttempt(ctx context.Context, prepared *preparedCall) error {
-	prepared.startedAt = s.now()
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE llm_provider_attempt
-		SET status = 'IN_PROGRESS', started_at = $1
-		WHERE attempt_id = $2 AND status = 'RESERVED'`,
-		prepared.startedAt, prepared.attemptID,
-	)
-	if err != nil {
-		return newStableError(codes.Internal, 500, "INTERNAL", "启动供应商 attempt 失败")
-	}
-	if tag.RowsAffected() != 1 {
-		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用状态不允许重复执行")
-	}
-	return nil
 }
 
 func (s *Service) settleCall(
@@ -731,6 +728,182 @@ func (s *Service) settleCall(
 		return nil, newStableError(codes.Internal, 500, "INTERNAL", "提交预算结算失败")
 	}
 	return buildResponse(prepared, result, actualCostMicroUSD, finishedAt), nil
+}
+
+func (s *Service) releaseUnchargedCall(ctx context.Context, prepared *preparedCall) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "启动免计费释放事务失败")
+	}
+	defer tx.Rollback(ctx)
+
+	var currentStatus string
+	if err := tx.QueryRow(ctx, `
+		SELECT status
+		FROM llm_logical_call
+		WHERE logical_call_pk = $1
+		FOR UPDATE`,
+		prepared.logicalCallPK,
+	).Scan(&currentStatus); err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "读取免计费调用状态失败")
+	}
+	if currentStatus != "IN_PROGRESS" {
+		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用已完成或正在结算")
+	}
+
+	finishedAt := s.now()
+	tag, err := tx.Exec(ctx, `
+		UPDATE llm_budget_scope
+		SET provider_tokens_reserved = provider_tokens_reserved - $1,
+		    cost_reserved_micro_usd = cost_reserved_micro_usd - $2,
+		    updated_at = $3
+		WHERE budget_scope_id = (
+			SELECT budget_scope_id
+			FROM llm_logical_call
+			WHERE logical_call_pk = $4
+		)
+		  AND provider_tokens_reserved >= $1
+		  AND cost_reserved_micro_usd >= $2`,
+		prepared.reservedTokens, prepared.reservedCost, finishedAt, prepared.logicalCallPK,
+	)
+	if err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "释放免计费预算失败")
+	}
+	if tag.RowsAffected() != 1 {
+		return newStableError(codes.Internal, 500, "INTERNAL", "预算预留状态不一致")
+	}
+	tag, err = tx.Exec(ctx, `
+		UPDATE llm_provider_attempt
+		SET status = 'FAILED_NO_CHARGE',
+		    error_code = 'PROVIDER_NOT_CHARGED',
+		    finished_at = $1
+		WHERE attempt_id = $2 AND status = 'IN_PROGRESS'`,
+		finishedAt, prepared.attemptID,
+	)
+	if err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "记录免计费 attempt 失败")
+	}
+	if tag.RowsAffected() != 1 {
+		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "attempt 状态不允许免计费结算")
+	}
+	tag, err = tx.Exec(ctx, `
+		UPDATE llm_logical_call
+		SET status = 'FAILED',
+		    error_reason = 'PROVIDER_NOT_CHARGED',
+		    completed_at = $1,
+		    updated_at = $1
+		WHERE logical_call_pk = $2 AND status = 'IN_PROGRESS'`,
+		finishedAt, prepared.logicalCallPK,
+	)
+	if err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "提交免计费逻辑调用失败")
+	}
+	if tag.RowsAffected() != 1 {
+		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用状态不允许免计费结算")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "提交免计费释放失败")
+	}
+	return newStableError(codes.Unavailable, 503, ReasonProviderUnavailable, "供应商明确未受理且未计费")
+}
+
+func (s *Service) markBudgetOverrun(
+	ctx context.Context,
+	prepared *preparedCall,
+	result providerResult,
+	actualCostMicroUSD int64,
+) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "启动预算超限事务失败")
+	}
+	defer tx.Rollback(ctx)
+
+	var currentStatus string
+	if err := tx.QueryRow(ctx, `
+		SELECT status
+		FROM llm_logical_call
+		WHERE logical_call_pk = $1
+		FOR UPDATE`,
+		prepared.logicalCallPK,
+	).Scan(&currentStatus); err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "读取预算超限调用状态失败")
+	}
+	if currentStatus != "IN_PROGRESS" {
+		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用已完成或正在结算")
+	}
+
+	finishedAt := s.now()
+	tag, err := tx.Exec(ctx, `
+		UPDATE llm_budget_scope
+		SET budget_status = 'BUDGET_OVERRUN',
+		    overrun_at = COALESCE(overrun_at, $1),
+		    overrun_reason = 'ACTUAL_USAGE_EXCEEDS_RESERVATION',
+		    updated_at = $1
+		WHERE budget_scope_id = (
+			SELECT budget_scope_id
+			FROM llm_logical_call
+			WHERE logical_call_pk = $2
+		)`,
+		finishedAt, prepared.logicalCallPK,
+	)
+	if err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "封锁预算超限作用域失败")
+	}
+	if tag.RowsAffected() != 1 {
+		return newStableError(codes.Internal, 500, "INTERNAL", "预算作用域状态不一致")
+	}
+
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "序列化预算超限结果失败")
+	}
+	tag, err = tx.Exec(ctx, `
+		UPDATE llm_provider_attempt
+		SET status = 'PENDING_RECONCILIATION',
+		    input_tokens = $1,
+		    output_tokens = $2,
+		    cost_micro_usd = $3,
+		    provider_request_id = NULLIF($4, ''),
+		    error_code = $5,
+		    finished_at = $6
+		WHERE attempt_id = $7 AND status = 'IN_PROGRESS'`,
+		result.InputTokens, result.OutputTokens, actualCostMicroUSD,
+		result.ProviderRequestID, ReasonBudgetOverrun, finishedAt, prepared.attemptID,
+	)
+	if err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "记录预算超限 attempt 失败")
+	}
+	if tag.RowsAffected() != 1 {
+		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "attempt 状态不允许预算超限结算")
+	}
+
+	tag, err = tx.Exec(ctx, `
+		UPDATE llm_logical_call
+		SET status = 'BUDGET_OVERRUN',
+		    actual_input_tokens = $1,
+		    actual_output_tokens = $2,
+		    actual_cost_micro_usd = $3,
+		    response_payload = $4,
+		    error_reason = $5,
+		    updated_at = $6
+		WHERE logical_call_pk = $7 AND status = 'IN_PROGRESS'`,
+		result.InputTokens, result.OutputTokens, actualCostMicroUSD,
+		payload, ReasonBudgetOverrun, finishedAt, prepared.logicalCallPK,
+	)
+	if err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "记录预算超限逻辑调用失败")
+	}
+	if tag.RowsAffected() != 1 {
+		return newStableError(codes.Aborted, 409, ReasonCallInProgress, "逻辑调用状态不允许预算超限结算")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return newStableError(codes.Internal, 500, "INTERNAL", "提交预算超限封锁失败")
+	}
+	return newStableError(
+		codes.ResourceExhausted, 429, ReasonBudgetOverrun,
+		"调用实际用量超过预算预留，已停止该作用域的后续模型调用",
+	)
 }
 
 func (s *Service) markProviderUnknown(ctx context.Context, prepared *preparedCall, cause error) error {

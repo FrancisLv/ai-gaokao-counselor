@@ -46,16 +46,23 @@ BudgetScope
   currency: USD_MICRO
   token_limit: 50000
   cost_limit_micro_usd: 150000      # $0.15
-  provider_tokens_committed: int64
+  provider_tokens_settled: int64
+  provider_tokens_reserved: int64
   cost_settled_micro_usd: int64
   cost_reserved_micro_usd: int64
+  budget_status: ACTIVE | BUDGET_OVERRUN
+  overrun_at: timestamp | null
 ```
 
 - `budget_scope_id` 由服务端根据 principal 与 session 生成，不接受客户端覆盖。
 - 预算按 provider 实际 token 计；缓存命中不消耗 provider token，但受网关限流保护。
 - 成本统一用 `USD_MICRO` 存储，`1 USD = 1,000,000`。
-- 只要 `cost_settled + cost_reserved` 不超过上限，预算有效。
-- 并发预占通过单事务条件更新或等价的原子操作完成。
+- `(provider_tokens_settled + provider_tokens_reserved)` 与
+  `(cost_settled_micro_usd + cost_reserved_micro_usd)` 必须同时不超过各自上限。
+- 并发预占通过带 `budget_status = 'ACTIVE'` 与双上限条件的单条
+  `UPDATE ... RETURNING/affected rows` 完成；禁止先查余额再无条件更新。
+- `BUDGET_OVERRUN` 是作用域级持久封锁状态。已有预占的在途调用可以完成结算或对账，
+  但新 logical call 不得创建 provider attempt 或访问供应商。
 
 ### 3.2 价格表
 
@@ -95,6 +102,8 @@ logical_reservation =
 - UTF-8 字节数是 V1 的保守 token 上界；tokenizer 版本升级时可以降低过度预占，但不能削弱硬上限。
 - 预占前还检查 `(input_token_bound + max_output_tokens) * max_attempts` 是否会使 session token 超过 50000。
 - 预算不足返回 `BUDGET_EXCEEDED`，不调用供应商。
+- 创建 `IN_PROGRESS` logical call、首个 `IN_PROGRESS` provider attempt 与预算预占
+  在同一个 PostgreSQL 事务内提交；只有提交成功后才会退出事务并调用 provider。
 
 ### 3.4 结算公式
 
@@ -106,8 +115,13 @@ actual_cost =
 
 - 成功返回 usage 时按实际值结算。
 - 成功后释放该逻辑调用未使用的预占。
+- 供应商明确返回“请求未受理且未计费”时，标记 attempt `FAILED_NO_CHARGE`、
+  logical call `FAILED`，并在同一事务释放全部 token/cost 预留。
 - 超时/断流且 usage 未知时，对应 attempt 保持 `PENDING_RECONCILIATION`，预占不释放。
-- 实际费用超过预占时，记录 `BUDGET_OVERRUN`、停止后续模型调用并进入人工对账；不得静默继续。
+- 实际费用或实际 provider tokens 超过预占时，尝试进入
+  `PENDING_RECONCILIATION / BUDGET_OVERRUN`，作用域锁存
+  `budget_status = 'BUDGET_OVERRUN'`；既有预留保持待人工对账，后续调用在
+  provider 零调用下返回 `BUDGET_OVERRUN`，不得静默扩大上限。
 
 ## 4. 路由与能力
 
@@ -318,6 +332,8 @@ provider_attempt
 
 - 账本是预算结算的唯一来源；
 - `llm_call_log` 只能作为查询投影，不得以事后累加代替原子预占；
+- `llm_call_log` 缺失、延迟修复或投影值与权威账本不一致时，不得改变
+  `llm_budget_scope / llm_logical_call / llm_provider_attempt` 的预算裁决；
 - 未知计费记录必须能按 `logical_call_id + attempt_id` 对账；
 - 任何预算覆盖不足必须报告，不能删除历史记录修正。
 
