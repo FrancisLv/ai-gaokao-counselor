@@ -193,6 +193,12 @@ DeletePrincipalDataCommand
 - Redis 是可重建投影，恢复后不得重新引入已撤回的敏感结果；
 - 备份过期的对象存储副本由清理任务删除。
 
+运行实现使用全局恢复闸门，在恢复开始后立即把所有私有 RunLifecycle 读取标为
+`RESTORE_IN_PROGRESS`。恢复 adapter 先重置可重建投影，再按 tombstone 与删除
+ledger 重放 principal 清理；任一重放失败都保持闸门关闭，重试成功后同时写入最小
+恢复审计后才开放。恢复审计只保存 restore id、principal 不可逆引用、删除 request
+id、结果和稳定错误码，不保存 prompt、健康原文或被删内容。
+
 ## 9. Prompt 注入与输出安全
 
 - RAG 文档、网页和模型输入中的指令都按不可信数据处理；
@@ -228,6 +234,7 @@ DeletePrincipalDataCommand
 | `DELETION_IN_PROGRESS` | 删除处理中禁止访问 |
 | `DELETION_FAILED_RETRYABLE` | 删除部分失败，保持 pending |
 | `DELETION_CONFIRMATION_INVALID` | 删除确认缺失、过期、已消费或参数不匹配 |
+| `RESTORE_IN_PROGRESS` | 备份恢复尚未完成删除 ledger/tombstone 重放 |
 | `RETENTION_POLICY_INVALID` | 没有匹配保留策略 |
 | `SECRET_EXPOSURE_BLOCKED` | 日志/响应检测到敏感凭据 |
 

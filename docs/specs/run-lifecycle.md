@@ -357,6 +357,7 @@ expires_at
 | `PROFILE_NOT_CONFIRMED` | 数据依赖节点尝试读取未确认画像 |
 | `QUEUE_OVERLOADED` | 无可用执行容量 |
 | `EVENT_CURSOR_EXPIRED` | Watch 游标超出保留窗口 |
+| `RESTORE_IN_PROGRESS` | 备份恢复尚未完成删除 ledger/tombstone 重放，业务读取保持关闭 |
 | `DEPENDENCY_UNAVAILABLE` | 下游不可用且无合法回放 |
 | `CONSENT_REQUIRED` | 使用敏感资格字段但缺少当前有效同意 |
 | `CONSENT_REVOKED` | 当前 policy 下的敏感数据同意已撤销 |
