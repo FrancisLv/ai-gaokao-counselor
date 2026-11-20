@@ -177,6 +177,7 @@ class ClaimVerification:
     checked_against: tuple[str, ...]
     deterministic: bool
     criticality: str = "UNKNOWN"
+    claim_type: str = "UNKNOWN_FACT"
 
 
 @dataclass(frozen=True, slots=True)

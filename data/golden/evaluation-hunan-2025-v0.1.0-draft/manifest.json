@@ -1,0 +1,29 @@
+{
+  "dataset_version": "evaluation-hunan-2025-v0.1.0-draft",
+  "retrieval_cases_file": "qa.jsonl",
+  "retrieval_cases_sha256": "622f1002c8991d99411f94bb823d8dc9befe556f5fa65b5251ab46bda6e2e04b",
+  "retrieval_case_count": 31,
+  "e2e_cases_file": "cases.jsonl",
+  "e2e_cases_sha256": "63d9a78c31f91726679b9a3b8e8c90dbbc67775fb62803029d14b52e9d518caf",
+  "e2e_case_count": 10,
+  "case_count": 41,
+  "dataset_sha256": "4358526d3c47511edc8b995ba8019557e4cb27b0b40bbf8be7a324cd02f3638f",
+  "created_at": "2026-11-20T12:00:00+08:00",
+  "release_id": "rel_real_2025_8b7c08a71dc6d68a375284ad",
+  "owner": "Francis",
+  "owner_status": "PENDING_SIGNOFF",
+  "immutable": true,
+  "required_e2e_scenarios": [
+    "normal_rush_stable_safe",
+    "missing_global_required_field",
+    "subject_rule_rejected",
+    "conditional_field_unknown",
+    "no_reliable_data",
+    "fact_tamper",
+    "profile_score_edit",
+    "budget_exhausted",
+    "worker_recovery",
+    "cancel_publish_race"
+  ],
+  "notes": "Agent 草稿：检索 case 复用 v0.4 不可变内容，新增首批 10 条端到端报告 case。Francis 签字前只能用于 harness、diff 和待审阅基线。"
+}

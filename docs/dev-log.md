@@ -2639,3 +2639,46 @@ adapter；不实现保留清理（#47）或备份恢复重放（#48），不新�
   后续若增加 principal 归属需同步扩展。
 - Redis 投影清理与备份恢复重放不在本票；由 #48 使用 tombstone/ledger 验证。
 - 生产定时调度器尚未接线；本票交付可注入时钟的清理控制面 adapter。
+
+## 74. M5b-03 联合 EvalDataset 与端到端 EvalRun
+
+**日期与范围**：2026-11-20，issue #43。建立检索 + 端到端联合评测数据、主 seam
+case runner、最终 Claims 指标与不可变 EvalRun；不实现 #44 的质量回归阈值、100+
+样本 P99 和预算聚合。
+
+### 行为与实现
+
+- 新增不可变联合草稿 `evaluation-hunan-2025-v0.1.0-draft`：复用 v0.4 的 31 条
+  检索 case，新增 10 条端到端报告 case。manifest 同时固定 qa/cases 文件 hash、
+  两类 count、组合 dataset hash、owner 状态和必需场景集合。
+- 联合 loader 只接受 `qa.jsonl + cases.jsonl + manifest.json` 结构，拒绝文件
+  hash/dataset hash/count/immutable/owner 或必备场景被篡改。任一 Case 变化必须
+  创建新版本和新 hash。
+- 端到端 executor 从 `SubmitRun → ResumeRun → GetRun` 驱动 case；读取最终
+  `V1_FORMAL` 报告、候选专业组身份和 verification report，不直接调用报告节点、
+  VerifyPackage 或 PublishFormalResult。
+- ClaimVerification 的序列化增加 `claim_type`，使评测能区分三类事实而不从
+  evidence ID 或展示文案猜测类型；只统计最终保留 Claims。
+- 新增 citation coverage/accuracy、contradiction、critical unverifiable、
+  hallucination 指标；无可检查事实即失败。成功 case 还校验结果类型、终态、
+  排除候选、必需 Claim 类型、禁止文案与 provider 成本上限。
+- EvalRun 记录联合 dataset、release、git/算法/模型路由/价格表/verifier、环境、
+  硬件、retrieval 指标、报告指标、failed_case_ids、first_diff 和原始
+  run/result 身份；identity hash 排除 generated_at，因此重复构建稳定。
+- `owner_status=PENDING_SIGNOFF` 时即使诊断 gate 通过，
+  `release_gate_status` 仍为 `BLOCKED_PENDING_SIGNOFF`，不得宣告正式质量通过。
+
+### 验证
+
+- 离线 loader/指标/EvalRun 测试覆盖正常装载、双文件或 manifest 篡改、count 与
+  immutable 拒绝、最终 Claim 分母、pending signoff 阻断和 EvalRun 重放身份。
+- 真实 PostgreSQL 主 seam 测试使用确定性算法替身执行 `e2e-001`，从
+  SubmitRun → ResumeRun → GetRun 取得正式报告并通过联合评测。
+- `make py-check py-test` 通过；真实 PG 主 seam case executor 测试通过。
+
+### 边界与风险
+
+- 当前联合数据集仍是 Agent 草稿，Francis 签字前不能生成正式 release gate。
+- 本票只提供 case-level executor 与指标/EvalRun；100+ 样本 P99、质量回归与预算
+  聚合由 #44 完成。
+- 真实政策检索 baseline 仍需绑定正式 release、embedding/index 身份独立运行。

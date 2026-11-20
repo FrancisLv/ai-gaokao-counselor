@@ -261,7 +261,14 @@ class RetrievalDatasetTests(unittest.TestCase):
                 or not (dataset_dir / "manifest.json").exists()
             ):
                 continue
-            load_retrieval_dataset(dataset_dir)
+            if (dataset_dir / "cases.jsonl").exists():
+                from eval.eval_dataset import load_eval_dataset
+
+                dataset = load_eval_dataset(dataset_dir)
+                self.assertGreaterEqual(len(dataset.retrieval_cases), 30)
+                self.assertEqual(len(dataset.e2e_cases), 10)
+            else:
+                load_retrieval_dataset(dataset_dir)
 
     def test_v03_golden_set_contains_same_document_hard_negatives(self):
         dataset = load_retrieval_dataset(

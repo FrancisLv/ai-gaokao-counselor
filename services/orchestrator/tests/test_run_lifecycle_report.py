@@ -984,6 +984,14 @@ class FormalReportWireCompatibilityTests(unittest.TestCase):
         self.assertEqual(formal_fields["no_admission_guarantee"], 16)
         self.assertEqual(formal_fields["report"], 17)
 
+        claim_fields = {
+            field.name: field.number
+            for field in pb.FormalClaimVerification.DESCRIPTOR.fields
+        }
+        self.assertEqual(claim_fields["criticality"], 2)
+        self.assertEqual(claim_fields["deterministic"], 6)
+        self.assertEqual(claim_fields["claim_type"], 7)
+
         report_fields = {
             field.name: field.number
             for field in pb.FormalReport.DESCRIPTOR.fields
