@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/codes"
 
 	llmgwv1 "github.com/choucisan/ai-gaokao-counselor/api/llmgw/v1"
+	llmgwdb "github.com/choucisan/ai-gaokao-counselor/internal/llmgw/dbgen"
 )
 
 const (
@@ -171,31 +172,30 @@ func (s *Service) claimResultCache(
 	claimToken := s.newID()
 	now := s.now()
 	claimExpiresAt := now.Add(claimLease)
-	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO llm_result_cache (
-			cache_key_hash, cache_schema_version, release_id, role,
-			route_version, model_id, prompt_template_key,
-			prompt_template_version, prompt_template_sha256,
-			response_schema_key, response_schema_version,
-			response_schema_sha256, data_classification,
-			max_output_tokens, temperature, request_key_manifest,
-			status, claim_token, claim_started_at, claim_expires_at
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-			$12, $13, $14, 0, $15::jsonb, 'IN_PROGRESS', $16, $17, $18
-		)
-		ON CONFLICT (cache_key_hash) DO NOTHING`,
-		identity.keyHash, resultCacheSchemaVersion, identity.releaseID,
-		identity.role, identity.routeVersion, identity.modelID,
-		identity.promptKey, identity.promptVersion, identity.promptDigest,
-		nullableText(identity.schemaKey), nullableText(identity.schemaVersion),
-		nullableText(identity.schemaDigest), identity.dataClass,
-		identity.maxOutput, identity.manifest, claimToken, now, claimExpiresAt,
-	)
+	affected, err := s.queries.InsertCacheClaim(ctx, llmgwdb.InsertCacheClaimParams{
+		CacheKeyHash:          identity.keyHash,
+		CacheSchemaVersion:    resultCacheSchemaVersion,
+		ReleaseID:             identity.releaseID,
+		Role:                  identity.role,
+		RouteVersion:          identity.routeVersion,
+		ModelID:               identity.modelID,
+		PromptTemplateKey:     identity.promptKey,
+		PromptTemplateVersion: identity.promptVersion,
+		PromptTemplateSha256:  identity.promptDigest,
+		ResponseSchemaKey:     databaseText(identity.schemaKey),
+		ResponseSchemaVersion: databaseText(identity.schemaVersion),
+		ResponseSchemaSha256:  databaseText(identity.schemaDigest),
+		DataClassification:    identity.dataClass,
+		MaxOutputTokens:       identity.maxOutput,
+		Column15:              identity.manifest,
+		Column16:              databaseUUID(claimToken),
+		ClaimStartedAt:        databaseTimestamp(now),
+		ClaimExpiresAt:        databaseTimestamp(claimExpiresAt),
+	})
 	if err != nil {
 		return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "创建结果缓存 claim 失败")
 	}
-	if tag.RowsAffected() == 1 {
+	if affected == 1 {
 		return &resultCacheClaim{keyHash: identity.keyHash, token: claimToken}, nil, nil
 	}
 
@@ -238,48 +238,33 @@ func (s *Service) claimResultCache(
 			)
 		}
 
-		tag, err := s.pool.Exec(ctx, `
-			UPDATE llm_result_cache
-			SET cache_schema_version = $2,
-			    release_id = $3,
-			    role = $4,
-			    route_version = $5,
-			    model_id = $6,
-			    prompt_template_key = $7,
-			    prompt_template_version = $8,
-			    prompt_template_sha256 = $9,
-			    response_schema_key = $10,
-			    response_schema_version = $11,
-			    response_schema_sha256 = $12,
-			    data_classification = $13,
-			    max_output_tokens = $14,
-			    temperature = 0,
-			    request_key_manifest = $15::jsonb,
-			    status = 'IN_PROGRESS',
-			    claim_token = $16,
-			    claim_started_at = $17,
-			    claim_expires_at = $18,
-			    result_payload = NULL,
-			    invalidation_reason = NULL,
-			    invalidated_at = NULL,
-			    completed_at = NULL,
-			    updated_at = $17
-			WHERE cache_key_hash = $1
-			  AND (
-			      status IN ('FAILED', 'INVALIDATED')
-			      OR (status = 'IN_PROGRESS' AND claim_expires_at <= $17)
-			  )`,
-			identity.keyHash, resultCacheSchemaVersion, identity.releaseID,
-			identity.role, identity.routeVersion, identity.modelID,
-			identity.promptKey, identity.promptVersion, identity.promptDigest,
-			nullableText(identity.schemaKey), nullableText(identity.schemaVersion),
-			nullableText(identity.schemaDigest), identity.dataClass,
-			identity.maxOutput, identity.manifest, claimToken, now, claimExpiresAt,
+		affected, err := s.queries.TakeOverCacheClaim(
+			ctx,
+			llmgwdb.TakeOverCacheClaimParams{
+				CacheKeyHash:          identity.keyHash,
+				CacheSchemaVersion:    resultCacheSchemaVersion,
+				ReleaseID:             identity.releaseID,
+				Role:                  identity.role,
+				RouteVersion:          identity.routeVersion,
+				ModelID:               identity.modelID,
+				PromptTemplateKey:     identity.promptKey,
+				PromptTemplateVersion: identity.promptVersion,
+				PromptTemplateSha256:  identity.promptDigest,
+				ResponseSchemaKey:     databaseText(identity.schemaKey),
+				ResponseSchemaVersion: databaseText(identity.schemaVersion),
+				ResponseSchemaSha256:  databaseText(identity.schemaDigest),
+				DataClassification:    identity.dataClass,
+				MaxOutputTokens:       identity.maxOutput,
+				Column15:              identity.manifest,
+				Column16:              databaseUUID(claimToken),
+				ClaimStartedAt:        databaseTimestamp(now),
+				ClaimExpiresAt:        databaseTimestamp(claimExpiresAt),
+			},
 		)
 		if err != nil {
 			return nil, nil, newStableError(codes.Internal, 500, "INTERNAL", "接管结果缓存 claim 失败")
 		}
-		if tag.RowsAffected() == 1 {
+		if affected == 1 {
 			return &resultCacheClaim{keyHash: identity.keyHash, token: claimToken}, nil, nil
 		}
 	}
@@ -293,32 +278,7 @@ func (s *Service) loadResultCache(
 	ctx context.Context,
 	keyHash string,
 ) (resultCacheEntry, string, string, time.Time, []byte, error) {
-	var (
-		entry                    resultCacheEntry
-		status, claimToken       string
-		claimExpiresAt           time.Time
-		schemaKey, schemaVersion *string
-		schemaDigest             *string
-		payload                  []byte
-	)
-	err := s.pool.QueryRow(ctx, `
-		SELECT release_id, role, route_version, model_id,
-		       prompt_template_key, prompt_template_version,
-		       prompt_template_sha256, response_schema_key,
-		       response_schema_version, response_schema_sha256,
-		       data_classification, max_output_tokens, temperature,
-		       status, claim_token::text, claim_expires_at,
-		       result_payload
-		FROM llm_result_cache
-		WHERE cache_key_hash = $1`,
-		keyHash,
-	).Scan(
-		&entry.releaseID, &entry.role, &entry.routeVersion, &entry.modelID,
-		&entry.promptKey, &entry.promptVersion, &entry.promptDigest,
-		&schemaKey, &schemaVersion, &schemaDigest,
-		&entry.dataClassification, &entry.maxOutputTokens, &entry.temperature,
-		&status, &claimToken, &claimExpiresAt, &payload,
-	)
+	row, err := s.queries.GetCacheEntry(ctx, keyHash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return resultCacheEntry{}, "", "", time.Time{}, nil, newStableError(
 			codes.Internal, 500, "INTERNAL", "结果缓存 claim 缺失",
@@ -329,10 +289,22 @@ func (s *Service) loadResultCache(
 			codes.Internal, 500, "INTERNAL", "读取结果缓存状态失败",
 		)
 	}
-	entry.schemaKey = valueOrEmpty(schemaKey)
-	entry.schemaVersion = valueOrEmpty(schemaVersion)
-	entry.schemaDigest = valueOrEmpty(schemaDigest)
-	return entry, status, claimToken, claimExpiresAt, payload, nil
+	entry := resultCacheEntry{
+		releaseID:          row.ReleaseID,
+		role:               row.Role,
+		routeVersion:       row.RouteVersion,
+		modelID:            row.ModelID,
+		promptKey:          row.PromptTemplateKey,
+		promptVersion:      row.PromptTemplateVersion,
+		promptDigest:       row.PromptTemplateSha256,
+		schemaKey:          row.ResponseSchemaKey.String,
+		schemaVersion:      row.ResponseSchemaVersion.String,
+		schemaDigest:       row.ResponseSchemaSha256.String,
+		dataClassification: row.DataClassification,
+		maxOutputTokens:    row.MaxOutputTokens,
+		temperature:        row.Temperature,
+	}
+	return entry, row.Status, row.ClaimToken, row.ClaimExpiresAt.Time, row.ResultPayload, nil
 }
 
 func (s *Service) recordResultCacheHit(
@@ -382,51 +354,65 @@ func (s *Service) recordResultCacheHit(
 		return nil, newStableError(codes.Internal, 500, "INTERNAL", "启动缓存命中事务失败")
 	}
 	defer tx.Rollback(ctx)
+	queries := s.queries.WithTx(tx)
 
 	budgetScopeID := s.newID()
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO llm_budget_scope (budget_scope_id, principal_id, session_id)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (principal_id, session_id) DO NOTHING`,
-		budgetScopeID, req.PrincipalID, req.SessionID,
+	if err := queries.InsertBudgetScopeIfAbsent(
+		ctx,
+		llmgwdb.InsertBudgetScopeIfAbsentParams{
+			Column1:     databaseUUID(budgetScopeID),
+			PrincipalID: req.PrincipalID,
+			Column3:     databaseUUID(req.SessionID),
+		},
 	); err != nil {
 		return nil, newStableError(codes.Internal, 500, "INTERNAL", "初始化缓存命中预算作用域失败")
 	}
-	if err := tx.QueryRow(ctx, `
-		SELECT budget_scope_id::text
-		FROM llm_budget_scope
-		WHERE principal_id = $1 AND session_id = $2`,
-		req.PrincipalID, req.SessionID,
-	).Scan(&budgetScopeID); err != nil {
+	budgetRow, err := queries.LockBudgetScopeForCacheHit(
+		ctx,
+		llmgwdb.LockBudgetScopeForCacheHitParams{
+			PrincipalID: req.PrincipalID,
+			Column2:     databaseUUID(req.SessionID),
+		},
+	)
+	if err != nil {
 		return nil, newStableError(codes.Internal, 500, "INTERNAL", "读取缓存命中预算作用域失败")
+	}
+	budgetScopeID = budgetRow.BudgetScopeID
+	if budgetRow.BudgetStatus == "BUDGET_OVERRUN" {
+		return nil, newStableError(
+			codes.ResourceExhausted, 429, ReasonBudgetOverrun,
+			"预算作用域已因实际用量超预留而停止后续模型调用",
+		)
 	}
 
 	completedAt := s.now()
-	_, err = tx.Exec(ctx, `
-		INSERT INTO llm_logical_call (
-			logical_call_pk, ledger_entry_id, logical_call_id, principal_id,
-			session_id, run_id, role, release_id, route_version,
-			price_table_version, model_id, request_hash, budget_scope_id,
-			status, data_classification, reserved_input_tokens,
-			reserved_output_tokens, reserved_cost_micro_usd,
-			reserved_provider_tokens, actual_input_tokens,
-			actual_output_tokens, actual_cost_micro_usd, response_payload,
-			prompt_template_key, prompt_template_version,
-			prompt_template_sha256, response_schema_key,
-			response_schema_version, response_schema_sha256,
-			cache_hit, cache_key_hash, completed_at
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-			'SUCCEEDED', $14, 0, 0, 0, 0, 0, 0, 0, $15,
-			$16, $17, $18, $19, $20, $21, TRUE, $22, $23
-		)`,
-		prepared.logicalCallPK, prepared.ledgerEntryID, req.LogicalCallID,
-		req.PrincipalID, req.SessionID, req.RunID, req.Role, req.ReleaseID,
-		route.version, route.priceVersion, entry.modelID, requestHash,
-		budgetScopeID, req.DataClassification, payload,
-		entry.promptKey, entry.promptVersion, entry.promptDigest,
-		nullableText(entry.schemaKey), nullableText(entry.schemaVersion),
-		nullableText(entry.schemaDigest), prepared.cacheKeyHash, completedAt,
+	_, err = queries.InsertCacheHitLogicalCall(
+		ctx,
+		llmgwdb.InsertCacheHitLogicalCallParams{
+			Column1:               databaseUUID(prepared.logicalCallPK),
+			Column2:               databaseUUID(prepared.ledgerEntryID),
+			LogicalCallID:         req.LogicalCallID,
+			PrincipalID:           req.PrincipalID,
+			Column5:               databaseUUID(req.SessionID),
+			Column6:               databaseUUID(req.RunID),
+			Role:                  req.Role,
+			ReleaseID:             req.ReleaseID,
+			RouteVersion:          route.version,
+			PriceTableVersion:     route.priceVersion,
+			ModelID:               entry.modelID,
+			RequestHash:           requestHash,
+			Column13:              databaseUUID(budgetScopeID),
+			DataClassification:    req.DataClassification,
+			ResponsePayload:       payload,
+			PromptTemplateKey:     databaseText(entry.promptKey),
+			PromptTemplateVersion: databaseText(entry.promptVersion),
+			PromptTemplateSha256:  databaseText(entry.promptDigest),
+			ResponseSchemaKey:     databaseText(entry.schemaKey),
+			ResponseSchemaVersion: databaseText(entry.schemaVersion),
+			ResponseSchemaSha256:  databaseText(entry.schemaDigest),
+			CacheKeyHash:          databaseText(prepared.cacheKeyHash),
+			CompletedAt:           databaseTimestamp(completedAt),
+		},
 	)
 	if isUniqueViolation(err) {
 		_ = tx.Rollback(ctx)
@@ -472,17 +458,12 @@ func (s *Service) storeResultCache(
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, _ = s.pool.Exec(ctx, `
-		UPDATE llm_result_cache
-		SET status = 'READY',
-		    result_payload = $1::jsonb,
-		    completed_at = $2,
-		    updated_at = $2
-		WHERE cache_key_hash = $3
-		  AND status = 'IN_PROGRESS'
-		  AND claim_token = $4`,
-		payload, s.now(), prepared.cacheKeyHash, prepared.cacheClaimToken,
-	)
+	_, _ = s.queries.MarkCacheReady(ctx, llmgwdb.MarkCacheReadyParams{
+		Column1:      payload,
+		CompletedAt:  databaseTimestamp(s.now()),
+		CacheKeyHash: prepared.cacheKeyHash,
+		Column4:      databaseUUID(prepared.cacheClaimToken),
+	})
 }
 
 func (s *Service) failResultCache(claim *resultCacheClaim) {
@@ -491,15 +472,9 @@ func (s *Service) failResultCache(claim *resultCacheClaim) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, _ = s.pool.Exec(ctx, `
-		UPDATE llm_result_cache
-		SET status = 'FAILED',
-		    result_payload = NULL,
-		    completed_at = $1,
-		    updated_at = $1
-		WHERE cache_key_hash = $2
-		  AND status = 'IN_PROGRESS'
-		  AND claim_token = $3`,
-		s.now(), claim.keyHash, claim.token,
-	)
+	_, _ = s.queries.MarkCacheFailed(ctx, llmgwdb.MarkCacheFailedParams{
+		CompletedAt:  databaseTimestamp(s.now()),
+		CacheKeyHash: claim.keyHash,
+		Column3:      databaseUUID(claim.token),
+	})
 }

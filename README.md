@@ -75,7 +75,7 @@ make check test         # SQL 生成一致性、构建、vet、默认单测
 make py-check py-test PY="$PY"
 ```
 
-algo 的 SQL 位于 `internal/algo/data/queries/`，参数/结果结构体由固定版本 sqlc v1.30.0 生成到 `dbgen/` 并随源码保存。改 SQL 后执行 `make sqlc-generate`；`make check` 自动检查生成一致性，首次可能安装工具。普通构建无需 sqlc，阅读顺序和修改示例见 [开发指南](docs/development-guide.md)。
+algo 与 llm-gateway 的强结构化查询分别位于 `internal/algo/data/queries/`、`internal/llmgw/data/queries/`，参数/结果结构体由固定版本 sqlc v1.30.0 生成到各自独立的 `dbgen/` 并随源码保存。改 SQL 后执行 `make sqlc-generate`；`make check` 自动检查生成一致性，首次可能安装工具。普通构建无需 sqlc，阅读顺序和修改示例见 [开发指南](docs/development-guide.md)。
 
 真实库及跨语言验证（DSN 替换为自己的只读连接；不会迁移或重新导入数据）：
 
@@ -102,7 +102,8 @@ make docker-build IMAGE_MIRROR=m.daocloud.io/ BUILD_GOPROXY=https://goproxy.cn,d
 
 - **algo 已完成 Phase 1–6**：湖南物理类/历史类本科批，四 RPC、Kratos 三层、真实库/Go-Python TCP、并发竞态与性能验收已验证。
 - **RAG 已有基础实现**：章程切分、Embedding、pgvector ‖ pg_trgm 双路混合检索（RRF 融合）和辅助脚本；检索质量尚未经 golden set 量化验收，zhparser 全文一路与重排待后续阶段。
-- **全系统尚未闭环**：gateway/llm-gateway 业务为 TODO，LangGraph 后续节点、HITL 恢复及服务业务接线待完成。
+- **llm-gateway 治理 seam 已实现**：`LLMGateway.Chat/StreamChat` 已覆盖可信身份、角色/模型路由、注册 prompt/schema、六类数据分类、原子预算预占与结算、幂等与主备 attempt、未知费用对账、release-bound 缓存及类型化流事件；真实 PG 生成客户端测试通过。生产 provider 仍固定 fail closed，真实验付账单 adapter、真实模型调用和 orchestrator 入口接线尚未完成。
+- **全系统尚未闭环**：gateway 业务仍为 TODO，LangGraph 后续节点、HITL 恢复及服务业务接线待完成。当前流式 `DELTA` 是最终敏感/schema 守卫后的完整内容块，不是供应商 token 实时转发。
 - **本地容器验证已完成**：Linux/arm64 下 Compose 配置、四镜像构建、algo 四 RPC、Python 12 项离线测试及其余服务启动检查通过。全栈互联、amd64/GPU 和生产部署未验证；未修改现有数据库。
 
 文档入口：[开发指南](docs/development-guide.md) · [算法通俗说明](docs/algorithms.md) · [权威实现文档](docs/task2-implementation-plan.md) · [开发与验收记录](docs/dev-log.md) · [完整导航](docs/README.md)。

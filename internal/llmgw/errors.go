@@ -35,6 +35,7 @@ const (
 	ReasonSchemaUnsupported       = "PROVIDER_SCHEMA_UNSUPPORTED"
 	ReasonProviderTimeout         = "PROVIDER_TIMEOUT"
 	ReasonStreamInterrupted       = "STREAM_INTERRUPTED"
+	ReasonStreamStartFailed       = "STREAM_START_FAILED"
 	ReasonReconciliation          = "RECONCILIATION_REQUIRED"
 )
 
