@@ -193,6 +193,7 @@ make bench
 | `coverage` | 分别统计 biz/service；data 使用真库覆盖，不以全仓平均代替 |
 | `test-fuzz` | 选科语法和数字区间解析；固定种子加随机输入 |
 | `py-test` | 离线合成夹具、已有本地章程不变量、模型替身、导入/图构建；不下载模型、不入库 |
+| `m5b-release-gate` | 从 PostgreSQL 中的权威 EvalRun、签字 EvalDataset 和四类安全证据执行聚合发布门禁；非 PASS 返回非零 |
 | `tcp-smoke` | 临时 YAML、空闲回环端口、新构建进程、Go/Python 四 RPC 和错误详情 |
 | `perf` / `bench` | TCP 尾延迟与固定夹具/真实库 benchmark；不要与 race 同时跑 |
 

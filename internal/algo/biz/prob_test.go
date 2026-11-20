@@ -227,10 +227,16 @@ func TestBatchEstimateProb_PlanAdjustFlips(t *testing.T) {
 	if len(got) != 1 || got[0].Probability != 0.99 {
 		t.Fatalf("计划修正后应命中 → 0.99，got %+v", got)
 	}
+	if !got[0].PlanCountKnown || got[0].PlanCount != 200 {
+		t.Fatalf("计划数身份丢失: %+v", got[0].Candidate)
+	}
 	// 对照：无 planMap 时不命中
 	gotNoPlan := batchEstimateProb(cands, 0.5, historyMap, nil, cfg)
 	if gotNoPlan[0].Probability != 0.01 {
 		t.Errorf("无计划修正应 0.01，got %f", gotNoPlan[0].Probability)
+	}
+	if gotNoPlan[0].PlanCountKnown {
+		t.Errorf("无报考年计划时不得把缺失计划数视为已知")
 	}
 }
 

@@ -22,6 +22,7 @@ def _candidate(
             university_code=university_code,
             university_name=f"{university_code}大学",
             major_group="01",
+            plan_count=20,
             majors=[
                 algo_pb2.MajorDetail(
                     major_code=major_code,

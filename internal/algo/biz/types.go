@@ -64,9 +64,11 @@ type Candidate struct {
 	Province       string        // 省份（utility 地域"同省"判断用）
 	SubjectReq     []string      // 选科要求
 	// 学校实力/升学资源（来自 university 表，utility 打分用）
-	NumMaster  int // 硕士点数量
-	NumDoctor  int // 博士点数量
-	RuankeRank int // 软科排名
+	NumMaster      int  // 硕士点数量
+	NumDoctor      int  // 博士点数量
+	RuankeRank     int  // 软科排名
+	PlanCount      int  // 报考年该院校专业组计划数
+	PlanCountKnown bool // false 表示计划数 UNKNOWN，不得按 0 处理
 	// 历史录取数据（由 service 层填充）
 	HistoryData []AdmissionRecord
 }

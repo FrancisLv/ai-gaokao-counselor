@@ -3,7 +3,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 版本 | v1.0 |
-| 状态 | 待确认；确认后作为 M2/M5 安全实现基线 |
+| 状态 | 已确认；作为 M2/M5 安全实现基线 |
 | 上游 | [PRD v1.3 §4.2、§7.4、T16/T18](../prd.md)、[Profile Contract](./profile-contract.md)、[LLM Gateway Contract](./llm-gateway-contract.md) |
 | 关联 | [Run Lifecycle Contract](./run-lifecycle.md)、[Evidence Contract](./evidence-contract.md) |
 

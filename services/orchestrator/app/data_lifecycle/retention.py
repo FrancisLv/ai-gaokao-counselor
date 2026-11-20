@@ -10,6 +10,11 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg.rows import dict_row
 
+from app.data_lifecycle.resources import (
+    delete_official_checkpoints,
+    delete_published_result_chain,
+)
+
 
 class DataRetentionError(Exception):
     def __init__(self, reason: str, message: str | None = None) -> None:
@@ -235,32 +240,7 @@ class DataRetention:
                 run_ids = [row["run_id"] for row in rows]
                 if not run_ids:
                     return 0
-                await conn.execute(
-                    "DELETE FROM run_evidence_package WHERE run_id = ANY(%s::uuid[])",
-                    (run_ids,),
-                )
-                await conn.execute(
-                    "DELETE FROM run_verification_report WHERE run_id = ANY(%s::uuid[])",
-                    (run_ids,),
-                )
-                await conn.execute(
-                    """
-                    DELETE FROM run_result_state_event
-                    WHERE result_version IN (
-                        SELECT result_version FROM run_result
-                        WHERE run_id = ANY(%s::uuid[])
-                    )
-                    """,
-                    (run_ids,),
-                )
-                await conn.execute(
-                    "DELETE FROM run_formal_gate_artifact WHERE run_id = ANY(%s::uuid[])",
-                    (run_ids,),
-                )
-                await conn.execute(
-                    "DELETE FROM run_result WHERE run_id = ANY(%s::uuid[])",
-                    (run_ids,),
-                )
+                await delete_published_result_chain(conn, run_ids)
                 await conn.execute(
                     """
                     UPDATE run
@@ -447,21 +427,7 @@ class DataRetention:
                 return 0
             run_ids = [str(row["run_id"]) for row in rows]
             session_ids = [row["session_id"] for row in rows]
-            affected = 0
-            for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
-                exists = await (
-                    await conn.execute(
-                        "SELECT to_regclass(%s) IS NOT NULL AS present",
-                        (f"public.{table}",),
-                    )
-                ).fetchone()
-                if not exists or not exists["present"]:
-                    continue
-                result = await conn.execute(
-                    f"DELETE FROM {table} WHERE thread_id = ANY(%s::text[])",
-                    (run_ids,),
-                )
-                affected += result.rowcount
+            affected = await delete_official_checkpoints(conn, run_ids)
             plan_result = await conn.execute(
                 """
                 DELETE FROM plan_checkpoint

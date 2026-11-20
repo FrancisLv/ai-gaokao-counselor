@@ -15,7 +15,7 @@ from run_lifecycle_support import RunLifecyclePostgresTest
 
 
 class FakeAlgoClient:
-    def __init__(self) -> None:
+    def __init__(self, *, plan_count: int | None = 120) -> None:
         candidate = algo_pb2.CandidateWithProb(
             candidate=algo_pb2.Candidate(
                 university_code="U001",
@@ -26,11 +26,17 @@ class FakeAlgoClient:
                         major_code="M01",
                         major_name="测试专业",
                         subject_req="首选物理，再选不限",
+                        tuition=5000,
                     )
                 ],
                 school_tier="985",
                 location="长沙",
                 province="湖南",
+                **(
+                    {"plan_count": plan_count}
+                    if plan_count is not None
+                    else {}
+                ),
             ),
             prob=algo_pb2.ProbEstimate(
                 probability=0.67,

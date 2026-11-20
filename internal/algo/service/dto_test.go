@@ -34,6 +34,7 @@ func TestRoundTrip_Candidate(t *testing.T) {
 		GroupMinRank: 161, SchoolTier: "985", Location: "北京市", Province: "北京",
 		SubjectReq: []string{"首选物理，再选化学"},
 		NumMaster:  10, NumDoctor: 8, RuankeRank: 2,
+		PlanCount: 120, PlanCountKnown: true,
 		Majors: []biz.MajorDetail{
 			{MajorCode: "070101", MajorName: "数学与应用数学", SubjectReq: "首选物理，再选不限", Duration: "四年", Tuition: 5000, MinScore: 680, MinRank: 150, AdmitCount: 5},
 		},

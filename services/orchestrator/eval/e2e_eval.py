@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-import hashlib
 import json
 
 from eval.eval_dataset import JointEvalDataset
+from eval.eval_run import finalize_eval_run
 from evidence.normalization import text_exceeds_admission_boundary
 
 
@@ -59,6 +59,10 @@ class EndToEndCaseResult:
     run_id: str | None
     provider_cost_micro_usd: int
     first_diff: dict | None
+    claims: tuple[EndToEndClaim, ...] = ()
+    candidate_keys: tuple[str, ...] = ()
+    excluded_candidate_keys: tuple[str, ...] = ()
+    report_text: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +130,12 @@ def evaluate_end_to_end(
                 run_id=outcome.run_id,
                 provider_cost_micro_usd=outcome.provider_cost_micro_usd,
                 first_diff=first_diff,
+                claims=outcome.claims,
+                candidate_keys=outcome.candidate_keys,
+                excluded_candidate_keys=tuple(
+                    case["expected"]["excluded_candidate_keys"]
+                ),
+                report_text=outcome.report_text,
             )
         )
 
@@ -388,6 +398,9 @@ def build_eval_run(
                 "hit_at_5": case.hit_at_5,
                 "hit_at_20": case.hit_at_20,
                 "reciprocal_rank": case.reciprocal_rank,
+                "expected_chunk_ids": list(case.expected_chunk_ids),
+                "expected_doc_ids": list(case.expected_doc_ids),
+                "returned_evidence_count": len(case.actual_evidence),
                 "scope_leaks": list(case.scope_leaks),
                 "hard_negative_chunk_leaks": list(
                     case.hard_negative_chunk_leaks
@@ -400,23 +413,9 @@ def build_eval_run(
             asdict(case)
             for case in e2e_report.cases
         ],
+        "run_samples": [asdict(sample) for sample in run_samples],
     }
-    canonical = json.dumps(
-        {
-            key: value
-            for key, value in payload.items()
-            if key != "generated_at"
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    result_sha256 = hashlib.sha256(canonical).hexdigest()
-    return {
-        **payload,
-        "result_sha256": result_sha256,
-        "eval_run_id": "eval_" + result_sha256,
-    }
+    return finalize_eval_run(payload)
 
 
 def _first_difference(

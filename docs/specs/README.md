@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 状态 | M1 runtime 契约已齐，待最终确认 |
+| 状态 | M1 runtime 契约已确认，M5b 发布门禁已按契约接线 |
 | 目标态来源 | [PRD v1.3](../prd.md) |
 | 术语来源 | [GLOSSARY.md](../../GLOSSARY.md) |
 | 决策来源 | [docs/adr/](../adr/) |
@@ -19,8 +19,8 @@
 | [Eligibility Rules Contract](./eligibility-rules-contract.md) | 结构化规则、覆盖声明、三态判定、发布与回滚 | 已确认 |
 | [Evidence Contract](./evidence-contract.md) | 文档/结构化/派生证据、claim 验证与发布门禁 | 已确认 |
 | [LLM Gateway Contract](./llm-gateway-contract.md) | 角色路由、预算预占结算、缓存、重试与调用账本 | 已确认 |
-| [Evaluation and SLO Contract](./evaluation-slo-contract.md) | golden set、指标公式、基线、CI 与发布门禁 | 待确认 |
-| [Security and Retention Contract](./security-retention-contract.md) | 身份授权、同意、敏感数据、删除与保留策略 | 待确认 |
+| [Evaluation and SLO Contract](./evaluation-slo-contract.md) | golden set、指标公式、基线、CI 与发布门禁 | 已确认 |
+| [Security and Retention Contract](./security-retention-contract.md) | 身份授权、同意、敏感数据、删除与保留策略 | 已确认 |
 | [Proto and Database Change Plan](./proto-db-change-plan.md) | 迁移顺序、proto 演进和 GitHub issue 依赖图 | 执行中 |
 
 ## 后续
