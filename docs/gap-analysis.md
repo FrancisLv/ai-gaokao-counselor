@@ -210,6 +210,8 @@
 - `services/orchestrator/evidence/verifier.py` — 唯一 `VerifyPackage` seam、包级顺序与 `PASS/BLOCKED/PARTIAL` 状态机
 - `services/orchestrator/app/run_lifecycle/report.py` — 确定性正式报告、最终 Claims、必需说明和同 release 证据包
 - `services/orchestrator/app/data_lifecycle/deletion.py` — 幂等 `DeletePrincipalData`、即时访问封锁、最小 tombstone、资源 ledger 与私有数据清理/去标识化
+- `services/orchestrator/app/data_lifecycle/restore.py` — 备份恢复全局闸门、可重建投影重置、tombstone/ledger 幂等重放与失败关闭
+- `migrations/39_backup_restore_deletion_replay.sql` — 恢复闸门与不含敏感内容的删除重放审计
 - `services/orchestrator/tests/test_data_deletion.py` — 删除成功/重放/部分失败重试、正式结果清理、公开 release 保留、私有载荷与敏感 reason 清理测试
 - `migrations/36_principal_data_deletion.sql` — principal 删除状态、请求 receipt、资源 ledger、tombstone，以及仅限删除事务的不可变结果受控删除通道
 - `services/orchestrator/app/data_lifecycle/retention.py` — 版本化 7/30/180 天保留、逐资源失败隔离、幂等重试与账本/审计去标识化

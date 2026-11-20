@@ -8,6 +8,12 @@ from app.data_lifecycle.deletion import (
     PrincipalDataDeletion,
     PrincipalDataDeletionError,
 )
+from app.data_lifecycle.restore import (
+    PrincipalDataRestore,
+    RestoreBackupCommand,
+    RestoreBackupReceipt,
+    RestoreProjection,
+)
 from app.data_lifecycle.retention import (
     DataRetention,
     DataRetentionError,
@@ -24,6 +30,10 @@ __all__ = [
     "PrincipalDataCleaner",
     "PrincipalDataDeletion",
     "PrincipalDataDeletionError",
+    "PrincipalDataRestore",
+    "RestoreBackupCommand",
+    "RestoreBackupReceipt",
+    "RestoreProjection",
     "RetentionSweepReceipt",
     "SweepRetentionCommand",
 ]

@@ -67,6 +67,8 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await conn.execute(
                 """
                 DROP TABLE IF EXISTS
+                    data_lifecycle_restore_replay,
+                    data_lifecycle_restore_state,
                     data_retention_ledger,
                     data_retention_sweep,
                     data_retention_policy,
@@ -215,6 +217,8 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await conn.execute(migration.read_text(encoding="utf-8"))
             migration = ROOT / "migrations" / "38_data_retention.sql"
             await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "39_backup_restore_deletion_replay.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS release_component (
@@ -302,6 +306,10 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await self._apply_sql_file(
                 conn,
                 "migrations/38_data_retention.sql",
+            )
+            await self._apply_sql_file(
+                conn,
+                "migrations/39_backup_restore_deletion_replay.sql",
             )
         finally:
             await conn.close()
