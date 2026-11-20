@@ -269,6 +269,9 @@ MISSING_REQUIRED_FACT、FAIL、BLOCKED 和未被资格结果覆盖的候选均�
 集合。COMPLETE 才表示资格事实没有 UNKNOWN，可作为正式资格输入；PARTIAL 保留为
 诊断结果并明确 `formal_eligibility_ready=false`。PASS_PARTIAL 可以进入优化，但必须
 在结果中保留受限专业。资格结果不修改候选身份、概率或优化顺序。
+EvaluateEligibility 返回后，RunLifecycle 立即把资格摘要、release manifest 配置身份、
+Verifier 版本和运行快照日期写入不可变 `run_formal_gate_artifact`。后续正式发布必须
+复核该 artifact，不能信任调用方另外提交的 `COMPLETE + PASS` 摘要。
 
 `in_current_plan` 由 `EstimateProb` 的候选专业明细提供，取值来自报考年
 `enrollment_plan` 的专业代码成员检查；历史录取专业不因曾存在于上一年计划而自动成为
@@ -291,7 +294,8 @@ MISSING_REQUIRED_FACT、FAIL、BLOCKED 和未被资格结果覆盖的候选均�
 不可用时才比对同一 release 下保存的不可变算法产物。任一算法身份、配置/输入 hash、
 Profile、release、输出字段、值、单位、精度或样本年份不一致均返回
 `CONTRADICTED`；缺少身份、输出值或单位时返回 `UNVERIFIABLE`。样本年份先去重并按
-升序规范化；数值先规范为十进制再精确比较，不使用近似容差。
+升序规范化；数值先规范为十进制再精确比较，不使用近似容差。文档事实的规范化单位/
+来源年份、结构化事实的 subject/predicate 也必须与确定性渲染绑定一致。
 
 数字、单位和样本年份在 `rendered_bindings` 中必须指向本 Claim 的证据，且展示文本
 与规范身份一致。派生事实即使数值完全一致，也不得表达“保证录取”等算法能力之外的

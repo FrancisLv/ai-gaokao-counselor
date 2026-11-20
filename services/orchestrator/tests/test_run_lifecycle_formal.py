@@ -1,7 +1,7 @@
 """#30：不可变证据包与 V1_FORMAL 正式结果原子发布。"""
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import date, datetime, timezone
 import hashlib
 import asyncio
@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import grpc
+from psycopg.types.json import Jsonb
 
 from evidence import (
     Claim,
@@ -27,6 +28,7 @@ from evidence import (
     RequiredNotice,
     VerificationScope,
 )
+from evidence.canonical import sha256_payload
 from run_lifecycle_support import RunLifecyclePostgresTest
 
 
@@ -183,6 +185,29 @@ def _formal_package(
         ),
         _notice(release_id, "NO_ADMISSION_GUARANTEE", "不保证录取。"),
     )
+    qualification = QualificationSummary(
+        status="COMPLETE",
+        coverage=(
+            QualificationCoverage(
+                rule_type="ADMISSION_RULES",
+                status="FULL",
+            ),
+        ),
+        groups=(
+            QualificationGroup(
+                group_key="1001:01",
+                status="PASS",
+                majors=(
+                    QualificationMajor(
+                        major_code="080901",
+                        status="PASS",
+                    ),
+                ),
+            ),
+        ),
+        conflict_count=0,
+        unknown_count=0,
+    )
     result_id = str(result_version)
     return EvidencePackage(
         release_id=release_id,
@@ -206,6 +231,7 @@ def _formal_package(
                 for ref in notice.evidence_refs
             ),
         ),
+        applicable_as_of=date(2025, 6, 1),
         gate_context=FormalGateContext(
             context_version="formal-gate-v1",
             release_id=release_id,
@@ -214,29 +240,8 @@ def _formal_package(
             algorithm_config_version="algo-config-v1",
             algorithm_config_sha256="c" * 64,
             verifier_version="evidence-verifier-v1",
-            qualification=QualificationSummary(
-                status="COMPLETE",
-                coverage=(
-                    QualificationCoverage(
-                        rule_type="ADMISSION_RULES",
-                        status="FULL",
-                    ),
-                ),
-                groups=(
-                    QualificationGroup(
-                        group_key="1001:01",
-                        status="PASS",
-                        majors=(
-                            QualificationMajor(
-                                major_code="080901",
-                                status="PASS",
-                            ),
-                        ),
-                    ),
-                ),
-                conflict_count=0,
-                unknown_count=0,
-            ),
+            applicable_as_of=date(2025, 6, 1),
+            qualification=qualification,
             required_notices=notices,
         ),
     )
@@ -312,7 +317,12 @@ def _with_derived_sample_years(
 
 
 class FormalResultLifecycleTests(RunLifecyclePostgresTest):
-    async def _prepare_running_run(self, package: EvidencePackage):
+    async def _prepare_running_run(
+        self,
+        package: EvidencePackage,
+        *,
+        artifact_package: EvidencePackage | None = None,
+    ):
         from app.run_lifecycle import (
             RunLifecycle,
             StructuredProfileInput,
@@ -377,11 +387,112 @@ class FormalResultLifecycleTests(RunLifecyclePostgresTest):
                 """,
                 (profile_version, profile_version, receipt.run_id),
             )
+            artifact_source = artifact_package or package
+            context = artifact_source.gate_context
+            artifact = {
+                "release_id": artifact_source.release_id,
+                "profile_version": artifact_source.profile_version,
+                "result_version": artifact_source.result_version,
+                "verifier_version": context.verifier_version,
+                "applicable_as_of": (
+                    context.applicable_as_of.isoformat()
+                ),
+                "algorithm_config_version": (
+                    context.algorithm_config_version
+                ),
+                "algorithm_config_sha256": (
+                    context.algorithm_config_sha256
+                ),
+                "qualification": asdict(context.qualification),
+            }
+            await conn.execute(
+                """
+                INSERT INTO run_formal_gate_artifact (
+                    run_id, release_id, confirmed_profile_version,
+                    verifier_version, applicable_as_of,
+                    algorithm_config_version, algorithm_config_sha256,
+                    artifact_sha256, artifact_json
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    receipt.run_id,
+                    artifact_source.release_id,
+                    profile_version,
+                    context.verifier_version,
+                    context.applicable_as_of,
+                    context.algorithm_config_version,
+                    context.algorithm_config_sha256,
+                    sha256_payload(artifact),
+                    Jsonb(artifact),
+                ),
+            )
             row = await lifecycle._claim_run(conn, receipt.run_id)
         finally:
             await conn.close()
         self.assertIsNotNone(row)
         return lifecycle, receipt.run_id, row
+
+    async def test_caller_cannot_forge_a_complete_pass_gate_context(self):
+        from app.run_lifecycle import (
+            PublishFormalResultCommand,
+            RunLifecycleError,
+        )
+
+        release_id = f"rel-formal-forged-gate-{uuid4().hex}"
+        package = _formal_package(
+            release_id=release_id,
+            profile_version=uuid4(),
+            result_version=uuid4(),
+        )
+        context = package.gate_context
+        forged_group = replace(
+            context.qualification.groups[0],
+            status="FAIL",
+            majors=(
+                replace(
+                    context.qualification.groups[0].majors[0],
+                    status="FAIL",
+                ),
+            ),
+        )
+        authority_package = replace(
+            package,
+            gate_context=replace(
+                context,
+                qualification=replace(
+                    context.qualification,
+                    groups=(forged_group,),
+                ),
+            ),
+        )
+        lifecycle, run_id, claim = await self._prepare_running_run(
+            package,
+            artifact_package=authority_package,
+        )
+        self.addAsyncCleanup(lifecycle.close)
+
+        with self.assertRaises(RunLifecycleError) as raised:
+            await lifecycle.PublishFormalResult(
+                PublishFormalResultCommand(
+                    principal_id="principal-formal",
+                    run_id=run_id,
+                    expected_state_version=claim["state_version"],
+                    expected_lease_epoch=claim["lease_epoch"],
+                    package=package,
+                )
+            )
+        view = await lifecycle.GetRun(
+            principal_id="principal-formal",
+            run_id=run_id,
+        )
+
+        self.assertEqual(
+            raised.exception.reason,
+            "QUALIFICATION_ARTIFACT_MISMATCH",
+        )
+        self.assertEqual(view.state, "RUNNING")
+        self.assertIsNone(view.result)
 
     async def test_pass_package_is_published_atomically_and_read_consistently(self):
         from app.run_lifecycle import PublishFormalResultCommand
@@ -428,8 +539,24 @@ class FormalResultLifecycleTests(RunLifecyclePostgresTest):
             published.verification_report_sha256,
         )
         self.assertEqual(
-            view.formal_result.verification_summary["status"],
+            view.formal_result.verification_report["status"],
             "PASS",
+        )
+        notices = {
+            notice.notice_type: notice.normalized_text
+            for notice in package.gate_context.required_notices
+        }
+        self.assertEqual(
+            view.formal_result.risk_notice,
+            notices["RISK_NOTICE"],
+        )
+        self.assertEqual(
+            view.formal_result.disclaimer,
+            notices["DISCLAIMER"],
+        )
+        self.assertEqual(
+            view.formal_result.no_admission_guarantee,
+            notices["NO_ADMISSION_GUARANTEE"],
         )
 
         events = lifecycle.WatchRun(
@@ -452,8 +579,8 @@ class FormalResultLifecycleTests(RunLifecyclePostgresTest):
             str(view.formal_result.result_version),
         )
         self.assertEqual(
-            result_event.payload["formal_result"]["verification_summary"],
-            view.formal_result.verification_summary,
+            result_event.payload["formal_result"]["verification_report"],
+            view.formal_result.verification_report,
         )
         self.assertEqual(
             result_event.payload["formal_result"]["evidence_package_sha256"],
@@ -474,8 +601,8 @@ class FormalResultLifecycleTests(RunLifecyclePostgresTest):
         entered = asyncio.Event()
         continue_publish = asyncio.Event()
 
-        class PausingFormalLifecycle(RunLifecycle):
-            async def _before_formal_publish_hook(self, run_id):
+        class PausingFormalPublishGuard:
+            async def before_publish(self, run_id):
                 entered.set()
                 await continue_publish.wait()
 
@@ -489,10 +616,11 @@ class FormalResultLifecycleTests(RunLifecyclePostgresTest):
         )
         lifecycle, run_id, claim = await self._prepare_running_run(package)
         await lifecycle.close()
-        pausing = PausingFormalLifecycle(
+        pausing = RunLifecycle(
             self.dsn,
             worker_owner="worker-formal",
             algo_client=object(),
+            formal_publish_guard=PausingFormalPublishGuard(),
         )
         self.addAsyncCleanup(pausing.close)
 
@@ -582,7 +710,7 @@ class FormalResultLifecycleTests(RunLifecyclePostgresTest):
             ("claim-campus",),
         )
         self.assertEqual(
-            view.formal_result.verification_summary["stripped_claim_ids"],
+            view.formal_result.verification_report["stripped_claim_ids"],
             ["claim-campus"],
         )
         self.assertEqual(
@@ -869,6 +997,23 @@ class FormalResultLifecycleTests(RunLifecyclePostgresTest):
             with self.assertRaises(psycopg.Error):
                 await conn.execute(
                     """
+                    UPDATE run_formal_gate_artifact
+                    SET artifact_json = '{}'::jsonb
+                    WHERE run_id = %s
+                    """,
+                    (run_id,),
+                )
+            with self.assertRaises(psycopg.Error):
+                await conn.execute(
+                    """
+                    DELETE FROM run_formal_gate_artifact
+                    WHERE run_id = %s
+                    """,
+                    (run_id,),
+                )
+            with self.assertRaises(psycopg.Error):
+                await conn.execute(
+                    """
                     UPDATE run_evidence_package
                     SET package_json = '{}'::jsonb
                     WHERE result_version = %s
@@ -1011,9 +1156,15 @@ class FormalResultLifecycleTests(RunLifecyclePostgresTest):
         lifecycle, run_id, claim = await self._prepare_running_run(package)
         await lifecycle.close()
 
-        class RevokingFormalLifecycle(RunLifecycle):
-            async def _before_formal_publish_hook(self, run_id):
-                conn = await self._connect(autocommit=True)
+        class RevokingFormalPublishGuard:
+            def __init__(self, dsn):
+                self.dsn = dsn
+
+            async def before_publish(self, run_id):
+                conn = await psycopg.AsyncConnection.connect(
+                    self.dsn,
+                    autocommit=True,
+                )
                 try:
                     await conn.execute(
                         """
@@ -1026,10 +1177,12 @@ class FormalResultLifecycleTests(RunLifecyclePostgresTest):
                 finally:
                     await conn.close()
 
-        hooked = RevokingFormalLifecycle(
+        guard = RevokingFormalPublishGuard(self.dsn)
+        hooked = RunLifecycle(
             self.dsn,
             worker_owner="worker-formal",
             algo_client=object(),
+            formal_publish_guard=guard,
         )
         self.addAsyncCleanup(hooked.close)
         publication = await hooked.PublishFormalResult(
@@ -1119,6 +1272,22 @@ class FormalResultLifecycleTests(RunLifecyclePostgresTest):
         self.assertEqual(
             view.formal_result.verification_status,
             "PASS",
+        )
+        notices = {
+            notice.notice_type: notice.normalized_text
+            for notice in package.gate_context.required_notices
+        }
+        self.assertEqual(
+            view.formal_result.disclaimer,
+            notices["DISCLAIMER"],
+        )
+        self.assertEqual(
+            view.formal_result.risk_notice,
+            notices["RISK_NOTICE"],
+        )
+        self.assertEqual(
+            view.formal_result.no_admission_guarantee,
+            notices["NO_ADMISSION_GUARANTEE"],
         )
         self.assertEqual(
             result_event.formal_result,

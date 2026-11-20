@@ -323,6 +323,9 @@ message FormalResultSummary {
   double citation_coverage = 11;
   string result_state = 12;
   string stale_reason = 13;
+  string disclaimer = 14;
+  string risk_notice = 15;
+  string no_admission_guarantee = 16;
 }
 
 message RunViewReply {

@@ -57,6 +57,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await conn.execute(
                 """
                 DROP TABLE IF EXISTS
+                    run_formal_gate_artifact,
                     run_result_state_event,
                     run_verification_report,
                     run_evidence_package,
@@ -166,6 +167,8 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             await conn.execute(migration.read_text(encoding="utf-8"))
             migration = ROOT / "migrations" / "27_formal_evidence_results.sql"
             await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "28_authoritative_formal_gate.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS release_component (
@@ -224,6 +227,10 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                 await self._apply_sql_file(
                     conn,
                     "migrations/27_formal_evidence_results.sql",
+                )
+                await self._apply_sql_file(
+                    conn,
+                    "migrations/28_authoritative_formal_gate.sql",
                 )
         finally:
             await conn.close()

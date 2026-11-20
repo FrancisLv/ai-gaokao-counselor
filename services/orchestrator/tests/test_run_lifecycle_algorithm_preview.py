@@ -240,6 +240,51 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
                 "FORMAL_REPORT",
             }.issubset(unverified)
         )
+        conn = await self._connect()
+        try:
+            artifact = await (
+                await conn.execute(
+                    """
+                    SELECT release_id, confirmed_profile_version,
+                           verifier_version, applicable_as_of,
+                           algorithm_config_version, artifact_sha256,
+                           artifact_json
+                    FROM run_formal_gate_artifact
+                    WHERE run_id = %s
+                    """,
+                    (submitted.run_id,),
+                )
+            ).fetchone()
+        finally:
+            await conn.close()
+
+        self.assertEqual(artifact["release_id"], release_id)
+        self.assertEqual(
+            artifact["confirmed_profile_version"],
+            completed.confirmed_profile_version,
+        )
+        self.assertEqual(
+            artifact["verifier_version"],
+            "evidence-verifier-v1",
+        )
+        self.assertEqual(
+            artifact["algorithm_config_version"],
+            release_id,
+        )
+        self.assertEqual(len(artifact["artifact_sha256"]), 64)
+        self.assertEqual(
+            artifact["artifact_json"]["qualification"]["status"],
+            "COMPLETE",
+        )
+        self.assertEqual(
+            artifact["artifact_json"]["qualification"]["coverage"],
+            [
+                {
+                    "rule_type": "SUBJECT_REQUIREMENT",
+                    "status": "FULL",
+                }
+            ],
+        )
 
         self.assertEqual(
             [name for name, _ in algo.calls],

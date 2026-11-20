@@ -25,7 +25,8 @@
 6. `CONTRADICTED` 不得自动修复文案；必须回退上游或阻断。
 7. `UNVERIFIABLE` 的关键事实不能静默进入最终报告；可剥离非关键段落，关键事实则失败。
 8. 引用不存在的学校、年份、条款或 release 是硬错误。
-9. 证据必须可重复校验：同输入、同 release、同 verifier 版本得到同状态。
+9. 证据必须可重复校验：同输入、同 release、同 verifier 版本和同一
+   `applicable_as_of` 得到同状态；不得读取系统当前日期。
 
 ## 3. EvidenceRef
 
@@ -135,6 +136,10 @@ Claim
     object: canonical scalar/object
     unit: string | null
   rendered_text: string
+  source_year: int32 | null
+  sample_years: list<int32>
+  precision: int32 | null
+  rendered_bindings: list<{fact_path, rendered_text, evidence_id}>
   evidence_refs: list<EvidenceRef>
 ```
 
@@ -154,13 +159,15 @@ Claim
 VerifyPackage(package: EvidencePackage) -> VerificationReport
 ```
 
-`VerifyPackage` 是 Verifier 的唯一 seam。内部实现按 evidence type 分派，调用方不得根据文档 URL 或 LLM 置信度自行宣布通过。
+`VerifyPackage` 是 Verifier 的唯一 seam。内部实现按 evidence type 分派，调用方不得根据文档 URL 或 LLM 置信度自行宣布通过。运行时模型、Claim 校验、正式门禁与规范化工具有独立内部模块；这些模块不增加公开校验入口。
 
 ```text
 EvidencePackage
   release_id: string
   profile_version: string
   result_version: string
+  scope: VerificationScope
+  applicable_as_of: date
   claims: list<Claim>
   evidence_registry: list<EvidenceRef>
   verifier_version: string
@@ -178,6 +185,7 @@ FormalGateContext
   algorithm_config_version: string
   algorithm_config_sha256: string
   verifier_version: string
+  applicable_as_of: date
   qualification: QualificationSummary
   required_notices: list<RequiredNotice>
 
@@ -200,7 +208,9 @@ RequiredNotice
   evidence_refs: list<EvidenceRef>
 ```
 
-必需说明的证据绑定必须实际支持 `normalized_text`。`DOCUMENT` 证据要求 excerpt
+必需说明的证据必须先按 `evidence_id` 从 `EvidencePackage.evidence_registry` 唯一解析；
+未注册、重复、跨 release、hash/type 不一致均 fail closed。解析后的引用必须实际支持
+`normalized_text`。`DOCUMENT` 证据要求 excerpt
 含该规范化文本且 hash 一致；`STRUCTURED` 证据要求字段路径明确指向规范文本或对应
 notice 类型（如 `normalized_text`、`notice.disclaimer`、`risk_notice`），值为与
 `normalized_text` 完全一致的字符串，并绑定同一行/快照 hash。缺少 payload、
@@ -231,15 +241,19 @@ ClaimVerification
 
 ### 6.1 文档事实
 
-1. 检查证据存在、release 一致、适用域匹配；
+1. 检查证据存在、release 一致，并按 package 的 `applicable_as_of` 检查适用域；
 2. 检查 excerpt/hash/section path；
-3. 对结构化抽取的文档事实做确定性字段比对；
-4. 对真正需要语义判断的文本，可调用经过版本化的 entailment verifier；
+3. 对结构化抽取的文档事实做确定性字段比对，单位与来源年份也必须绑定到同一原文和
+   `rendered_bindings`；
+4. 对真正需要语义判断的文本，可调用经过版本化的 entailment verifier；adapter
+   `verifier_version` 必须与 package/gate 的 Verifier 版本完全一致；
 5. entailment 无法确定时只能返回 `UNVERIFIABLE`，不能升级为 `VERIFIED`。
 
 ### 6.2 结构化事实
 
-按 `dataset + primary_key + field_path + release_id` 重新读取权威值，逐字段比较。任何类型、单位或值差异均为 `CONTRADICTED`。
+按 `dataset + primary_key + field_path + release_id` 重新读取权威值，逐字段比较。
+Claim 的 subject 必须由业务键生成，predicate 必须映射到 field path，并分别出现在
+确定性渲染绑定中。任何 subject/predicate、类型、单位或值差异均为 `CONTRADICTED`。
 
 ### 6.3 派生事实
 
@@ -256,7 +270,8 @@ ClaimVerification
   `PASS_PARTIAL`。任何组 `UNKNOWN / FAIL`、专业 `MISSING_REQUIRED_FACT`、覆盖缺失、
   `rule_type` 为空/空白或非 `FULL`、受限专业代码为空/空白、规则冲突均阻断；
 - 结果引用的确认 Profile、release、result version、算法配置版本/hash 和 verifier
-  版本一致；`DERIVED` 证据的配置 hash 也必须与 gate context 一致；
+  版本及 `applicable_as_of` 一致；`DERIVED` 证据的配置 hash 也必须与 gate context
+  一致。资格摘要必须与 RunLifecycle 已生成的不可变 gate artifact 完全一致；
 - `DISCLAIMER`、`RISK_NOTICE` 和 `NO_ADMISSION_GUARANTEE` 均存在，规范化文本 hash
   未变，且绑定同 release 的可解析证据；
 - 所有 Claim 和必需说明都不得出现“保证录取”“包录取”“100% 录取”等等价承诺。
@@ -281,6 +296,11 @@ release 撤销只追加 `STALE / RELEASE_REVOKED`，不修改发布正文。同�
 原结果和原 RESULT 事件。计算输入摘要时，Claim 的规范化 `sample_years` 与
 `DERIVED` 证据内的 `sample_years` 都按与 Verifier 一致的去重升序集合处理；
 仅顺序变化的重试复用原结果，年份集合变化仍返回 `RESULT_VERSION_CONFLICT`。
+`run_formal_gate_artifact` 保存 RunLifecycle 从 `EvaluateEligibility` 和可信 release
+配置生成的不可变资格/配置快照；`PublishFormalResult` 必须复核其 hash 和全部身份，
+不能信任调用方自行提交的 `COMPLETE + PASS` 摘要。正式结果 payload 同时保存未改写的
+`disclaimer / risk_notice / no_admission_guarantee`，GET/Watch 与 RESULT 事件返回同一
+文本；完整报告字段统一命名为 `verification_report`。
 
 ## 9. 稳定错误
 
@@ -303,6 +323,11 @@ release 撤销只追加 `STALE / RELEASE_REVOKED`，不修改发布正文。同�
 | `RESULT_VERSION_MISMATCH` | 门禁上下文与结果版本不一致 |
 | `ALGORITHM_CONFIG_MISMATCH` | 算法配置身份缺失或与派生证据不一致 |
 | `VERIFIER_VERSION_MISMATCH` | Verifier 版本不一致 |
+| `APPLICABLE_DATE_MISMATCH` | package 与 gate context 的适用日期不一致 |
+| `FORMAL_GATE_ARTIFACT_MISSING` | 本 run 缺少权威资格/配置 artifact |
+| `FORMAL_GATE_ARTIFACT_MISMATCH` | artifact hash 无法自证 |
+| `FORMAL_GATE_ARTIFACT_CONFLICT` | 同一 run 试图写入不同 artifact |
+| `QUALIFICATION_ARTIFACT_MISMATCH` | 调用方资格摘要与 run 权威资格产物不一致 |
 | `ELIGIBILITY_NOT_COMPLETE` | 资格整体不是 `COMPLETE` |
 | `ELIGIBILITY_COVERAGE_MISSING` | 缺少规则覆盖声明 |
 | `ELIGIBILITY_COVERAGE_INCOMPLETE` | 存在非 `FULL` 覆盖 |
@@ -336,6 +361,13 @@ release 撤销只追加 `STALE / RELEASE_REVOKED`，不修改发布正文。同�
 | EV-10 | 资格 UNKNOWN 被写成“通过” | 资格事实 `CONTRADICTED` |
 | EV-11 | 报告省略免责声明 | 发布门禁失败 |
 | EV-12 | 同输入重复验证 | 同状态、同原因、同证据顺序 |
+| EV-13 | 原文为“5000 元/2023”，Claim 为“万元/2025” | `CONTRADICTED` |
+| EV-14 | `plan_count=12` 被用于证明学费 | subject/predicate 不匹配并 `CONTRADICTED` |
+| EV-15 | required notice 引用未注册 EvidenceRef | `REQUIRED_NOTICE_MISSING` |
+| EV-16 | entailment adapter 版本缺失或不一致 | `UNVERIFIABLE`，阻断 |
+| EV-17 | 相同 package 跨日期重复校验 | 只使用 package `applicable_as_of`，结果稳定 |
+| EV-18 | 调用方伪造 `COMPLETE + PASS` 资格 | RunLifecycle 按权威 artifact 拒绝 |
+| EV-19 | 正式结果 GET/Watch | 返回同一 `verification_report` 与未改写必需说明 |
 
 ## 11. 非目标
 

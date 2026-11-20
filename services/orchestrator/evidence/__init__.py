@@ -1,6 +1,6 @@
 """三类证据校验的唯一公开 seam。"""
 
-from evidence.verifier import (
+from evidence.models import (
     Claim,
     ClaimVerification,
     DerivedEvidence,
@@ -21,8 +21,8 @@ from evidence.verifier import (
     StructuredEvidenceAuthority,
     VerificationReport,
     VerificationScope,
-    VerifyPackage,
 )
+from evidence.verifier import VerifyPackage
 from rag.policy_retrieval import DocumentApplicability, DocumentEvidence
 
 __all__ = [

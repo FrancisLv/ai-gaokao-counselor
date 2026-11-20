@@ -164,7 +164,10 @@ class FormalResultPayload(TypedDict):
     confirmed_profile_version: str
     evidence_package_sha256: str
     verification_report_sha256: str
-    verification_summary: dict[str, Any]
+    verification_report: dict[str, Any]
+    risk_notice: str
+    disclaimer: str
+    no_admission_guarantee: str
     result_state: str
     stale_reason: str | None
 
