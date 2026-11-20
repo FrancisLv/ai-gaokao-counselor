@@ -418,9 +418,8 @@ class ReleaseGateTests(unittest.TestCase):
             for item in report.failure_details
             if item["metric"] == "baseline_performance_context"
         )
-        self.assertIsNone(detail["actual"])
         self.assertEqual(
-            detail["baseline"],
+            detail["actual"],
             {
                 "environment": "ci",
                 "hardware_profile": "linux-x86",
@@ -430,6 +429,7 @@ class ReleaseGateTests(unittest.TestCase):
                 "concurrency": 1,
             },
         )
+        self.assertIsNone(detail["baseline"])
 
     def test_p99_baseline_with_a_different_cache_state_cannot_be_compared(self):
         from eval.release_gate import evaluate_release_gate
@@ -454,6 +454,13 @@ class ReleaseGateTests(unittest.TestCase):
             "baseline_performance_context",
             report.failed_metrics,
         )
+        detail = next(
+            item
+            for item in report.failure_details
+            if item["metric"] == "baseline_performance_context"
+        )
+        self.assertEqual(detail["actual"]["cache_state"], "warm")
+        self.assertEqual(detail["baseline"]["cache_state"], "cold")
 
     def test_nonreproducible_sample_fails_release_gate(self):
         from eval.release_gate import evaluate_release_gate

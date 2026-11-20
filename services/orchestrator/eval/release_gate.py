@@ -363,8 +363,8 @@ def _gate_failure_details(
         "performance_context": _performance_context_payload(
             performance_context
         ),
-        "baseline_performance_context": baseline.get(
-            "performance_context"
+        "baseline_performance_context": _performance_context_payload(
+            performance_context
         ),
         "run_release_id": sorted(
             {sample.release_id for sample in run_samples}
@@ -401,8 +401,8 @@ def _gate_failure_details(
         "baseline_dataset_version": baseline.get("dataset", {}).get(
             "version"
         ),
-        "baseline_performance_context": _performance_context_payload(
-            performance_context
+        "baseline_performance_context": baseline.get(
+            "performance_context"
         ),
         "run_release_id": dataset.manifest["release_id"],
     }
