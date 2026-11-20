@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 from typing import Protocol
 
 import psycopg
@@ -36,6 +37,10 @@ class SecurityGateSuiteResult:
     passed: bool
     suite: str
     exit_code: int
+    executed_count: int = 0
+    skipped_count: int = 0
+    error_count: int = 0
+    failure_count: int = 0
     failed_case_ids: tuple[str, ...] = ()
     resource_types: tuple[str, ...] = ()
 
@@ -77,15 +82,78 @@ class SubprocessSecurityGateRunner:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, _ = await process.communicate()
-        passed = process.returncode == 0
+        stdout, stderr = await process.communicate()
+        output = (
+            stdout.decode("utf-8", errors="replace")
+            + "\n"
+            + stderr.decode("utf-8", errors="replace")
+        )
+        return parse_unittest_result(
+            gate_id=gate_id,
+            suite=suite,
+            output=output,
+            exit_code=process.returncode or 0,
+        )
+
+
+def parse_unittest_result(
+    *,
+    gate_id: str,
+    suite: str,
+    output: str,
+    exit_code: int,
+) -> SecurityGateSuiteResult:
+    ran_match = re.search(r"Ran\s+(\d+)\s+tests?\s+in\s+", output)
+    if ran_match is None:
         return SecurityGateSuiteResult(
             gate_id=gate_id,
-            passed=passed,
+            passed=False,
             suite=suite,
-            exit_code=process.returncode or 0,
-            failed_case_ids=() if passed else (suite,),
+            exit_code=exit_code,
+            failure_count=max(1, int(exit_code != 0)),
+            failed_case_ids=(suite,),
         )
+    ran_count = int(ran_match.group(1))
+    skipped_count = 0
+    error_count = 0
+    failure_count = 0
+    skipped_match = re.search(r"OK\s+\(skipped=(\d+)\)", output)
+    if skipped_match is not None:
+        skipped_count = int(skipped_match.group(1))
+    failed_match = re.search(r"FAILED\s+\((.*?)\)", output)
+    if failed_match is not None:
+        for part in failed_match.group(1).split(","):
+            key, _, value = part.strip().partition("=")
+            if not value.isdigit():
+                continue
+            count = int(value)
+            if key in {"failures", "expected failures"}:
+                failure_count += count
+            elif key == "errors":
+                error_count += count
+            elif key == "skipped":
+                skipped_count = count
+    executed_count = max(
+        0,
+        ran_count - skipped_count,
+    )
+    passed = (
+        exit_code == 0
+        and executed_count > 0
+        and error_count == 0
+        and failure_count == 0
+    )
+    return SecurityGateSuiteResult(
+        gate_id=gate_id,
+        passed=passed,
+        suite=suite,
+        exit_code=exit_code,
+        executed_count=executed_count,
+        skipped_count=skipped_count,
+        error_count=error_count,
+        failure_count=failure_count,
+        failed_case_ids=() if passed else (suite,),
+    )
 
 
 def finalize_security_gate_evidence(
@@ -114,14 +182,30 @@ def finalize_security_gate_evidence(
         "passed": suite_result.passed,
         "suite": suite_result.suite,
         "exit_code": suite_result.exit_code,
+        "executed_count": suite_result.executed_count,
+        "skipped_count": suite_result.skipped_count,
+        "error_count": suite_result.error_count,
+        "failure_count": suite_result.failure_count,
         "dataset_version": dataset.manifest["dataset_version"],
         "dataset_sha256": dataset.manifest["dataset_sha256"],
         "release_id": dataset.manifest["release_id"],
         "git_sha": git_sha,
         "failed_case_ids": sorted(set(suite_result.failed_case_ids)),
         "resource_types": sorted(set(suite_result.resource_types)),
-        "actual": {"exit_code": suite_result.exit_code},
-        "threshold": {"exit_code": 0},
+        "actual": {
+            "exit_code": suite_result.exit_code,
+            "executed": suite_result.executed_count,
+            "skipped": suite_result.skipped_count,
+            "errors": suite_result.error_count,
+            "failures": suite_result.failure_count,
+        },
+        "threshold": {
+            "exit_code": 0,
+            "executed_min": 1,
+            "skipped_max": 0,
+            "errors_max": 0,
+            "failures_max": 0,
+        },
         "baseline": None,
     }
     artifact_sha256 = hashlib.sha256(
@@ -234,6 +318,10 @@ def verify_security_gate_evidence(row: dict) -> SecurityGateEvidence:
             "passed",
             "suite",
             "exit_code",
+            "executed_count",
+            "skipped_count",
+            "error_count",
+            "failure_count",
             "dataset_version",
             "dataset_sha256",
             "release_id",
@@ -256,6 +344,11 @@ def verify_security_gate_evidence(row: dict) -> SecurityGateEvidence:
     if actual_sha256 != artifact_sha256:
         raise SecurityGateEvidenceIntegrityError(
             "security artifact content hash mismatch"
+        )
+    actual_passed = _security_actual_passed(payload.get("actual"))
+    if row.get("passed") is not actual_passed:
+        raise SecurityGateEvidenceIntegrityError(
+            "security evidence passed flag does not match execution counts"
         )
     identity_fields = (
         "eval_run_id",
@@ -300,6 +393,10 @@ async def _persist_security_gate_evidence(
         "passed": record.passed,
         "suite": record.suite,
         "exit_code": record.actual["exit_code"],
+        "executed_count": record.actual["executed"],
+        "skipped_count": record.actual["skipped"],
+        "error_count": record.actual["errors"],
+        "failure_count": record.actual["failures"],
         "dataset_version": record.dataset_version,
         "dataset_sha256": record.dataset_sha256,
         "release_id": record.release_id,
@@ -355,3 +452,17 @@ async def _persist_security_gate_evidence(
             )
     finally:
         await conn.close()
+
+
+def _security_actual_passed(actual) -> bool:
+    if not isinstance(actual, dict):
+        return False
+    return (
+        actual.get("exit_code") == 0
+        and isinstance(actual.get("executed"), int)
+        and not isinstance(actual.get("executed"), bool)
+        and actual["executed"] > 0
+        and actual.get("skipped") == 0
+        and actual.get("errors") == 0
+        and actual.get("failures") == 0
+    )

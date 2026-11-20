@@ -53,7 +53,12 @@ def _passing_security_evidence():
     )
 
 
-def _dataset(owner_status="SIGNED_OFF"):
+def _dataset(
+    owner_status="SIGNED_OFF",
+    *,
+    retrieval_case_ids=("retrieval-1",),
+    e2e_case_ids=("e2e-1",),
+):
     from eval.eval_dataset import JointEvalDataset
 
     return JointEvalDataset(
@@ -63,12 +68,29 @@ def _dataset(owner_status="SIGNED_OFF"):
             "release_id": "rel-v1",
             "owner_status": owner_status,
         },
-        retrieval_cases=(),
-        e2e_cases=(),
+        retrieval_cases=tuple(
+            {
+                "case_id": case_id,
+                "evaluation_status": "ACTIVE",
+            }
+            for case_id in retrieval_case_ids
+        ),
+        e2e_cases=tuple(
+            {"case_id": case_id}
+            for case_id in e2e_case_ids
+        ),
     )
 
 
-def _evaluate(dataset, quality_report, security_evidence, *, identity=None):
+def _evaluate(
+    dataset,
+    quality_report,
+    security_evidence,
+    *,
+    identity=None,
+    retrieval_result_ids=None,
+    e2e_result_ids=None,
+):
     from eval.eval_run import EvalRunRecord, finalize_eval_run
     from eval.release_gate import _evaluate_authoritative_records
 
@@ -104,7 +126,21 @@ def _evaluate(dataset, quality_report, security_evidence, *, identity=None):
                 "checked_against": [f"evidence-{index}"],
             }
         )
-    hit_count = round(metrics["retrieval_recall_at_5"] * 10)
+    retrieval_case_ids = tuple(
+        retrieval_result_ids
+        if retrieval_result_ids is not None
+        else (
+            case["case_id"] for case in dataset.retrieval_cases
+        )
+    )
+    e2e_case_ids = tuple(
+        e2e_result_ids
+        if e2e_result_ids is not None
+        else (case["case_id"] for case in dataset.e2e_cases)
+    )
+    hit_count = round(
+        metrics["retrieval_recall_at_5"] * len(retrieval_case_ids)
+    )
     run_samples = [
         {
             "run_id": f"run-{index}",
@@ -157,7 +193,7 @@ def _evaluate(dataset, quality_report, security_evidence, *, identity=None):
             "failure_details": list(quality_report.failure_details),
             "retrieval_results": [
                 {
-                    "case_id": f"retrieval-{index}",
+                    "case_id": case_id,
                     "status": "FOUND",
                     "hit_at_5": index < hit_count,
                     "hit_at_20": index < hit_count,
@@ -167,11 +203,11 @@ def _evaluate(dataset, quality_report, security_evidence, *, identity=None):
                     "returned_evidence_count": 1,
                     "scope_leaks": [],
                 }
-                for index in range(10)
+                for index, case_id in enumerate(retrieval_case_ids)
             ],
             "e2e_results": [
                 {
-                    "case_id": "e2e-1",
+                    "case_id": case_id,
                     "terminal_status": "SUCCEEDED",
                     "result_kind": "V1_FORMAL",
                     "result_version": "result-1",
@@ -184,6 +220,7 @@ def _evaluate(dataset, quality_report, security_evidence, *, identity=None):
                     "passed": True,
                     "first_diff": None,
                 }
+                for case_id in e2e_case_ids
             ],
             "run_samples": run_samples,
         }
@@ -206,6 +243,49 @@ def _evaluate(dataset, quality_report, security_evidence, *, identity=None):
 
 
 class M5bReleaseGateTests(unittest.TestCase):
+    def test_retrieval_case_coverage_must_match_the_dataset(self):
+        dataset = _dataset(
+            retrieval_case_ids=("retrieval-1", "retrieval-2"),
+        )
+        decision = _evaluate(
+            dataset=dataset,
+            quality_report=_quality_report(),
+            security_evidence=_passing_security_evidence(),
+            retrieval_result_ids=("retrieval-1",),
+        )
+
+        self.assertEqual(decision.gate_status, "FAIL")
+        self.assertIn("retrieval_case_coverage", decision.failed_metrics)
+
+    def test_end_to_end_case_coverage_must_match_the_dataset(self):
+        dataset = _dataset(e2e_case_ids=("e2e-1", "e2e-2"))
+        decision = _evaluate(
+            dataset=dataset,
+            quality_report=_quality_report(),
+            security_evidence=_passing_security_evidence(),
+            e2e_result_ids=("e2e-1",),
+        )
+
+        self.assertEqual(decision.gate_status, "FAIL")
+        self.assertIn("e2e_case_coverage", decision.failed_metrics)
+
+    def test_duplicate_or_extra_case_results_cannot_satisfy_coverage(self):
+        dataset = _dataset(
+            retrieval_case_ids=("retrieval-1",),
+            e2e_case_ids=("e2e-1",),
+        )
+        decision = _evaluate(
+            dataset=dataset,
+            quality_report=_quality_report(),
+            security_evidence=_passing_security_evidence(),
+            retrieval_result_ids=("retrieval-1", "retrieval-1"),
+            e2e_result_ids=("e2e-1", "e2e-extra"),
+        )
+
+        self.assertEqual(decision.gate_status, "FAIL")
+        self.assertIn("retrieval_case_coverage", decision.failed_metrics)
+        self.assertIn("e2e_case_coverage", decision.failed_metrics)
+
     def test_all_quality_fact_and_security_gates_produce_a_publishable_decision(self):
         from eval.release_gate import _evaluate_authoritative_records
 

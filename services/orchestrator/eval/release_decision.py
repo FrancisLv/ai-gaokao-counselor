@@ -7,7 +7,12 @@ import json
 from typing import Any
 
 from eval.eval_dataset import JointEvalDataset
-from eval.eval_run import EvalRunRecord, load_eval_run, verify_eval_run
+from eval.eval_run import (
+    EvalRunRecord,
+    load_eval_run,
+    recompute_eval_metrics,
+    verify_eval_run,
+)
 from eval.release_models import (
     ReleaseGateDecision,
     ReleaseGateReport,
@@ -58,6 +63,24 @@ async def evaluate_m5b_release_gate(
         raise ReleaseGateAuthorityError(
             "EvalRun git_sha does not match the release candidate"
         )
+    baseline_eval_run = None
+    if eval_run.gate_status == "PASS":
+        baseline_eval_run_id = eval_run.payload.get(
+            "baseline_eval_run_id"
+        )
+        if not isinstance(baseline_eval_run_id, str) or not baseline_eval_run_id:
+            raise ReleaseGateAuthorityError(
+                "PASS EvalRun requires a persisted baseline"
+            )
+        try:
+            baseline_eval_run = await load_eval_run(
+                dsn,
+                baseline_eval_run_id,
+            )
+        except ValueError as exc:
+            raise ReleaseGateAuthorityError(
+                "baseline EvalRun was not found or is invalid"
+            ) from exc
     security_evidence = await load_security_gate_evidence(
         dsn,
         security_artifact_ids,
@@ -83,6 +106,7 @@ async def evaluate_m5b_release_gate(
         dataset=dataset,
         eval_run=eval_run,
         security_evidence=security_evidence,
+        baseline_eval_run=baseline_eval_run,
     )
 
 
@@ -91,6 +115,7 @@ def _evaluate_authoritative_records(
     dataset: JointEvalDataset,
     eval_run: EvalRunRecord,
     security_evidence: tuple[SecurityGateEvidence, ...],
+    baseline_eval_run: EvalRunRecord | None = None,
 ) -> ReleaseGateDecision:
     """任何事实、质量或安全失败均阻断发布，不允许跨指标抵消。"""
     authority_failed_metrics = []
@@ -116,6 +141,40 @@ def _evaluate_authoritative_records(
         authority_failed_metrics.append("eval_run_gate_status")
     if payload.get("release_gate_status") != "PASS":
         authority_failed_metrics.append("release_gate_status")
+    authority_failed_metrics.extend(
+        _dataset_coverage_failed_metrics(dataset, payload)
+    )
+    baseline_metrics: dict[str, int | float] = {}
+    if baseline_eval_run is not None:
+        if (
+            baseline_eval_run.eval_run_id
+            != payload.get("baseline_eval_run_id")
+        ):
+            authority_failed_metrics.append(
+                "baseline_eval_run_id"
+            )
+        try:
+            baseline_payload = verify_eval_run(
+                baseline_eval_run.payload
+            ).payload
+        except ValueError:
+            baseline_payload = baseline_eval_run.payload
+            authority_failed_metrics.append(
+                "baseline_eval_run_integrity"
+            )
+        authority_failed_metrics.extend(
+            _dataset_coverage_failed_metrics(
+                dataset,
+                baseline_payload,
+                prefix="baseline_",
+            )
+        )
+        baseline_failures, baseline_metrics = _baseline_failed_metrics(
+            payload=payload,
+            baseline_payload=baseline_payload,
+            dataset=dataset,
+        )
+        authority_failed_metrics.extend(baseline_failures)
 
     quality_report = _quality_report_from_eval_run(payload)
     if authority_failed_metrics:
@@ -174,7 +233,13 @@ def _evaluate_authoritative_records(
         "actual": quality_report.metrics,
         "threshold": _quality_thresholds(),
         "baseline": {
-            "eval_run_id": run_identity.get("baseline_eval_run_id")
+            "eval_run_id": run_identity.get("baseline_eval_run_id"),
+            "metrics": baseline_metrics,
+            "performance_context": (
+                baseline_eval_run.payload.get("performance_context")
+                if baseline_eval_run is not None
+                else None
+            ),
         },
         "failed_metrics": list(quality_report.failed_metrics),
     }
@@ -201,6 +266,33 @@ def _evaluate_authoritative_records(
         *quality_report.failed_metrics,
         *failed_metrics,
     ]
+    for metric in authority_failed_metrics:
+        details.append(
+            {
+                "metric": metric,
+                "actual": _authority_actual_value(
+                    metric,
+                    payload,
+                    dataset,
+                ),
+                "threshold": _authority_threshold_value(metric),
+                "baseline": {
+                    "eval_run_id": run_identity.get(
+                        "baseline_eval_run_id"
+                    ),
+                    "metrics": baseline_metrics,
+                    "performance_context": (
+                        baseline_eval_run.payload.get(
+                            "performance_context"
+                        )
+                        if baseline_eval_run is not None
+                        else None
+                    ),
+                },
+                "failed_case_ids": [],
+                "resource_types": [],
+            }
+        )
     if not critical_passed:
         failed_gates.append("CRITICAL_FACTS")
         for metric in critical_failed_metrics:
@@ -287,6 +379,150 @@ def _quality_report_from_eval_run(payload: dict) -> ReleaseGateReport:
             if isinstance(item, dict)
         ),
     )
+
+
+def _dataset_coverage_failed_metrics(
+    dataset: JointEvalDataset,
+    payload: dict,
+    *,
+    prefix: str = "",
+) -> list[str]:
+    failures = []
+    expected_retrieval = {
+        case["case_id"]
+        for case in dataset.retrieval_cases
+        if case.get("evaluation_status", "ACTIVE") == "ACTIVE"
+    }
+    retrieval_results = payload.get("retrieval_results")
+    if not isinstance(retrieval_results, list):
+        failures.append(f"{prefix}retrieval_case_coverage")
+    else:
+        actual_retrieval = [
+            item.get("case_id")
+            for item in retrieval_results
+            if isinstance(item, dict)
+        ]
+        if (
+            len(actual_retrieval) != len(retrieval_results)
+            or any(
+                not isinstance(case_id, str) or not case_id
+                for case_id in actual_retrieval
+            )
+            or len(actual_retrieval) != len(set(actual_retrieval))
+            or set(actual_retrieval) != expected_retrieval
+        ):
+            failures.append(f"{prefix}retrieval_case_coverage")
+
+    expected_e2e = {
+        case["case_id"] for case in dataset.e2e_cases
+    }
+    e2e_results = payload.get("e2e_results")
+    if not isinstance(e2e_results, list):
+        failures.append(f"{prefix}e2e_case_coverage")
+    else:
+        actual_e2e = [
+            item.get("case_id")
+            for item in e2e_results
+            if isinstance(item, dict)
+        ]
+        if (
+            len(actual_e2e) != len(e2e_results)
+            or any(
+                not isinstance(case_id, str) or not case_id
+                for case_id in actual_e2e
+            )
+            or len(actual_e2e) != len(set(actual_e2e))
+            or set(actual_e2e) != expected_e2e
+        ):
+            failures.append(f"{prefix}e2e_case_coverage")
+    return failures
+
+
+def _baseline_failed_metrics(
+    *,
+    payload: dict,
+    baseline_payload: dict,
+    dataset: JointEvalDataset,
+) -> tuple[list[str], dict[str, int | float]]:
+    failures = []
+    baseline_dataset = baseline_payload.get("dataset", {})
+    if (
+        baseline_payload.get("release_id")
+        != dataset.manifest.get("release_id")
+        or baseline_dataset.get("version")
+        != dataset.manifest.get("dataset_version")
+        or baseline_dataset.get("sha256")
+        != dataset.manifest.get("dataset_sha256")
+    ):
+        failures.append("baseline_identity")
+    if (
+        baseline_payload.get("gate_status") != "PASS"
+        or baseline_payload.get("release_gate_status") != "PASS"
+    ):
+        failures.append("baseline_gate_status")
+    if (
+        baseline_payload.get("performance_context")
+        != payload.get("performance_context")
+    ):
+        failures.append("baseline_performance_context")
+    try:
+        baseline_metrics = recompute_eval_metrics(baseline_payload)
+        current_metrics = recompute_eval_metrics(payload)
+    except ValueError:
+        return [*failures, "baseline_metrics"], {}
+
+    baseline_recall = baseline_metrics["retrieval_recall_at_5"]
+    baseline_mrr = baseline_metrics["retrieval_mrr"]
+    current_recall = current_metrics["retrieval_recall_at_5"]
+    current_mrr = current_metrics["retrieval_mrr"]
+    if baseline_recall - current_recall > 0.02:
+        failures.append("retrieval_quality_regression")
+    if baseline_mrr - current_mrr > 0.02:
+        failures.append("retrieval_quality_regression")
+    baseline_p99 = baseline_metrics["run_active_execution_p99_ms"]
+    current_p99 = current_metrics["run_active_execution_p99_ms"]
+    if (
+        baseline_p99 > 0
+        and current_p99 > baseline_p99 * 1.10
+    ):
+        failures.append("run_p99_regression")
+    return list(dict.fromkeys(failures)), baseline_metrics
+
+
+def _authority_actual_value(
+    metric: str,
+    payload: dict,
+    dataset: JointEvalDataset,
+):
+    if metric.endswith("retrieval_case_coverage"):
+        return [
+            item.get("case_id")
+            for item in payload.get("retrieval_results", ())
+            if isinstance(item, dict)
+        ]
+    if metric.endswith("e2e_case_coverage"):
+        return [
+            item.get("case_id")
+            for item in payload.get("e2e_results", ())
+            if isinstance(item, dict)
+        ]
+    if metric == "baseline_performance_context":
+        return payload.get("performance_context")
+    return payload.get("metrics")
+
+
+def _authority_threshold_value(metric: str):
+    if metric.endswith("retrieval_case_coverage"):
+        return "exactly one result per ACTIVE retrieval case"
+    if metric.endswith("e2e_case_coverage"):
+        return "exactly one result per end-to-end case"
+    if metric == "baseline_performance_context":
+        return "same fixed performance context as baseline"
+    if metric == "run_p99_regression":
+        return "current_p99 <= baseline_p99 * 1.10"
+    if metric == "retrieval_quality_regression":
+        return "recall@5/MRR regression <= 0.02"
+    return "authoritative matching identity"
 
 
 def _critical_metric_failed(
