@@ -25,6 +25,7 @@ type ProviderRequest struct {
 	Model           string
 	Provider        string
 	Messages        []ProviderMessage
+	ResponseSchema  []byte
 	Temperature     float64
 	MaxOutputTokens int32
 	Timeout         time.Duration

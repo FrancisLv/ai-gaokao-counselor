@@ -24,7 +24,7 @@ message ChatRequest {
   common.v1.Trace trace      = 1;
   string          role       = 2; // profile|strategy|critic|report|verify —— 据此路由模型
   repeated Msg    messages   = 3;
-  string          json_schema = 4; // 非空则强制结构化输出
+  string          json_schema = 4; // 旧字段仅保留 wire 兼容；不能授权或覆盖已注册 schema
   double          temperature = 5;
   int32           max_tokens  = 6;
   int32           timeout_ms  = 7;
@@ -36,9 +36,10 @@ message ChatRequest {
   string logical_call_id         = 11;
   string prompt_template_key     = 12;
   string prompt_template_version = 13;
-  string response_schema_key     = 14;
+  string response_schema_key     = 14; // 结构化调用必须引用已注册版本
   string response_schema_version = 15;
   string data_classification     = 16;
+  map<string, string> prompt_variables = 17;
 }
 
 message ChatResponse {
@@ -60,6 +61,10 @@ message ChatResponse {
   string finish_reason           = 14;
   string release_id              = 15;
   google.protobuf.Struct structured_output = 16;
+  string prompt_template_key     = 17;
+  string prompt_template_version = 18;
+  string response_schema_key     = 19;
+  string response_schema_version = 20;
 }
 
 message Usage {
