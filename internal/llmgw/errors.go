@@ -33,6 +33,7 @@ const (
 	ReasonProviderBadRequest      = "PROVIDER_BAD_REQUEST"
 	ReasonProviderAuthFailed      = "PROVIDER_AUTH_FAILED"
 	ReasonSchemaUnsupported       = "PROVIDER_SCHEMA_UNSUPPORTED"
+	ReasonProviderTimeout         = "PROVIDER_TIMEOUT"
 	ReasonReconciliation          = "RECONCILIATION_REQUIRED"
 )
 
@@ -52,8 +53,22 @@ func (e *stableError) GRPCStatus() *status.Status {
 }
 
 func newStableError(code codes.Code, httpCode int, reason, message string) error {
+	return newStableErrorWithMetadata(code, httpCode, reason, message, nil)
+}
+
+func newStableErrorWithMetadata(
+	code codes.Code,
+	httpCode int,
+	reason string,
+	message string,
+	errorMetadata map[string]string,
+) error {
+	stable := kerrors.New(httpCode, reason, message)
+	if len(errorMetadata) > 0 {
+		stable = stable.WithMetadata(errorMetadata)
+	}
 	return &stableError{
-		err:  kerrors.New(httpCode, reason, message),
+		err:  stable,
 		code: code,
 	}
 }

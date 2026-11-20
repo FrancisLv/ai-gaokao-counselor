@@ -2122,7 +2122,56 @@ prompt/schema、敏感分类、缓存与流式能力。
 - 核心硬限制为两次 attempt；若未来需要同模型网络重试或多级 fallback，必须发布
   新契约与迁移，不能扩大现有 `max_attempts` 语义。
 
-## 63. M5a-03 注册 prompt 模板与 response schema
+## 63. M5a-04 未知计费保留与内部对账
+
+**日期与范围**：2026-11-20，issue #35。按 TDD 补齐 `Chat` 的供应商超时、
+usage 缺失/不可信与可能已受理断连语义，以及不新增公共 RPC 的内部追加式对账；
+不实现 #36 prompt/schema、#39 `StreamChat` 或真实供应商/账单拉取。
+
+### 契约与实现
+
+- Provider 内部响应新增显式 `UsageStatus`。`UNTRUSTED`、未知状态、全零且未声明
+  可信的 usage 与负数 usage 均进入 `PENDING_RECONCILIATION / PARTIAL_UNKNOWN`，
+  预算预留保持占用；不再把通用 `ErrProviderUnavailable` 猜成免费或普通不可用。
+- `context.DeadlineExceeded` 稳定映射为 `PROVIDER_TIMEOUT`，其他未分类异常映射
+  `RECONCILIATION_REQUIRED`。gRPC `ErrorInfo.metadata` 携带
+  `logical_call_id / attempt_id / ledger_entry_id`，并复用相同身份重放长期未知
+  状态；错误 message 不拼接供应商原始正文。
+- `migrations/33_llm_attempt_reconciliation.sql` 为 logical call 冻结包含全部
+  attempt 的 `reserved_provider_tokens`，并新建追加式
+  `llm_attempt_reconciliation`。迁移前旧行保持 `NULL`，不回填猜测值；对账对
+  缺少冻结总额的旧行明确拒绝。
+- `internal/llmgw/reconciliation.go::Reconcile` 是进程内 adapter：`CHARGED`
+  按调用冻结价格表的使用量原子释放预留并结算；`NO_CHARGE` 原子转
+  `FAILED_NO_CHARGE` 并释放。没有可信最终内容时 logical call 为
+  `FAILED / RECONCILED_CHARGED`，不返回伪造成功内容。
+- 实际 usage/cost 超过 logical 预留时，attempt 保持待对账，logical call 与预算
+  scope 锁存 `BUDGET_OVERRUN`，原预留不释放，后续 `Chat` 在 provider 零调用下
+  拒绝。相同依据重复对账先命中追加审计并返回原结果；不同依据返回
+  `RECONCILIATION_CONFLICT`。审计行保存原 attempt 状态、原错误码、原预留和明确
+  usage/cost，发布后 UPDATE/DELETE 被触发器拒绝。
+
+### 验证
+
+- 真实 PostgreSQL 公开 seam 测试继续从生成的 `LLMGatewayClient.Chat` 进入，
+  使用 Kratos gRPC + bufconn 与 fake provider；对账 adapter 仅通过内部 Go 接口
+  调用，不新增 proto RPC。
+- 覆盖 `PROVIDER_TIMEOUT` 身份 metadata、供应商正文不回显、长期未知重复请求
+  不新增 provider attempt、usage 缺失与显式不可信、明确计费、明确免计费、
+  同依据重复、异依据冲突、超预留封锁后续调用，以及审计原预留/原错误保留。
+- fresh/upgrade 迁移扩展到 `33`；既有 Chat、并发预算、主备切换、幂等和终态
+  重放测试全部回归通过。
+
+### 边界与风险
+
+- 当前生产 provider 仍为 fail-closed；真实 adapter 必须把供应商超时、未知 usage
+  和“是否可能已受理”忠实映射到内部状态，不能依据错误字符串猜测。
+- 对账输入 `evidence_ref` 只保存内部账单行或未受理证明引用，不自动抓取账单；
+  运营 adapter 负责在其可信边界内取得明确依据。
+- 升级前已存在的未知 attempt 没有历史 `reserved_provider_tokens` 可无损推导，
+  对账会 fail closed，需先完成人工账务审计，不能静默猜测回填。
+
+## 64. M5a-03 注册 prompt 模板与 response schema
 
 **日期与范围**：2026-11-20，issue #36。按 TDD 从生成的
 `LLMGatewayClient.Chat` 收紧 prompt/schema 授权：只允许 release 内注册且未撤销的
@@ -2171,7 +2220,7 @@ prompt/schema、敏感分类、缓存与流式能力。
 - fake provider 把注册 schema 作为内部请求参数，但不代表真实供应商已接线；
   生产入口仍 fail closed，`StreamChat` 仍返回未实现。
 
-## 64. M5a-06 六类数据分类与敏感原文边界
+## 65. M5a-06 六类数据分类与敏感原文边界
 
 **日期与范围**：2026-11-20，issue #37。按 TDD 从生成的
 `LLMGatewayClient.Chat` 收紧云端数据准入与供应商输出；不实现 #38 缓存，

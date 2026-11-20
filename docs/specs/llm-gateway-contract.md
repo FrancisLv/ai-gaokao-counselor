@@ -369,7 +369,7 @@ logical_call
   request_hash
   route_version
   cache_hit
-  status: RESERVED | IN_PROGRESS | SUCCEEDED | FAILED | PARTIAL_UNKNOWN
+  status: RESERVED | IN_PROGRESS | SUCCEEDED | FAILED | PARTIAL_UNKNOWN | BUDGET_OVERRUN
   reservation_micro_usd
   created_at / updated_at
 ```
@@ -394,12 +394,42 @@ provider_attempt
   error_code
 ```
 
+- `ProviderResponse` 必须显式标记 usage 是否可信；缺失、全零且未声明可信，
+  或 adapter 标记不可信的 usage 都不得进入成功结算。
 - 账本是预算结算的唯一来源；
 - `llm_call_log` 只能作为查询投影，不得以事后累加代替原子预占；
 - `llm_call_log` 缺失、延迟修复或投影值与权威账本不一致时，不得改变
   `llm_budget_scope / llm_logical_call / llm_provider_attempt` 的预算裁决；
 - 未知计费记录必须能按 `logical_call_id + attempt_id` 对账；
 - 任何预算覆盖不足必须报告，不能删除历史记录修正。
+
+### 9.3 未知计费对账
+
+```text
+ReconciliationRequest
+  logical_call_id
+  attempt_id
+  outcome: CHARGED | NO_CHARGE
+  input_tokens / output_tokens    # CHARGED 必填
+  evidence_ref                    # 明确账单行或未受理证明的内部引用
+```
+
+- 对账是 LLM Gateway 内部 adapter，不新增公共 RPC；调用方只通过 `Chat` 错误
+  details 中的 `logical_call_id / attempt_id / ledger_entry_id` 保留后续等待身份。
+- `CHARGED` 按 attempt 绑定的不可变价格表计算实际成本。成本与 token 均不超过
+  原 logical 预留时，在同一事务释放全部预留、增加实际结算，并追加
+  `llm_attempt_reconciliation` 审计行；没有可信最终内容时 logical call 保持
+  `FAILED / RECONCILED_CHARGED`，不能伪装成成功响应。
+- `NO_CHARGE` 在同一事务释放全部 logical 预留，attempt 与 logical call 进入
+  `FAILED_NO_CHARGE / FAILED`。
+- 实际 usage 超过原 logical 预留时，attempt 保持 `PENDING_RECONCILIATION`，
+  logical call 与预算作用域进入 `BUDGET_OVERRUN`，保留原预留并阻止后续新调用。
+- 首次受理时冻结 `reserved_provider_tokens`，包含全部允许 attempt 的 token
+  预占。迁移前旧行保持 `NULL`，不猜测回填；对账明确拒绝缺少该审计总额的旧行。
+- attempt、logical call 与预算在同一行锁事务中转换；重复提交相同依据返回原
+  结果，不同依据返回 `RECONCILIATION_CONFLICT`，不得二次扣费或二次释放。
+- 审计行追加后不可更新或删除，至少保留原 attempt 状态、原错误码、原预留金额、
+  明确 usage/cost 和 evidence ref。
 
 ## 10. 数据与日志
 
@@ -427,7 +457,12 @@ provider_attempt
 | `PROVIDER_RATE_LIMITED` | 可重试或切换备用模型 |
 | `PROVIDER_UNAVAILABLE` | 可重试或失败 |
 | `STREAM_INTERRUPTED` | 保持预占待对账 |
+| `RECONCILIATION_REQUIRED` | 费用未知，保持预占并等待内部对账 |
 | `BUDGET_OVERRUN` | 停止后续调用并进入人工对账 |
+
+`PROVIDER_TIMEOUT` 与 `RECONCILIATION_REQUIRED` 是可能已计费的受控错误，错误
+details 必须携带 `logical_call_id`、`attempt_id` 和 `ledger_entry_id`。错误
+message 不得拼接供应商原始正文。
 
 ## 12. 验收测试
 
