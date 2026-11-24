@@ -89,10 +89,37 @@ def populate_interrupt(
         ProfileFindingWire.from_mapping(finding).populate_proto(
             target.findings.add()
         )
+    region = payload.get("region_clarification")
+    if isinstance(region, dict):
+        populate_region_clarification(target.region_clarification, region)
     if created_at is not None:
         target.created_at.FromDatetime(created_at)
     if expires_at is not None:
         target.expires_at.FromDatetime(expires_at)
+
+
+def populate_region_clarification(
+    target,
+    payload: dict[str, Any],
+) -> None:
+    target.clarification_id = str(payload.get("clarification_id") or "")
+    target.clarification_kind = str(
+        payload.get("clarification_kind") or ""
+    )
+    target.reason_code = str(payload.get("reason_code") or "")
+    target.term = str(payload.get("term") or "")
+    target.operation = str(payload.get("operation") or "")
+    target.catalog_version = str(payload.get("catalog_version") or "")
+    target.provinces.extend(
+        str(item) for item in payload.get("provinces") or ()
+    )
+    for preset in payload.get("presets") or ():
+        item = target.presets.add()
+        item.id = str(preset.get("id") or "")
+        item.name = str(preset.get("name") or "")
+        item.provinces.extend(
+            str(province) for province in preset.get("provinces") or ()
+        )
 
 
 def populate_interrupt_from_event(target, payload: dict[str, Any]) -> None:

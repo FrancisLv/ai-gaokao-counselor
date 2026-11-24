@@ -9,6 +9,141 @@ from run_lifecycle_support import RunLifecyclePostgresTest
 
 
 class ProfileLifecycleTests(RunLifecyclePostgresTest):
+    async def test_initial_macro_region_is_resolved_before_confirmation(self):
+        from app.run_lifecycle import (
+            RegionAnswer,
+            ResumeRunCommand,
+            RunLifecycle,
+            StructuredProfileInput,
+            SubmitRunCommand,
+        )
+        from app.run_lifecycle.macro_region import default_catalog
+
+        await self.seed_release()
+        lifecycle = RunLifecycle(self.dsn, auto_profile=True)
+        self.addAsyncCleanup(lifecycle.close)
+        receipt = await lifecycle.SubmitRun(
+            SubmitRunCommand(
+                principal_id="principal-a",
+                session_id=None,
+                task_kind="GENERATE_PLAN",
+                input=StructuredProfileInput(
+                    province="湖南",
+                    application_year=2025,
+                    category="物理类",
+                    batch="本科批",
+                    score=600,
+                    subjects=("物理", "化学", "生物"),
+                ),
+                idempotency_key="macro-intake-submit",
+                user_message="我不想去北方读大学",
+            )
+        )
+        asking = await self._wait_for_interrupt(lifecycle, receipt.run_id)
+        clarification = asking.current_interrupt.payload[
+            "region_clarification"
+        ]
+        self.assertEqual(
+            clarification["reason_code"],
+            "MACRO_REGION_SCOPE_UNRESOLVED",
+        )
+        old_version = UUID(asking.current_interrupt.payload["profile_version"])
+
+        await lifecycle.ResumeRun(
+            ResumeRunCommand(
+                principal_id="principal-a",
+                run_id=receipt.run_id,
+                interrupt_id=asking.current_interrupt.interrupt_id,
+                expected_state_version=asking.state_version,
+                profile_version=old_version,
+                answer=RegionAnswer(
+                    clarification_id=clarification["clarification_id"],
+                    provinces=("北京", "天津", "河北", "山西", "内蒙古"),
+                    preset_ids=("north_china",),
+                    catalog_version=default_catalog().version,
+                ),
+                idempotency_key="macro-intake-answer",
+            )
+        )
+        confirmation = await self._wait_for_interrupt(
+            lifecycle,
+            receipt.run_id,
+        )
+        self.assertEqual(confirmation.current_interrupt.kind, "PROFILE_CONFIRM")
+        self.assertEqual(
+            set(
+                confirmation.current_interrupt.payload["fields"][
+                    "preferences.excluded_provinces"
+                ]["value"]
+            ),
+            {"北京", "天津", "河北", "山西", "内蒙古"},
+        )
+
+    async def test_initial_macro_region_can_be_explicitly_cancelled(self):
+        from app.run_lifecycle import (
+            RegionAnswer,
+            ResumeRunCommand,
+            RunLifecycle,
+            StructuredProfileInput,
+            SubmitRunCommand,
+        )
+        from app.run_lifecycle.macro_region import default_catalog
+
+        await self.seed_release()
+        lifecycle = RunLifecycle(self.dsn, auto_profile=True)
+        self.addAsyncCleanup(lifecycle.close)
+        receipt = await lifecycle.SubmitRun(
+            SubmitRunCommand(
+                principal_id="principal-a",
+                session_id=None,
+                task_kind="GENERATE_PLAN",
+                input=StructuredProfileInput(
+                    province="湖南",
+                    application_year=2025,
+                    category="物理类",
+                    batch="本科批",
+                    score=600,
+                    subjects=("物理", "化学", "生物"),
+                ),
+                idempotency_key="macro-intake-cancel-submit",
+                user_message="我不想去北方读大学",
+            )
+        )
+        asking = await self._wait_for_interrupt(lifecycle, receipt.run_id)
+        clarification = asking.current_interrupt.payload[
+            "region_clarification"
+        ]
+        await lifecycle.ResumeRun(
+            ResumeRunCommand(
+                principal_id="principal-a",
+                run_id=receipt.run_id,
+                interrupt_id=asking.current_interrupt.interrupt_id,
+                expected_state_version=asking.state_version,
+                profile_version=UUID(
+                    asking.current_interrupt.payload["profile_version"]
+                ),
+                answer=RegionAnswer(
+                    clarification_id=clarification["clarification_id"],
+                    provinces=(),
+                    preset_ids=(),
+                    catalog_version=default_catalog().version,
+                    cancel_region_restriction=True,
+                ),
+                idempotency_key="macro-intake-cancel-answer",
+            )
+        )
+        confirmation = await self._wait_for_interrupt(
+            lifecycle,
+            receipt.run_id,
+        )
+        self.assertEqual(confirmation.current_interrupt.kind, "PROFILE_CONFIRM")
+        self.assertEqual(
+            confirmation.current_interrupt.payload["fields"][
+                "preferences.excluded_provinces"
+            ]["value"],
+            [],
+        )
+
     async def test_complete_profile_opens_a_versioned_confirmation_interrupt(self):
         from app.run_lifecycle import RunLifecycle, StructuredProfileInput, SubmitRunCommand
 

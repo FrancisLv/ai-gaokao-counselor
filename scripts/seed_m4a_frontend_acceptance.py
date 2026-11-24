@@ -201,6 +201,10 @@ def seed(dsn: str, *, reset: bool = False) -> None:
                 ),
             )
             conn.execute(
+                "SELECT ensure_region_preset_catalog(%s)",
+                (release_id,),
+            )
+            conn.execute(
                 """
                 INSERT INTO release_scope (
                     release_id, province, application_year, category, batch

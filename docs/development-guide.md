@@ -27,7 +27,7 @@
 | orchestrator | gRPC 入口、图状态及部分节点、导入与图构建测试 | 完整策略/评审/报告链、真实 HITL 挂起恢复、检查点、algo 业务接线 |
 | RAG | 章程解析切分、元数据、Embedding 封装、导入/检索辅助脚本 | 本轮未执行真实模型推理、入库或检索质量评测；复杂嵌套编号仍有限制 |
 | gateway | HTTP 契约和服务入口 | 接口仍返回 TODO，鉴权、会话、SSE 和编排调用未完成 |
-| llm-gateway | 类型化 `Chat/StreamChat`、角色/模型/价格路由、注册 prompt/schema、六类数据分类、原子预算、主备 attempt、未知费用对账、release-bound 缓存、类型化流和真实 PG 生成客户端测试 | 生产 provider 固定 fail closed；真实 provider/账单 adapter、真实付费模型验证和 orchestrator 入口接线未完成；`DELTA` 是最终守卫后的完整内容块，不是供应商 token 实时转发 |
+| llm-gateway | 类型化 `Chat/StreamChat`、角色/模型/价格路由、注册 prompt/schema、六类数据分类、原子预算、主备 attempt、未知费用对账、release-bound 缓存、真实 PG 生成客户端测试，以及可配置的 DeepSeek OpenAI-compatible provider | 真实付费调用需要 `DEEPSEEK_API_KEY`；无 key 时保持 fail closed。`DELTA` 是最终守卫后的完整内容块，不是供应商 token 实时转发 |
 
 **本轮真正验证的链路**是 Go/Python 测试客户端 → 新构建的 algo 子进程 → 本地 PostgreSQL → 四 RPC。它不是浏览器到完整咨询报告的全系统闭环。图能够构建、返回 `DONE` 事件，也不代表咨询流程已完成。
 
@@ -116,7 +116,7 @@ Go 领域类型使用嵌入结构，例如 `cwp.Probability`；protobuf 使用�
 
 报考年为 Y、窗口为 W 时，只取 `[Y-W, Y-1]` 的历史。候选基础取上一年且须在报考年有计划，不读取报考年录取线来预测自身。缺报考年一分一段表或整批招生计划直接报错，不偷偷回退到库内最大年份。
 
-概率采用**加权历史命中率**：在历史某年，用户百分位达到组线就记一次命中，较近记录权重更高；计划变化修正的是计算副本。返回的 `history_data` 保留原始位次/人数及其百分位，`data_years` 与实际有效历史一致。`basis.sample_years` 是配置窗口，不表示每个候选每年都有数据。
+概率采用**加权历史命中率**：在历史某年，用户百分位达到组线就记一次命中，较近记录权重更高；计划变化修正的是计算副本。组线取同一年、同院校专业组内最低录取分及其同条记录位次，不取 `MIN(min_rank)`。返回的 `history_data` 保留最低分、对应位次、人数及其百分位，`data_years` 与实际有效历史一致。`basis.sample_years` 是配置窗口，不表示每个候选每年都有数据。
 
 当前缺年份时按有效记录下标衰减，而非自然年份差；缺历史、不可靠位次/人数的记录不能用于估算。同组院校 ID/名称冲突或主键缺失的候选保守排除，等待离线数据治理，不任取一个院校身份。
 
@@ -167,7 +167,9 @@ DSN 环境变量优先于 YAML；实际连接凭据只放本地环境，生产�
 - 最大志愿数和最少保底是 config-only，不会按用户风险偏好自动重新推导；调整两者须保持合法关系。
 - 风险偏好影响冲稳保配比，不降低保底红线；请求内 `per_category_limit` 当前不生效，MVP 保持全量候选。
 
-`make run-orchestrator PY="$PY"` 只启动已有编排骨架，不代表补齐了 TODO 节点。llm-gateway 的 fake-provider 真实 PG 套件通过 `LLMGW_TEST_DSN` 运行；生产装配保持 fail-closed，不读取 API key、不调用付费模型。普通与流式主行为测试都从生成的 `LLMGatewayClient` 进入，强结构化账本查询走独立 `internal/llmgw/data/queries/` 与 sqlc 生成包。
+`make run-orchestrator PY="$PY"` 只启动已有编排骨架，不代表补齐了 TODO 节点。llm-gateway 的 fake-provider 真实 PG 套件通过 `LLMGW_TEST_DSN` 运行；普通装配默认 fail closed。启用真实模型时同时设置 `LLM_PROVIDER_MODE=deepseek`、`DEEPSEEK_API_KEY` 和 `LLMGW_DSN`，并通过 `make llm-release-seed` 注册当前 release 的 route/prompt/schema/price。普通与流式主行为测试都从生成的 `LLMGatewayClient` 进入，强结构化账本查询走独立 `internal/llmgw/data/queries/` 与 sqlc 生成包。
+
+DeepSeek 结构化请求会显式发送 `thinking: {"type": "disabled"}`，并把 release 注册的 response schema 原文附加到 trusted system message；最终输出仍由服务端 jsonschema 二次校验。当前 report 路由为 8192 token / 30 秒，profile 路由为 4096 token / 20 秒；调整 provider 推理预算时须同步 orchestrator adapter 与 release route，避免调用方上限反向截断。
 
 ## 6. 可重复测试与性能验收
 
@@ -234,7 +236,7 @@ docker run --rm --network none --read-only --tmpfs /tmp \
 
 algo 冒烟采用临时 YAML（志愿上限12、保底数3）、`-p 127.0.0.1::9002` 随机回环端口、`-conf` 挂载配置，以及经 `host.docker.internal` 访问本机 PostgreSQL 的只读 DSN。宿主和 Python 镜像分别执行 `tests/smoke_algo.py`，四 RPC/审计/错误详情均通过。测试容器和临时配置已清理；没有重启旧服务或修改数据库。
 
-Compose 含独立数据库初始化和基础设施，开发默认复用本机 PostgreSQL，不需要 `make up`。**未验证**整套 Compose 服务互联与初始化、Linux/amd64、GPU、真实模型、完整咨询闭环；gateway/orchestrator 的端口就绪不等于业务完成。llm-gateway 的治理 seam 已由真实 PG fake-provider 测试覆盖，但生产 provider 仍 fail closed，真实计费、账单拉取与实时 token 流均未接线。
+Compose 含独立数据库初始化和基础设施，开发默认复用本机 PostgreSQL，不需要 `make up`。**未验证**整套 Compose 服务互联与初始化、Linux/amd64、GPU、真实付费模型质量和完整咨询闭环；gateway/orchestrator 的端口就绪不等于业务完成。llm-gateway 的治理 seam 已由真实 PG fake-provider 测试覆盖，DeepSeek provider 已实现；真实调用需注入 key，账单拉取与实时 token 流仍未接线。
 
 ## 7. 常见问题与修复证据
 

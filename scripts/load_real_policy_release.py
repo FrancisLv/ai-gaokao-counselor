@@ -292,6 +292,10 @@ def load(
                 datetime.now(timezone.utc),
             ),
         )
+        target.execute(
+            "SELECT ensure_region_preset_catalog(%s)",
+            (release_id,),
+        )
         _executemany(
             target,
             """

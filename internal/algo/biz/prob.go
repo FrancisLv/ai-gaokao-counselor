@@ -6,8 +6,18 @@ import "math"
 // historyMap/planMap 由 data 层（AdmissionRepo）查好后注入，本层只做确定性算术。
 // 可复现纪律（DH1/DH3）：单线程、按 candidates 输入序 append、只按 key 查 map（禁 map 迭代产序）。
 
-// methodWeightedHit 概率计算方法标注（ProbEstimate.Method，满足可审计原则）。
-const methodWeightedHit = "weighted_hit"
+const (
+	// methodWeightedHit 概率计算方法标注（ProbEstimate.Method，满足可审计原则）。
+	methodWeightedHit = "weighted_hit"
+	minProbability    = 0.01
+	maxProbability    = 0.99
+	oneYearCap        = 0.75
+	twoYearCap        = 0.95
+	criticalMargin    = 0.002 // 0.2 个百分点
+	criticalCredit    = 0.5
+	minPlanFactor     = 0.5
+	maxPlanFactor     = 1.5
+)
 
 // DeriveSchoolTier 从 university 三个布尔派生学校层次标签（§3.2 Step1 方案 B：biz 纯函数，可单测）。
 // 优先级 985 > 211 > 双一流 > 普通，与 utility tier 打分（1.0/0.8/0.6/0.4）排序一致。
@@ -26,10 +36,9 @@ func DeriveSchoolTier(is985, is211, isDualClass bool) string {
 	}
 }
 
-// calculateProbability 计算单个候选的录取概率（加权命中率法，二元命中，§3.2 Step2）。
-// 核心思想：统计历史上用户「够得着」（用户百分位 ≤ 录取百分位）的年份加权比例。
+// calculateProbability 计算单个候选的录取概率（加权命中率法，§3.2 Step2）。
+// 用户与历史百分位相差不超过 0.1 个百分点时视为临界，记一半命中权重。
 // history 须按年份降序（index 越小越近、权重 decay^i 越高），由 data 层 ORDER BY year DESC 保证。
-// 注：二元命中 → 概率为有限离散值，同档内区分度由 utility 兜底；连续性修正为后续优化（§6.1）。
 func calculateProbability(userPercentile float64, history []AdmissionRecord, config RecommendConfig) float64 {
 	if len(history) == 0 {
 		return 0.01 // 无历史数据，返回最低概率
@@ -40,14 +49,25 @@ func calculateProbability(userPercentile float64, history []AdmissionRecord, con
 	for i, h := range history {
 		weight := math.Pow(config.DecayFactor, float64(i))
 		sumWeight += weight
-		if userPercentile <= h.MinPercentile { // 用户百分位 ≤ 录取百分位 → 「够得着」
+		switch difference := h.MinPercentile - userPercentile; {
+		case difference >= criticalMargin:
 			sumHit += weight
+		case difference > -criticalMargin:
+			sumHit += weight * criticalCredit
 		}
 	}
 
 	prob := sumHit / sumWeight
+	// 历史越少，极端概率的可信度越低；单年/两年不能直接给出 99%。
+	switch len(history) {
+	case 1:
+		// 单年强命中仍可进入稳档，但用 75% 上限表达样本不确定性。
+		prob = math.Min(prob, oneYearCap)
+	case 2:
+		prob = math.Min(prob, twoYearCap)
+	}
 	// 限制到 [1%, 99%]：最低 1% 避免绝望、最高 99% 避免过度承诺
-	return math.Max(0.01, math.Min(0.99, prob))
+	return math.Max(minProbability, math.Min(maxProbability, prob))
 }
 
 // batchEstimateProb 对一批候选逐组算概率（biz 纯函数，§3.2 Step2）。
@@ -82,14 +102,12 @@ func batchEstimateProb(candidates []Candidate, userPercentile float64,
 		// 审计保存原始 rank/totalCount 百分位，不混入下面的计划修正；独立拷贝避免共享污染。
 		cand.HistoryData = append([]AdmissionRecord(nil), history...)
 
-		// 计划修正：用「报考年 vs 报考年-1」的计划变化率统一修正各年百分位（近似，不逐年还原）
+		// 计划数只作为报告风险提示；不修改历史百分位和概率数值。
 		if plan, ok := planMap[key]; ok && plan.PrevPlanCount > 0 {
 			cand.PlanCount = plan.PlanCount
 			cand.PlanCountKnown = true
-			change := float64(plan.PlanCount-plan.PrevPlanCount) / float64(plan.PrevPlanCount)
-			for i := range history {
-				history[i].MinPercentile *= (1 + change*config.PlanAdjust)
-			}
+			cand.PreviousPlanCount = plan.PrevPlanCount
+			cand.PreviousPlanCountKnown = true
 		} else if plan, ok := planMap[key]; ok {
 			cand.PlanCount = plan.PlanCount
 			cand.PlanCountKnown = true

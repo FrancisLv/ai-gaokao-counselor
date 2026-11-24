@@ -120,8 +120,8 @@ func TestRegression_HistoryAudit(t *testing.T) {
 	if len(res) != 1 || len(res[0].HistoryData) != 1 {
 		t.Fatalf("缺少历史审计: %+v", res)
 	}
-	if res[0].HistoryData[0].MinPercentile != .4 || res[0].Probability != .99 {
-		t.Fatal("审计原始百分位与计划修正混淆")
+	if res[0].HistoryData[0].MinPercentile != .4 || res[0].Probability != .01 {
+		t.Fatal("审计原始百分位或去计划修正概率错误")
 	}
 	res[0].HistoryData[0].Year = 0
 	if !reflect.DeepEqual(history[key], []AdmissionRecord{{Year: 2024, GroupMinRank: 400, TotalCount: 1000}}) {
@@ -137,8 +137,31 @@ func TestSystem_DirtyHistory(t *testing.T) {
 		{Year: 2022, GroupMinRank: 500, TotalCount: 1000},
 	}}
 	res := batchEstimateProb([]Candidate{{UniversityCode: "A", MajorGroup: "1"}}, .4, history, nil, testRecommendConfig())
-	if len(res) != 1 || res[0].DataYears != 1 || len(res[0].HistoryData) != 1 || res[0].Probability != .99 {
+	if len(res) != 1 || res[0].DataYears != 1 || len(res[0].HistoryData) != 1 || res[0].Probability != .75 {
 		t.Fatalf("脏历史参与计算或审计不一致: %+v", res)
+	}
+}
+
+func TestSystem_SingleYearFarAboveHistoryRemainsStable(t *testing.T) {
+	key := GroupKey{"A", "1"}
+	history := map[GroupKey][]AdmissionRecord{key: {
+		{Year: 2024, GroupMinRank: 500, TotalCount: 1000},
+	}}
+	res := RecommendCandidates(
+		[]Candidate{{UniversityCode: "A", MajorGroup: "1"}},
+		0.10,
+		history,
+		nil,
+		testRecommendConfig(),
+	)
+	if res.StableTotal != 1 || len(res.StableCandidates) != 1 {
+		t.Fatalf("远高于单年历史线的候选应保留稳档: %+v", res)
+	}
+	if res.RushTotal != 0 || len(res.RushCandidates) != 0 {
+		t.Fatalf("远高于单年历史线的候选不应降为冲档: %+v", res)
+	}
+	if got := res.StableCandidates[0].Probability; got != 0.75 {
+		t.Fatalf("单年强命中概率 = %f, want 0.75", got)
 	}
 }
 

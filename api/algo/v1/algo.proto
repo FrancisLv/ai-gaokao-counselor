@@ -31,6 +31,10 @@ service Algo {
 
   // 志愿表排序与配比（约束满足 + 启发式搜索）：从候选池生成成品志愿表，含解析式滑档率验证 Π(1−pᵢ)。
   rpc OptimizeWishlist(OptimizeWishlistRequest) returns (OptimizeWishlistReply);
+
+  // 汇总用户已选专业组的草稿层风险；不重排候选、不改变任何单项概率。
+  rpc SummarizeWishlistDraft(SummarizeWishlistDraftRequest)
+      returns (SummarizeWishlistDraftReply);
 }
 
 // ======== 领域 DTO（Go biz struct 的 wire 镜像；service 层负责 biz↔pb 映射）========
@@ -39,9 +43,19 @@ service Algo {
 message UserProfile {
   string risk_appetite = 1;             // 风险偏好：conservative/balanced/aggressive
   repeated string priority_dims = 2;    // 优先维度：tier/major/location/strength（与 utility 维度 key 统一）
-  repeated string interests = 3;        // 兴趣专业方向（LLM 从对话提取）
+  repeated string interests = 3;        // 兴趣专业：服务端确认的受控专业名称
   repeated string preferred_cities = 4; // 偏好城市
   repeated string preferred_tiers = 5;  // 偏好学校层次：985/211/双一流
+  repeated string required_cities = 6;  // 硬筛选：只看这些城市
+  repeated string excluded_cities = 7;  // 硬筛选：排除这些城市
+  repeated string required_tiers = 8;   // 硬筛选：只看这些学校层次
+  repeated string required_major_keywords = 9;   // 硬筛选：组内至少一个专业命中
+  repeated string excluded_major_keywords = 10;  // 硬筛选：组内至少一个专业未命中
+  repeated string excluded_universities = 11;    // 硬筛选：排除院校名称命中的候选
+  repeated string excluded_major_names = 12;     // 硬筛选：按专业名称精确排除
+  repeated string required_provinces = 13;       // 硬筛选：只看院校所在这些省份
+  repeated string excluded_provinces = 14;       // 硬筛选：排除院校所在这些省份
+  repeated string required_major_names = 15;     // 硬筛选：保留名称精确命中的专业
 }
 
 // MajorDetail 组内专业详情（major_admission JOIN major）。
@@ -56,15 +70,28 @@ message MajorDetail {
   int32 min_rank = 8;     // 该专业历史最低位次（仅展示，不用于概率计算）
   int32 admit_count = 9;  // 录取人数
   bool in_current_plan = 10; // 该专业代码是否存在于报考年招生计划
+  bool recommended = 11;  // 是否属于系统默认拟填专业（每组至多 6 个）
+  int32 recommendation_rank = 12; // 默认拟填顺序，1..6；0 表示未推荐
+  optional double admission_probability = 13; // 专业级历史估计；缺失表示 UNKNOWN
+  int32 probability_data_years = 14; // 专业级概率有效历史年数
+  optional int32 plan_count = 15; // 报考年该专业招生计划数；缺失表示 UNKNOWN
+  optional int32 reference_year = 16; // min_score/min_rank 对应的历史年份
+  bool has_tuition = 17; // tuition 是否有可靠值；false 时不得展示 0 元
+  bool selectable = 18; // 资格是否允许用户选择拟填
+  string unavailable_reason = 19; // 不可选时的稳定、简短原因
+  repeated int32 probability_sample_years = 20; // 专业概率实际有效历史年份（升序）
 }
 
 // AdmissionRecord 某年录取记录（专业组维度）。
 message AdmissionRecord {
   int32 year = 1;
-  int32 group_min_rank = 2;  // 组投档线位次（组内最低位次）
+  int32 group_min_score = 6; // 专业组最低录取分（组内最低分）
+  int32 group_min_rank = 2;  // 该最低分同条记录的最低录取位次
   int32 total_count = 3;     // 该省该年总人数（用于算百分位）
   double min_percentile = 4; // 组投档线百分位 = group_min_rank / total_count
   int32 enroll_count = 5;    // 招生人数
+  string mapping_method = 7; // EXACT_CODE / MAJOR_NAME_JACCARD
+  double mapping_confidence = 8; // 跨年专业组身份映射置信度 [0,1]
 }
 
 // Candidate 候选（院校专业组）。
@@ -84,6 +111,8 @@ message Candidate {
   int32 ruanke_rank = 13;           // 软科排名
   repeated AdmissionRecord history_data = 14; // 历史录取数据（service 层填充）
   optional int32 plan_count = 15;   // 报考年该院校专业组招生计划数；缺失表示 UNKNOWN
+  optional int32 previous_plan_count = 16; // 上一年该院校专业组计划数
+  optional double plan_adjust_factor = 17; // Deprecated：兼容保留，当前不再生成
 }
 
 // ProbEstimate 概率估计结果。
@@ -341,4 +370,35 @@ message OptimizeWishlistRequest {
 }
 message OptimizeWishlistReply {
   WishlistResult wishlist = 1; // 冲/稳/保配比与梯度平滑后的成品志愿表（含解析式滑档率 Π(1−pᵢ)）
+}
+
+// DraftGroupRiskInput 是草稿风险汇总的最小输入；身份用于去重，概率/分档/效用来自正式结果。
+message DraftGroupRiskInput {
+  string university_code = 1;
+  string major_group = 2;
+  double probability = 3; // 组级录取概率 [0.01, 0.99]
+  string category = 4;    // 冲/稳/保
+  optional double utility_score = 5; // 缺失时无法计算期望满意度，但不影响其他风险项
+}
+
+message WishlistDraftRisk {
+  int32 group_count = 1;
+  int32 rush_count = 2;
+  int32 stable_count = 3;
+  int32 safe_tier_count = 4;
+  int32 safe_guard_count = 5;
+  int32 safe_guard_target = 6;
+  bool safe_guard_ok = 7;
+  double slip_rate = 8;
+  optional double expected_satisfaction = 9;
+}
+
+message SummarizeWishlistDraftRequest {
+  common.v1.Trace trace = 1;
+  string release_id = 2;
+  repeated DraftGroupRiskInput groups = 3;
+}
+
+message SummarizeWishlistDraftReply {
+  WishlistDraftRisk summary = 1;
 }

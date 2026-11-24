@@ -12,4 +12,8 @@ llm:
   database:
     dsn_env: LLMGW_DSN
   provider:
-    mode: fail_closed # M5a-01 只有测试替身，真实 provider 在后续增量接线
+    # fail_closed | deepseek；也可用 LLM_PROVIDER_MODE 覆盖。
+    mode: fail_closed
+    base_url_env: DEEPSEEK_BASE_URL
+    api_key_env: DEEPSEEK_API_KEY
+    http_timeout: 60s

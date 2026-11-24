@@ -13,7 +13,7 @@ data:
 algo:
   window_years: 3
   decay_factor: 0.7
-  plan_adjust: 0.5
+  plan_adjust: 0.5           # 兼容保留；当前不再参与概率计算
   rush_threshold: 0.2
   stable_threshold: 0.5
   safe_threshold: 0.8

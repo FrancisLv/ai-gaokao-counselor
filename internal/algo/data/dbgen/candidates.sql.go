@@ -7,29 +7,64 @@ package dbgen
 
 import (
 	"context"
-
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const listCandidateGroups = `-- name: ListCandidateGroups :many
-WITH reliable_groups AS (
-    SELECT university_code, major_group
-    FROM major_admission
+WITH target_groups AS (
+    SELECT
+        MIN(university_code)::text AS university_code,
+        MIN(major_group)::text AS major_group,
+        MIN(university_id)::bigint AS university_id,
+        MIN(university_name)::text AS university_name
+    FROM enrollment_plan
     WHERE release_id = $1::text
       AND province = $2::text AND category = $3::text
       AND batch = $4::text AND year = $5::int
+      AND NULLIF(BTRIM(major_code), '') IS NOT NULL
       AND NULLIF(BTRIM(university_code), '') IS NOT NULL
       AND NULLIF(BTRIM(major_group), '') IS NOT NULL
     GROUP BY university_code, major_group
     HAVING COUNT(DISTINCT university_id) = 1 AND COUNT(DISTINCT university_name) = 1
-       AND COUNT(university_id) = COUNT(*)
+),
+mapped_history AS (
+    SELECT
+        lineage.target_university_code,
+        lineage.target_major_group,
+        admission.min_score,
+        admission.min_rank,
+        ROW_NUMBER() OVER (
+            PARTITION BY
+                lineage.target_university_code,
+                lineage.target_major_group
+            ORDER BY
+                admission.min_score ASC,
+                admission.min_rank DESC,
+                admission.major_code ASC NULLS LAST,
+                admission.id ASC
+        ) AS major_rank
+    FROM admission_group_lineage lineage
+    JOIN major_admission admission
+      ON admission.release_id = lineage.release_id
+     AND admission.province = $2::text
+     AND admission.category = lineage.target_category
+     AND admission.batch = lineage.target_batch
+     AND admission.year = lineage.history_year
+     AND admission.university_code = lineage.history_university_code
+     AND admission.major_group = lineage.history_major_group
+    WHERE lineage.release_id = $1::text
+      AND lineage.target_year = $5::int
+      AND lineage.target_category = $3::text
+      AND lineage.target_batch = $4::text
+      AND lineage.history_year = $6::int
+      AND admission.min_score IS NOT NULL
+      AND admission.min_rank IS NOT NULL
 )
 SELECT
-    ma.university_id,
-    COALESCE(ma.university_code, '') AS university_code,
-    COALESCE(ma.university_name, '') AS university_name,
-    COALESCE(ma.major_group, '') AS major_group,
-    MIN(ma.min_rank)::int AS group_min_rank,
+    target.university_id,
+    target.university_code,
+    target.university_name,
+    target.major_group,
+    history.min_rank::int AS group_min_rank,
     COALESCE(u.is_985, false) AS is_985,
     COALESCE(u.is_211, false) AS is_211,
     COALESCE(u.is_dual_class, false) AS is_dual_class,
@@ -38,24 +73,13 @@ SELECT
     COALESCE(u.num_master, 0)::int AS num_master,
     COALESCE(u.num_doctor, 0)::int AS num_doctor,
     COALESCE(u.ruanke_rank, 0)::int AS ruanke_rank
-FROM major_admission ma
-JOIN reliable_groups rg USING (university_code, major_group)
-JOIN university u ON ma.university_id = u.id
-WHERE ma.release_id = $1::text
-  AND ma.province = $2::text AND ma.category = $3::text AND ma.batch = $4::text
-  AND ma.year = $5::int
-  AND ma.min_rank IS NOT NULL
-  AND EXISTS (
-      SELECT 1 FROM enrollment_plan ep
-      WHERE ep.university_code = ma.university_code AND ep.major_group = ma.major_group
-        AND ep.release_id = $1::text
-        AND ep.province = $2::text AND ep.category = $3::text
-        AND ep.batch = $4::text AND ep.year = $6::int
-  )
-GROUP BY ma.university_id, ma.university_code, ma.university_name, ma.major_group,
-         u.is_985, u.is_211, u.is_dual_class, u.city, u.province,
-         u.num_master, u.num_doctor, u.ruanke_rank
-ORDER BY ma.university_code, ma.major_group
+FROM target_groups target
+JOIN mapped_history history
+  ON history.target_university_code = target.university_code
+ AND history.target_major_group = target.major_group
+ AND history.major_rank = 1
+JOIN university u ON target.university_id = u.id
+ORDER BY target.university_code, target.major_group
 `
 
 type ListCandidateGroupsParams struct {
@@ -63,12 +87,12 @@ type ListCandidateGroupsParams struct {
 	Province    string
 	Category    string
 	Batch       string
-	HistoryYear int32
 	ReportYear  int32
+	HistoryYear int32
 }
 
 type ListCandidateGroupsRow struct {
-	UniversityID   pgtype.Int8
+	UniversityID   int64
 	UniversityCode string
 	UniversityName string
 	MajorGroup     string
@@ -83,16 +107,16 @@ type ListCandidateGroupsRow struct {
 	RuankeRank     int32
 }
 
-// 用上一年的录取数据建立专业组骨架，仅保留报考年仍有招生计划的组。
-// 同一组的院校 ID/名称必须一致，且组键非空；不任取冲突记录。
+// 以报考年计划组为候选身份，经 release-bound lineage 映射到上一年录取组。
+// 历史专业明细不决定当年组成员。
 func (q *Queries) ListCandidateGroups(ctx context.Context, arg ListCandidateGroupsParams) ([]ListCandidateGroupsRow, error) {
 	rows, err := q.db.Query(ctx, listCandidateGroups,
 		arg.ReleaseID,
 		arg.Province,
 		arg.Category,
 		arg.Batch,
-		arg.HistoryYear,
 		arg.ReportYear,
+		arg.HistoryYear,
 	)
 	if err != nil {
 		return nil, err
@@ -128,50 +152,72 @@ func (q *Queries) ListCandidateGroups(ctx context.Context, arg ListCandidateGrou
 
 const listCandidateMajors = `-- name: ListCandidateMajors :many
 SELECT
-    COALESCE(ma.university_code, '') AS university_code,
-    COALESCE(ma.major_group, '') AS major_group,
-    COALESCE(ma.major_code, '') AS major_code,
-    COALESCE(ma.major_name, '') AS major_name,
-    COALESCE(ma.subject_req, '') AS subject_req,
-    COALESCE(ma.major_note, '') AS major_note,
-    COALESCE(ma.min_score, 0)::int AS min_score,
-    COALESCE(ma.min_rank, 0)::int AS min_rank,
-    COALESCE(ma.admit_count, 0)::int AS admit_count,
-    COALESCE(m.duration, '') AS duration,
-    COALESCE(m.tuition, 0)::float8 AS tuition,
-    EXISTS (
-        SELECT 1 FROM enrollment_plan ep
-        WHERE ep.university_code = ma.university_code
-          AND ep.major_group = ma.major_group
-          AND ep.major_code = ma.major_code
-          AND ep.release_id = $1::text
-          AND ep.province = $2::text
-          AND ep.category = $3::text
-          AND ep.batch = $4::text
-          AND ep.year = $5::int
-    ) AS in_current_plan
-FROM major_admission ma
-LEFT JOIN major m ON ma.major_id = m.id
-WHERE ma.release_id = $1::text
-  AND ma.province = $2::text AND ma.category = $3::text AND ma.batch = $4::text
-  AND ma.year = $6::int
-  AND EXISTS (
-      SELECT 1 FROM enrollment_plan ep
-      WHERE ep.university_code = ma.university_code AND ep.major_group = ma.major_group
-        AND ep.release_id = $1::text
-        AND ep.province = $2::text AND ep.category = $3::text
-        AND ep.batch = $4::text AND ep.year = $5::int
-  )
-ORDER BY ma.university_code, ma.major_group, ma.min_rank, ma.major_code, ma.id
+    COALESCE(ep.university_code, '') AS university_code,
+    COALESCE(ep.major_group, '') AS major_group,
+    COALESCE(ep.major_code, '') AS major_code,
+    COALESCE(ep.major_name, '') AS major_name,
+    COALESCE(ep.subject_req, '') AS subject_req,
+    COALESCE(m.major_note, '') AS major_note,
+    COALESCE(history.min_score, 0)::int AS min_score,
+    COALESCE(history.min_rank, 0)::int AS min_rank,
+    COALESCE(history.admit_count, 0)::int AS admit_count,
+    COALESCE(NULLIF(ep.duration, ''), m.duration, '') AS duration,
+    COALESCE(ep.tuition, m.tuition, 0)::float8 AS tuition,
+    ep.plan_count::int AS plan_count,
+    COALESCE(CASE
+        WHEN history.id IS NOT NULL THEN $1::int
+        ELSE NULL
+    END, 0)::int AS reference_year,
+    TRUE AS in_current_plan
+FROM enrollment_plan ep
+JOIN (
+    SELECT DISTINCT
+        lineage.target_university_code AS university_code,
+        lineage.target_major_group AS major_group
+    FROM admission_group_lineage lineage
+    WHERE lineage.release_id = $2::text
+      AND lineage.target_year = $3::int
+      AND lineage.target_category = $4::text
+      AND lineage.target_batch = $5::text
+      AND lineage.history_year = $1::int
+) mapped_groups
+  ON mapped_groups.university_code = ep.university_code
+ AND mapped_groups.major_group = ep.major_group
+LEFT JOIN major m ON ep.major_id = m.id
+LEFT JOIN LATERAL (
+    SELECT
+        admission.id,
+        admission.min_score,
+        admission.min_rank,
+        admission.admit_count
+    FROM major_admission admission
+    WHERE admission.release_id = $2::text
+      AND admission.province = $6::text
+      AND admission.category = $4::text
+      AND admission.batch = $5::text
+      AND admission.year = $1::int
+      AND admission.university_code = ep.university_code
+      AND admission.major_group = ep.major_group
+      AND admission.major_code = ep.major_code
+    ORDER BY admission.id
+    LIMIT 1
+) history ON TRUE
+WHERE ep.release_id = $2::text
+  AND ep.province = $6::text
+  AND ep.category = $4::text
+  AND ep.batch = $5::text
+  AND ep.year = $3::int
+  AND NULLIF(BTRIM(ep.major_code), '') IS NOT NULL
+ORDER BY ep.university_code, ep.major_group, ep.major_code, ep.id
 `
 
 type ListCandidateMajorsParams struct {
+	HistoryYear int32
 	ReleaseID   string
-	Province    string
+	ReportYear  int32
 	Category    string
 	Batch       string
-	ReportYear  int32
-	HistoryYear int32
+	Province    string
 }
 
 type ListCandidateMajorsRow struct {
@@ -186,19 +232,21 @@ type ListCandidateMajorsRow struct {
 	AdmitCount     int32
 	Duration       string
 	Tuition        float64
+	PlanCount      int32
+	ReferenceYear  int32
 	InCurrentPlan  bool
 }
 
-// 读取组内专业明细。LEFT JOIN 保留未关联专业基础表的记录，缺失展示字段取零值。
-// 最后按专业代码、主键打破同位次并列，保持专业及选科列表顺序稳定。
+// 读取报考年计划中的专业明细。历史录取数据只用于回填同代码专业参考，
+// 不能决定当年组成员，否则专业代码调整会把仍招生的整组错误剔除。
 func (q *Queries) ListCandidateMajors(ctx context.Context, arg ListCandidateMajorsParams) ([]ListCandidateMajorsRow, error) {
 	rows, err := q.db.Query(ctx, listCandidateMajors,
+		arg.HistoryYear,
 		arg.ReleaseID,
-		arg.Province,
+		arg.ReportYear,
 		arg.Category,
 		arg.Batch,
-		arg.ReportYear,
-		arg.HistoryYear,
+		arg.Province,
 	)
 	if err != nil {
 		return nil, err
@@ -219,6 +267,8 @@ func (q *Queries) ListCandidateMajors(ctx context.Context, arg ListCandidateMajo
 			&i.AdmitCount,
 			&i.Duration,
 			&i.Tuition,
+			&i.PlanCount,
+			&i.ReferenceYear,
 			&i.InCurrentPlan,
 		); err != nil {
 			return nil, err

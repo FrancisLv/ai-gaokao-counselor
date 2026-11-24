@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import grpc
+from google.protobuf import any_pb2
+from google.rpc import error_details_pb2, status_pb2
 from api.algo.v1 import algo_pb2
 from api.algo.v1 import algo_pb2_grpc
 
@@ -27,16 +29,50 @@ class FakeAlgoClient:
                         major_name="测试专业",
                         subject_req="首选物理，再选不限",
                         tuition=5000,
+                        has_tuition=True,
+                        duration="四年",
+                        min_score=610,
+                        min_rank=17000,
+                        reference_year=2024,
+                        plan_count=10,
+                        admission_probability=0.73,
+                        probability_data_years=2,
+                        probability_sample_years=[2023, 2024],
+                        recommended=True,
+                        recommendation_rank=1,
+                        selectable=True,
+                        in_current_plan=True,
                     )
                 ],
                 school_tier="985",
                 location="长沙",
                 province="湖南",
+                history_data=[
+                    algo_pb2.AdmissionRecord(
+                        year=2022,
+                        group_min_score=610,
+                        group_min_rank=18000,
+                        total_count=300000,
+                        min_percentile=0.06,
+                        mapping_method="EXACT_CODE",
+                        mapping_confidence=1,
+                    ),
+                    algo_pb2.AdmissionRecord(
+                        year=2024,
+                        group_min_score=620,
+                        group_min_rank=16000,
+                        total_count=313685,
+                        min_percentile=16000 / 313685,
+                        mapping_method="MAJOR_NAME_JACCARD",
+                        mapping_confidence=0.75,
+                    ),
+                ],
                 **(
                     {"plan_count": plan_count}
                     if plan_count is not None
                     else {}
                 ),
+                previous_plan_count=138,
             ),
             prob=algo_pb2.ProbEstimate(
                 probability=0.67,
@@ -136,6 +172,37 @@ class FakeAlgoClient:
             )
         )
 
+    async def SummarizeWishlistDraft(self, request):
+        self.calls.append(("SummarizeWishlistDraft", request))
+        groups = list(request.groups)
+        slip_rate = 1.0
+        utility_values = []
+        summary = algo_pb2.WishlistDraftRisk(
+            group_count=len(groups),
+            safe_guard_target=9,
+        )
+        for group in groups:
+            slip_rate *= 1 - group.probability
+            if group.probability >= 0.9:
+                summary.safe_guard_count += 1
+            if group.category == "冲":
+                summary.rush_count += 1
+            elif group.category == "稳":
+                summary.stable_count += 1
+            elif group.category == "保":
+                summary.safe_tier_count += 1
+            if group.HasField("utility_score"):
+                utility_values.append(group.utility_score)
+        if len(utility_values) == len(groups) and groups:
+            summary.expected_satisfaction = (
+                sum(utility_values) / len(utility_values)
+            )
+        summary.safe_guard_ok = (
+            summary.safe_guard_count >= summary.safe_guard_target
+        )
+        summary.slip_rate = slip_rate
+        return algo_pb2.SummarizeWishlistDraftReply(summary=summary)
+
 
 class WireFakeAlgoService(algo_pb2_grpc.AlgoServicer):
     def __init__(self) -> None:
@@ -157,8 +224,115 @@ class WireFakeAlgoService(algo_pb2_grpc.AlgoServicer):
     async def OptimizeWishlist(self, request, context):
         return await self.fake.OptimizeWishlist(request)
 
+    async def SummarizeWishlistDraft(self, request, context):
+        return await self.fake.SummarizeWishlistDraft(request)
+
 
 class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
+    async def test_initial_aggressive_plan_warns_when_rush_pool_is_exhausted(self):
+        from app.run_lifecycle import (
+            ConfirmProfileAnswer,
+            ResumeRunCommand,
+            RunLifecycle,
+            StructuredProfileInput,
+            SubmitRunCommand,
+        )
+        from app.run_lifecycle.worker import RunLifecycleWorker
+
+        class ExhaustedRushAlgo(FakeAlgoClient):
+            def __init__(self):
+                super().__init__()
+                self.candidate.prob.category = "冲"
+
+            async def EstimateProb(self, request):
+                self.calls.append(("EstimateProb", request))
+                return algo_pb2.EstimateProbReply(
+                    rush_candidates=[self.candidate],
+                    rush_total=1,
+                    basis=algo_pb2.AuditBasis(
+                        user_rank=15860,
+                        user_percentile=0.1234,
+                        sample_years=[2022, 2023, 2024],
+                        method="weighted_hit",
+                        province="湖南",
+                        category="物理类",
+                    ),
+                )
+
+            async def OptimizeWishlist(self, request):
+                self.calls.append(("OptimizeWishlist", request))
+                return algo_pb2.OptimizeWishlistReply(
+                    wishlist=algo_pb2.WishlistResult(
+                        candidates=[
+                            algo_pb2.CandidateWithScore(
+                                cwp=self.candidate,
+                                utility=algo_pb2.UtilityScore(score=0.8),
+                                final_rank=1,
+                            )
+                        ],
+                        report=algo_pb2.OptimizationReport(
+                            rush_count=1,
+                            stable_count=0,
+                            safe_count=0,
+                            safe_guard_ok=False,
+                        ),
+                    )
+                )
+
+        await self.seed_release()
+        lifecycle = RunLifecycle(
+            self.dsn,
+            auto_profile=True,
+            worker_owner="worker-exhausted-rush",
+            algo_client=ExhaustedRushAlgo(),
+        )
+        self.addAsyncCleanup(lifecycle.close)
+        worker = RunLifecycleWorker(lifecycle, poll_interval=0.01)
+        await worker.start()
+        self.addAsyncCleanup(worker.stop)
+
+        submitted = await lifecycle.SubmitRun(
+            SubmitRunCommand(
+                principal_id="principal-a",
+                session_id=None,
+                task_kind="GENERATE_PLAN",
+                input=StructuredProfileInput(
+                    province="湖南",
+                    application_year=2025,
+                    category="物理类",
+                    batch="本科批",
+                    score=600,
+                    subjects=("物理", "化学", "生物"),
+                    risk_appetite="aggressive",
+                ),
+                idempotency_key="exhausted-rush-submit",
+            )
+        )
+        waiting = await self._wait_for(lifecycle, submitted.run_id, "interrupt")
+        await lifecycle.ResumeRun(
+            ResumeRunCommand(
+                principal_id="principal-a",
+                run_id=submitted.run_id,
+                interrupt_id=waiting.current_interrupt.interrupt_id,
+                expected_state_version=waiting.state_version,
+                profile_version=UUID(
+                    waiting.current_interrupt.payload["profile_version"]
+                ),
+                answer=ConfirmProfileAnswer(),
+                idempotency_key="exhausted-rush-confirm",
+            )
+        )
+        completed = await self._wait_for(lifecycle, submitted.run_id, "result")
+
+        self.assertEqual(completed.state, "SUCCEEDED")
+        risk = next(
+            section
+            for section in completed.formal_result.report["sections"]
+            if section["section_key"] == "risk"
+        )
+        self.assertIn("当前冲档候选仅 1 个", risk["body"])
+        self.assertIn("已全部纳入最终志愿表", risk["body"])
+
     async def test_confirmed_profile_publishes_nonempty_formal_report_from_four_algo_calls(self):
         from app.run_lifecycle import (
             ConfirmProfileAnswer,
@@ -194,6 +368,8 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
                     batch="本科批",
                     score=600,
                     subjects=("物理", "化学", "生物"),
+                    interests=("物理学",),
+                    required_major_names=("物理学",),
                 ),
                 idempotency_key="algorithm-preview-submit",
             )
@@ -233,6 +409,25 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
         self.assertIn("15860", sections["plan"]["body"])
         self.assertIn("测试大学", sections["candidate:U001|01"]["body"])
         self.assertIn("67%", sections["candidate:U001|01"]["body"])
+        self.assertIn("2022年：最低录取分 610 分", sections["candidate:U001|01"]["body"])
+        self.assertIn("2023年：暂无数据", sections["candidate:U001|01"]["body"])
+        self.assertEqual(
+            [
+                (
+                    item["year"],
+                    item["min_score"],
+                    item["min_rank"],
+                    item["mapping_method"],
+                    item["mapping_confidence"],
+                )
+                for item in sections["candidate:U001|01"]["history"]
+            ],
+            [
+                (2022, 610, 18000, "EXACT_CODE", 1.0),
+                (2023, None, None, "", 0.0),
+                (2024, 620, 16000, "MAJOR_NAME_JACCARD", 0.75),
+            ],
+        )
         self.assertIn(
             "U001|01=PASS",
             sections["qualification"]["body"],
@@ -301,6 +496,15 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
         self.assertEqual(
             {request.release_id for _, request in algo.calls},
             {release_id},
+        )
+        estimate_request = algo.calls[1][1]
+        self.assertEqual(
+            list(estimate_request.profile.interests),
+            ["物理学"],
+        )
+        self.assertEqual(
+            list(estimate_request.profile.required_major_names),
+            ["物理学"],
         )
         evaluated_candidates = algo.calls[2][1].candidate_groups
         self.assertEqual(len(evaluated_candidates), 1)
@@ -651,6 +855,95 @@ class AlgorithmPreviewLifecycleTests(RunLifecyclePostgresTest):
         self.assertEqual(failed.terminal_reason, "NO_RELIABLE_DATA")
         self.assertIsNone(failed.result)
         self.assertIsNone(failed.result_payload)
+
+    async def test_no_reliable_data_grpc_error_preserves_business_reason(self):
+        from app.run_lifecycle import (
+            ConfirmProfileAnswer,
+            ResumeRunCommand,
+            RunLifecycle,
+            StructuredProfileInput,
+            SubmitRunCommand,
+        )
+        from app.run_lifecycle.worker import RunLifecycleWorker
+
+        class NoReliableDataAlgo(FakeAlgoClient):
+            async def EstimateProb(self, request):
+                self.calls.append(("EstimateProb", request))
+                detail = any_pb2.Any()
+                detail.Pack(
+                    error_details_pb2.ErrorInfo(
+                        reason="NO_RELIABLE_DATA",
+                        domain="algo",
+                    )
+                )
+                serialized = status_pb2.Status(
+                    code=grpc.StatusCode.INTERNAL.value[0],
+                    message="录取历史不足，无可靠概率",
+                    details=[detail],
+                ).SerializeToString()
+
+                class FakeRpcError(grpc.RpcError):
+                    def code(self):
+                        return grpc.StatusCode.INTERNAL
+
+                    def details(self):
+                        return "录取历史不足，无可靠概率"
+
+                    def trailing_metadata(self):
+                        return ((
+                            "grpc-status-details-bin",
+                            serialized,
+                        ),)
+
+                raise FakeRpcError()
+
+        await self.seed_release()
+        lifecycle = RunLifecycle(
+            self.dsn,
+            auto_profile=True,
+            worker_owner="worker-no-reliable",
+            algo_client=NoReliableDataAlgo(),
+        )
+        self.addAsyncCleanup(lifecycle.close)
+        worker = RunLifecycleWorker(lifecycle, poll_interval=0.01)
+        await worker.start()
+        self.addAsyncCleanup(worker.stop)
+        submitted = await lifecycle.SubmitRun(
+            SubmitRunCommand(
+                principal_id="principal-a",
+                session_id=None,
+                task_kind="GENERATE_PLAN",
+                input=StructuredProfileInput(
+                    province="湖南",
+                    application_year=2025,
+                    category="历史类",
+                    batch="本科批",
+                    score=600,
+                    subjects=("历史", "政治", "地理"),
+                ),
+                idempotency_key="algorithm-preview-no-reliable-submit",
+            )
+        )
+        waiting = await self._wait_for(lifecycle, submitted.run_id, "interrupt")
+        await lifecycle.ResumeRun(
+            ResumeRunCommand(
+                principal_id="principal-a",
+                run_id=submitted.run_id,
+                interrupt_id=waiting.current_interrupt.interrupt_id,
+                expected_state_version=waiting.state_version,
+                profile_version=UUID(
+                    waiting.current_interrupt.payload["profile_version"]
+                ),
+                answer=ConfirmProfileAnswer(),
+                idempotency_key="algorithm-preview-no-reliable-confirm",
+            )
+        )
+
+        failed = await self._wait_for(lifecycle, submitted.run_id, "terminal")
+
+        self.assertEqual(failed.state, "FAILED")
+        self.assertEqual(failed.terminal_reason, "NO_RELIABLE_DATA")
+        self.assertIsNone(failed.result)
 
     async def test_generated_grpc_algo_client_drives_the_formal_report_seam(self):
         from app.run_lifecycle import (

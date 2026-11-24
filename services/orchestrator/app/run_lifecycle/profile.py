@@ -54,6 +54,46 @@ def build_profile_fields(profile: StructuredProfileInput) -> ProfileFields:
         )
     if profile.rank is not None:
         fields["rank"] = {"state": "PROVIDED", "source": "USER_TEXT", "value": profile.rank}
+    preference_fields: tuple[tuple[str, str | list[str] | tuple[str, ...] | None], ...] = (
+        ("preferences.risk_appetite", profile.risk_appetite),
+        ("preferences.priority_dims", profile.priority_dims),
+        ("preferences.major_interests", profile.interests),
+        ("preferences.preferred_cities", profile.preferred_cities),
+        ("preferences.preferred_tiers", profile.preferred_tiers),
+        ("preferences.required_provinces", profile.required_provinces),
+        ("preferences.excluded_provinces", profile.excluded_provinces),
+        ("preferences.required_cities", profile.required_cities),
+        ("preferences.excluded_cities", profile.excluded_cities),
+        ("preferences.required_tiers", profile.required_tiers),
+        (
+            "preferences.required_major_keywords",
+            profile.required_major_keywords,
+        ),
+        (
+            "preferences.required_major_names",
+            profile.required_major_names,
+        ),
+        (
+            "preferences.excluded_major_keywords",
+            profile.excluded_major_keywords,
+        ),
+        (
+            "preferences.excluded_major_names",
+            profile.excluded_major_names,
+        ),
+        (
+            "preferences.excluded_universities",
+            profile.excluded_universities,
+        ),
+    )
+    for key, value in preference_fields:
+        if value in (None, "", ()):
+            continue
+        fields[key] = {
+            "state": "PROVIDED",
+            "source": "USER_TEXT",
+            "value": list(value) if isinstance(value, (list, tuple)) else value,
+        }
     return fields
 
 
@@ -369,6 +409,36 @@ class ProfileRuntime:
                 ).get("value", []),
                 "preferred_tiers": fields.get(
                     "preferences.preferred_tiers", {}
+                ).get("value", []),
+                "required_provinces": fields.get(
+                    "preferences.required_provinces", {}
+                ).get("value", []),
+                "excluded_provinces": fields.get(
+                    "preferences.excluded_provinces", {}
+                ).get("value", []),
+                "required_cities": fields.get(
+                    "preferences.required_cities", {}
+                ).get("value", []),
+                "excluded_cities": fields.get(
+                    "preferences.excluded_cities", {}
+                ).get("value", []),
+                "required_tiers": fields.get(
+                    "preferences.required_tiers", {}
+                ).get("value", []),
+                "required_major_names": fields.get(
+                    "preferences.required_major_names", {}
+                ).get("value", []),
+                "required_major_keywords": fields.get(
+                    "preferences.required_major_keywords", {}
+                ).get("value", []),
+                "excluded_major_keywords": fields.get(
+                    "preferences.excluded_major_keywords", {}
+                ).get("value", []),
+                "excluded_major_names": fields.get(
+                    "preferences.excluded_major_names", {}
+                ).get("value", []),
+                "excluded_universities": fields.get(
+                    "preferences.excluded_universities", {}
                 ).get("value", []),
             },
         }

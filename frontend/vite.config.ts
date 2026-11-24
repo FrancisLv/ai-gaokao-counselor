@@ -23,6 +23,9 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(__dirname, "index.html"),
+        login: resolve(__dirname, "login.html"),
+        account: resolve(__dirname, "account.html"),
+        wishlists: resolve(__dirname, "wishlists.html"),
         report: resolve(__dirname, "report.html"),
         school: resolve(__dirname, "school.html"),
       },

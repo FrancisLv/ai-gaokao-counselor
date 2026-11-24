@@ -43,13 +43,14 @@ func TestMajorScore(t *testing.T) {
 		interests []string
 		want      float64
 	}{
-		{"命中子串(计算机)", []string{"计算机"}, 1.0},
-		{"命中子串(软件)", []string{"软件"}, 1.0},
-		{"多兴趣命中其一", []string{"金融", "计算机"}, 1.0},
+		{"精确命中计算机专业", []string{"计算机科学与技术"}, 1.0},
+		{"精确命中软件专业", []string{"软件工程"}, 1.0},
+		{"多兴趣精确命中其一", []string{"金融", "计算机科学与技术"}, 1.0},
+		{"短词不模糊命中", []string{"计算机"}, 0.0},
 		{"全不命中", []string{"金融", "土木"}, 0.0},
 		{"无 interests", nil, 0.0},
 		{"空串 interest 不命中", []string{""}, 0.0},
-		{"无专业明细", []string{"计算机"}, 0.0},
+		{"无专业明细", []string{"计算机科学与技术"}, 0.0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -179,6 +180,11 @@ func TestDeriveWeights(t *testing.T) {
 	eqWeights(t, w, 0.4, 0.2, 0.2, 0.2)
 	assertWeightsSum1(t, w)
 
+	// 明确专业兴趣 → major×2，即使调用方未重复声明 PriorityDims
+	w = deriveWeights(UserProfile{Interests: []string{"物理学"}}, cfg)
+	eqWeights(t, w, 0.2, 0.4, 0.2, 0.2)
+	assertWeightsSum1(t, w)
+
 	// 未知维度忽略、合法维度仍生效
 	w = deriveWeights(UserProfile{PriorityDims: []string{"unknown", "major"}}, cfg)
 	eqWeights(t, w, 0.2, 0.4, 0.2, 0.2)
@@ -191,7 +197,7 @@ func TestDeriveWeights(t *testing.T) {
 func TestCalculateUtilityBatch(t *testing.T) {
 	profile := UserProfile{
 		PriorityDims:    []string{"tier"},
-		Interests:       []string{"计算机"},
+		Interests:       []string{"计算机科学与技术"},
 		PreferredCities: []string{"长沙"},
 		PreferredTiers:  []string{"985"},
 	}
@@ -236,7 +242,7 @@ func TestCalculateUtilityBatch(t *testing.T) {
 
 // TestCalculateUtilityBatch_Deterministic 相同输入两次调用结果逐位相同 + 保序（DH1/DH3）。
 func TestCalculateUtilityBatch_Deterministic(t *testing.T) {
-	profile := UserProfile{PriorityDims: []string{"major", "location"}, Interests: []string{"软件"}, PreferredCities: []string{"长沙"}}
+	profile := UserProfile{PriorityDims: []string{"major", "location"}, Interests: []string{"软件工程"}, PreferredCities: []string{"长沙"}}
 	cs := []Candidate{
 		{UniversityCode: "A", SchoolTier: "211", Location: "长沙市", Province: "湖南", NumMaster: 30, NumDoctor: 10, RuankeRank: 40, Majors: []MajorDetail{{MajorName: "软件工程"}}},
 		{UniversityCode: "B", SchoolTier: "985", Location: "北京市", Province: "北京", NumMaster: 80, NumDoctor: 40, RuankeRank: 5, Majors: []MajorDetail{{MajorName: "计算机"}}},

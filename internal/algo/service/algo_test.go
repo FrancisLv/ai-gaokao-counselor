@@ -35,6 +35,104 @@ type serviceEligibilityRepo struct {
 	set biz.EligibilityRuleSet
 }
 
+type exactMajorRankRepo struct{}
+
+func (exactMajorRankRepo) LoadScoreRankMap(
+	context.Context,
+	string,
+	string,
+	string,
+	int,
+) ([]biz.ScoreRankEntry, int, error) {
+	return []biz.ScoreRankEntry{
+		{
+			Score:           450,
+			ScoreRangeLow:   450,
+			ScoreRangeHigh:  450,
+			CumulativeCount: 1000,
+		},
+		{
+			Score:           400,
+			ScoreRangeLow:   400,
+			ScoreRangeHigh:  400,
+			CumulativeCount: 10000,
+		},
+	}, 405, nil
+}
+
+type exactMajorAdmissionRepo struct{}
+
+func (exactMajorAdmissionRepo) LoadCandidates(
+	context.Context,
+	string,
+	string,
+	string,
+	string,
+	int,
+) ([]biz.Candidate, error) {
+	return []biz.Candidate{
+		{
+			UniversityCode: "A",
+			MajorGroup:     "1",
+			SubjectReq:     []string{"首选物理，再选不限"},
+			Majors: []biz.MajorDetail{
+				{MajorCode: "070201", MajorName: "物理学"},
+				{MajorCode: "070202", MajorName: "应用物理学"},
+			},
+		},
+		{
+			UniversityCode: "B",
+			MajorGroup:     "1",
+			SubjectReq:     []string{"首选物理，再选不限"},
+			Majors: []biz.MajorDetail{
+				{MajorCode: "070202", MajorName: "应用物理学"},
+			},
+		},
+	}, nil
+}
+
+func (exactMajorAdmissionRepo) BatchGroupHistory(
+	context.Context,
+	string,
+	string,
+	string,
+	string,
+	int,
+	int,
+) (map[biz.GroupKey][]biz.AdmissionRecord, error) {
+	return map[biz.GroupKey][]biz.AdmissionRecord{
+		{UniversityCode: "A", MajorGroup: "1"}: {
+			{Year: 2024, GroupMinRank: 2000, TotalCount: 10000},
+		},
+		{UniversityCode: "B", MajorGroup: "1"}: {
+			{Year: 2024, GroupMinRank: 2000, TotalCount: 10000},
+		},
+	}, nil
+}
+
+func (exactMajorAdmissionRepo) BatchMajorHistory(
+	context.Context,
+	string,
+	string,
+	string,
+	string,
+	int,
+	int,
+) (map[biz.MajorKey][]biz.MajorAdmissionRecord, error) {
+	return map[biz.MajorKey][]biz.MajorAdmissionRecord{}, nil
+}
+
+func (exactMajorAdmissionRepo) BatchGroupPlan(
+	context.Context,
+	string,
+	string,
+	string,
+	int,
+	int,
+) (map[biz.GroupKey]biz.PlanChange, error) {
+	return nil, nil
+}
+
 func (r serviceEligibilityRepo) LoadEligibilityRuleSet(context.Context, string, biz.EligibilityScope) (biz.EligibilityRuleSet, error) {
 	if len(r.set.ProfileFields) == 0 {
 		r.set.ProfileFields = biz.BuiltinEligibilityProfileFields()
@@ -209,6 +307,44 @@ func TestService_RankAndEstimateRequireRelease(t *testing.T) {
 	}
 }
 
+func TestService_EstimateProb_ExactRequiredMajorNamesNarrowCurrentPlanMajors(
+	t *testing.T,
+) {
+	rank := biz.NewRankUsecase(exactMajorRankRepo{})
+	recommend := biz.NewRecommendUsecase(
+		exactMajorAdmissionRepo{},
+		rank,
+		&conf.Bootstrap{},
+	)
+	s := NewAlgo(rank, recommend, nil, nil)
+
+	reply, err := s.EstimateProb(context.Background(), &algov1.EstimateProbRequest{
+		ReleaseId: "rel-test",
+		Province:  "湖南",
+		Year:      "2025",
+		Category:  "物理类",
+		Batch:     "本科批",
+		Score:     450,
+		Subjects:  []string{"物理", "化学", "生物"},
+		Profile: &algov1.UserProfile{
+			RequiredMajorNames: []string{"物理学"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("EstimateProb: %v", err)
+	}
+	all := append([]*algov1.CandidateWithProb(nil), reply.GetSafeCandidates()...)
+	all = append(all, reply.GetStableCandidates()...)
+	all = append(all, reply.GetRushCandidates()...)
+	if len(all) != 1 || all[0].GetCandidate().GetUniversityCode() != "A" {
+		t.Fatalf("exact physics candidates = %+v, want only group A", all)
+	}
+	majors := all[0].GetCandidate().GetMajors()
+	if len(majors) != 1 || majors[0].GetMajorName() != "物理学" {
+		t.Fatalf("visible majors = %+v, want only 物理学", majors)
+	}
+}
+
 func TestService_OptimizeWishlist(t *testing.T) {
 	opt := biz.NewOptimizeUsecase(&conf.Bootstrap{})
 	s := NewAlgo(nil, nil, opt, nil)
@@ -237,6 +373,84 @@ func TestService_OptimizeWishlist(t *testing.T) {
 	}
 	if wl.GetReport() == nil {
 		t.Error("report 应非空")
+	}
+}
+
+func TestService_OptimizeWishlist_PhysicsInterestUsesExactMajorNamesAndBoostsMajor(
+	t *testing.T,
+) {
+	opt := biz.NewOptimizeUsecase(&conf.Bootstrap{})
+	s := NewAlgo(nil, nil, opt, nil)
+	candidates := []*algov1.CandidateWithProb{
+		{
+			Candidate: &algov1.Candidate{
+				UniversityCode: "A",
+				MajorGroup:     "1",
+				Majors:         []*algov1.MajorDetail{{MajorCode: "070201", MajorName: "物理学"}},
+			},
+			Prob: &algov1.ProbEstimate{
+				Probability: 0.60,
+				Category:    "稳",
+				Method:      "weighted_hit",
+			},
+		},
+		{
+			Candidate: &algov1.Candidate{
+				UniversityCode: "B",
+				MajorGroup:     "1",
+				Majors:         []*algov1.MajorDetail{{MajorCode: "070202", MajorName: "应用物理学"}},
+			},
+			Prob: &algov1.ProbEstimate{
+				Probability: 0.60,
+				Category:    "稳",
+				Method:      "weighted_hit",
+			},
+		},
+	}
+
+	reply, err := s.OptimizeWishlist(context.Background(), &algov1.OptimizeWishlistRequest{
+		Candidates: candidates,
+		Profile:    &algov1.UserProfile{Interests: []string{"物理学"}},
+	})
+	if err != nil {
+		t.Fatalf("OptimizeWishlist exact physics: %v", err)
+	}
+	byCode := map[string]*algov1.CandidateWithScore{}
+	for _, item := range reply.GetWishlist().GetCandidates() {
+		byCode[item.GetCwp().GetCandidate().GetUniversityCode()] = item
+	}
+	if got := byCode["A"].GetUtility().GetBreakdown()["major"]; got != 1 {
+		t.Fatalf("physics major score = %v, want 1", got)
+	}
+	if got := byCode["B"].GetUtility().GetBreakdown()["major"]; got != 0 {
+		t.Fatalf("applied physics major score = %v, want 0 before related scope is accepted", got)
+	}
+	for _, item := range byCode {
+		weights := item.GetUtility().GetWeights()
+		if weights["major"] != 0.4 || weights["tier"] != 0.2 ||
+			weights["location"] != 0.2 || weights["strength"] != 0.2 {
+			t.Fatalf("physics interest weights = %v, want major=0.4 and others=0.2", weights)
+		}
+	}
+
+	reply, err = s.OptimizeWishlist(context.Background(), &algov1.OptimizeWishlistRequest{
+		Candidates: candidates,
+		Profile: &algov1.UserProfile{Interests: []string{
+			"物理学",
+			"应用物理学",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("OptimizeWishlist related physics: %v", err)
+	}
+	for _, item := range reply.GetWishlist().GetCandidates() {
+		if got := item.GetUtility().GetBreakdown()["major"]; got != 1 {
+			t.Fatalf(
+				"%s major score after accepting related scope = %v, want 1",
+				item.GetCwp().GetCandidate().GetUniversityCode(),
+				got,
+			)
+		}
 	}
 }
 
@@ -373,5 +587,36 @@ func TestPreconditionError_PreservesDetails(t *testing.T) {
 	}
 	if status.Code(kerrors.BadRequest("INVALID_YEAR", "非法年份")) != codes.InvalidArgument {
 		t.Error("其他 HTTP 400 的全局默认映射被改变")
+	}
+}
+
+func TestSummarizeWishlistDraftRPC(t *testing.T) {
+	opt := biz.NewOptimizeUsecase(&conf.Bootstrap{})
+	s := NewAlgo(nil, nil, opt, nil)
+	utility := 0.8
+	reply, err := s.SummarizeWishlistDraft(
+		context.Background(),
+		&algov1.SummarizeWishlistDraftRequest{
+			ReleaseId: "release-1",
+			Groups: []*algov1.DraftGroupRiskInput{
+				{
+					UniversityCode: "A",
+					MajorGroup:     "01",
+					Probability:    0.95,
+					Category:       "保",
+					UtilityScore:   &utility,
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("SummarizeWishlistDraft: %v", err)
+	}
+	if reply.GetSummary().GetGroupCount() != 1 ||
+		reply.GetSummary().GetSafeGuardCount() != 1 {
+		t.Fatalf("summary=%+v", reply.GetSummary())
+	}
+	if got := reply.GetSummary().GetExpectedSatisfaction(); got != 0.8 {
+		t.Fatalf("ExpectedSatisfaction=%v, want 0.8", got)
 	}
 }

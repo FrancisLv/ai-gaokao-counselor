@@ -358,12 +358,26 @@ class DataRetentionTests(RunLifecyclePostgresTest):
                 """,
                 (profile_version, result_version, submitted.run_id),
             )
+            await conn.execute(
+                """
+                INSERT INTO chat_message (
+                    message_id, session_id, run_id, client_message_id,
+                    role, kind, content, created_at
+                )
+                VALUES (
+                    %s, %s, %s, 'retention-private-message',
+                    'USER', 'TEXT', '即将过期的对话正文',
+                    NOW() - INTERVAL '31 days'
+                )
+                """,
+                (uuid4(), submitted.session_id, submitted.run_id),
+            )
         finally:
             await conn.close()
 
         retention = DataRetention(
             self.dsn,
-            clock=lambda: datetime(2026, 11, 20, tzinfo=timezone.utc),
+            clock=lambda: datetime.now(timezone.utc),
         )
         receipt = await retention.SweepExpiredData(
             SweepRetentionCommand(policy_version="m5b-retention-v1")
@@ -385,9 +399,15 @@ class DataRetentionTests(RunLifecyclePostgresTest):
                     SELECT
                         (SELECT count(*) FROM run_result WHERE run_id = %s) AS results,
                         (SELECT count(*) FROM profile_revision WHERE run_id = %s) AS profiles,
-                        (SELECT count(*) FROM run_interrupt WHERE run_id = %s) AS interrupts
+                        (SELECT count(*) FROM run_interrupt WHERE run_id = %s) AS interrupts,
+                        (SELECT count(*) FROM chat_message WHERE session_id = %s) AS messages
                     """,
-                    (submitted.run_id, submitted.run_id, submitted.run_id),
+                    (
+                        submitted.run_id,
+                        submitted.run_id,
+                        submitted.run_id,
+                        submitted.session_id,
+                    ),
                 )
             ).fetchone()
             run = await (
@@ -412,6 +432,7 @@ class DataRetentionTests(RunLifecyclePostgresTest):
             "results": 0,
             "profiles": 0,
             "interrupts": 0,
+            "messages": 0,
         })
         self.assertEqual(run["principal_id"], "retention:deidentified")
         self.assertEqual(run["task_input"], {})
@@ -420,6 +441,154 @@ class DataRetentionTests(RunLifecyclePostgresTest):
         self.assertIsNone(run["confirmed_profile_version"])
         self.assertIsNone(run["working_profile_version"])
         self.assertEqual(public_release["status"], "PUBLISHED")
+
+    async def test_saved_wishlist_protects_result_until_wishlist_is_deleted(self):
+        from app.data_lifecycle import DataRetention, SweepRetentionCommand
+        from app.run_lifecycle import (
+            RunLifecycle,
+            StructuredProfileInput,
+            SubmitRunCommand,
+        )
+
+        release_id = await self.seed_release()
+        lifecycle = RunLifecycle(self.dsn, worker_owner="worker-retention-saved")
+        self.addAsyncCleanup(lifecycle.close)
+        submitted = await lifecycle.SubmitRun(
+            SubmitRunCommand(
+                principal_id="principal-retention-saved",
+                session_id=None,
+                task_kind="GENERATE_PLAN",
+                input=StructuredProfileInput(
+                    province="湖南",
+                    application_year=2025,
+                    category="物理类",
+                    batch="本科批",
+                    score=600,
+                    subjects=("物理", "化学", "生物"),
+                ),
+                idempotency_key=f"retention-saved-submit-{uuid4()}",
+            )
+        )
+        profile_version = uuid4()
+        result_version = uuid4()
+        conn = await self._connect()
+        try:
+            await conn.execute(
+                """
+                INSERT INTO profile_revision (
+                    profile_version, session_id, run_id, revision_no,
+                    lifecycle, fields, created_at, confirmed_at
+                )
+                VALUES (
+                    %s, %s, %s, 1, 'CONFIRMED',
+                    '{"score":{"state":"KNOWN","value":600}}'::jsonb,
+                    NOW() - INTERVAL '31 days',
+                    NOW() - INTERVAL '31 days'
+                )
+                """,
+                (profile_version, submitted.session_id, submitted.run_id),
+            )
+            await conn.execute(
+                """
+                INSERT INTO run_result (
+                    result_version, run_id, release_id,
+                    confirmed_profile_version, result_kind, payload,
+                    verification_summary, unverified_conditions,
+                    source_package_sha256, evidence_package_sha256,
+                    verification_report_sha256, created_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, 'V1_FORMAL',
+                    '{"private":"saved report"}'::jsonb,
+                    '[]'::jsonb, '[]'::jsonb,
+                    %s, %s, %s,
+                    NOW() - INTERVAL '31 days'
+                )
+                """,
+                (
+                    result_version,
+                    submitted.run_id,
+                    release_id,
+                    profile_version,
+                    "d" * 64,
+                    "e" * 64,
+                    "f" * 64,
+                ),
+            )
+            await conn.execute(
+                """
+                UPDATE run
+                SET state = 'SUCCEEDED',
+                    stage = 'FORMAL_READY',
+                    confirmed_profile_version = %s,
+                    result_version = %s,
+                    result_kind = 'V1_FORMAL',
+                    updated_at = NOW() - INTERVAL '31 days'
+                WHERE run_id = %s
+                """,
+                (profile_version, result_version, submitted.run_id),
+            )
+            await conn.execute(
+                """
+                INSERT INTO wishlist_draft_version (
+                    draft_version_id, principal_id, session_id, run_id,
+                    result_version, release_id, draft_version, selections,
+                    idempotency_key, request_sha256, created_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, 1, %s,
+                    'retention-saved-draft', %s, NOW() - INTERVAL '31 days'
+                )
+                """,
+                (
+                    uuid4(),
+                    "principal-retention-saved",
+                    submitted.session_id,
+                    submitted.run_id,
+                    result_version,
+                    release_id,
+                    '[{"university_code":"U001","major_group":"01","major_codes":["M01"]}]',
+                    "a" * 64,
+                ),
+            )
+        finally:
+            await conn.close()
+
+        retention = DataRetention(self.dsn)
+        await retention.SweepExpiredData(
+            SweepRetentionCommand(policy_version="m5b-retention-v1")
+        )
+        conn = await self._connect()
+        try:
+            protected = await (
+                await conn.execute(
+                    "SELECT count(*) AS count FROM run_result WHERE result_version = %s",
+                    (result_version,),
+                )
+            ).fetchone()
+        finally:
+            await conn.close()
+        self.assertEqual(protected["count"], 1)
+
+        await lifecycle.DeleteWishlist(
+            principal_id="principal-retention-saved",
+            result_version=result_version,
+            request_id="retention-delete-wishlist",
+        )
+        await retention.SweepExpiredData(
+            SweepRetentionCommand(policy_version="m5b-retention-v1")
+        )
+        conn = await self._connect()
+        try:
+            expired = await (
+                await conn.execute(
+                    "SELECT count(*) AS count FROM run_result WHERE result_version = %s",
+                    (result_version,),
+                )
+            ).fetchone()
+        finally:
+            await conn.close()
+        self.assertEqual(expired["count"], 0)
 
     async def test_expired_events_and_command_receipts_are_removed_at_seven_days(self):
         from app.data_lifecycle import DataRetention, SweepRetentionCommand

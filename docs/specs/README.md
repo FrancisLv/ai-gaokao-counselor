@@ -14,6 +14,7 @@
 | 规格 | 覆盖 | 状态 |
 | --- | --- | --- |
 | [Profile Contract](./profile-contract.md) | 画像字段、字段状态、版本、确认、算法映射 | 已确认 |
+| [Macro Region Resolution Contract](./macro-region-resolution.md) | 大区表达、省份快捷组、澄清回答与未解决状态 | 已确认 |
 | [Run Lifecycle Contract](./run-lifecycle.md) | run/interrupt/event、接口、状态机、幂等、恢复与发布 | 已确认 |
 | [Retrieval Contract](./retrieval-contract.md) | 适用域、release、双路召回、RRF、降级与索引发布 | 已确认 |
 | [Eligibility Rules Contract](./eligibility-rules-contract.md) | 结构化规则、覆盖声明、三态判定、发布与回滚 | 已确认 |

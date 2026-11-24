@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 高考志愿智能决策系统 · 实现现状与设计分析</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --card: #ffffff;
+    --ink: #1f2937;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+    --accent: #2563eb;
+    --accent-soft: #eff6ff;
+    --ok: #16a34a;
+    --ok-soft: #f0fdf4;
+    --warn: #d97706;
+    --warn-soft: #fffbeb;
+    --bad: #dc2626;
+    --bad-soft: #fef2f2;
+    --info: #0891b2;
+    --info-soft: #ecfeff;
+    --mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    line-height: 1.75; font-size: 15px;
+  }
+  .layout { display: flex; max-width: 1280px; margin: 0 auto; }
+  nav.toc {
+    width: 250px; flex-shrink: 0; position: sticky; top: 0; height: 100vh;
+    overflow-y: auto; padding: 28px 16px; border-right: 1px solid var(--line);
+    font-size: 13.5px;
+  }
+  nav.toc .toc-title { font-weight: 700; font-size: 14px; margin-bottom: 12px; color: var(--accent); }
+  nav.toc a { display: block; color: var(--muted); text-decoration: none; padding: 4px 8px; border-radius: 6px; margin-bottom: 2px; }
+  nav.toc a:hover { background: var(--accent-soft); color: var(--accent); }
+  nav.toc a.lv2 { padding-left: 22px; font-size: 12.5px; }
+  main { flex: 1; min-width: 0; padding: 32px 40px 80px; }
+  header.hero {
+    background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 55%, #0891b2 100%);
+    color: #fff; border-radius: 14px; padding: 34px 38px; margin-bottom: 32px;
+  }
+  header.hero h1 { margin: 0 0 10px; font-size: 26px; }
+  header.hero p { margin: 4px 0; opacity: .92; }
+  header.hero .meta { font-size: 12.5px; opacity: .75; margin-top: 14px; }
+  section { margin-bottom: 40px; }
+  h2 {
+    font-size: 21px; border-left: 5px solid var(--accent); padding-left: 12px;
+    margin: 0 0 16px;
+  }
+  h3 { font-size: 16.5px; margin: 26px 0 10px; color: #111827; }
+  p { margin: 8px 0; }
+  code { font-family: var(--mono); font-size: 12.5px; background: #eef2f7; padding: 1px 6px; border-radius: 4px; color: #0f172a; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 20px 24px; margin: 14px 0;
+  }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13.5px; background: var(--card); }
+  th, td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: #f1f5f9; font-weight: 600; white-space: nowrap; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  .badge { display: inline-block; font-size: 11.5px; font-weight: 700; padding: 2px 10px; border-radius: 999px; white-space: nowrap; }
+  .b-ok   { background: var(--ok-soft);   color: var(--ok);   border: 1px solid #bbf7d0; }
+  .b-warn { background: var(--warn-soft); color: var(--warn); border: 1px solid #fde68a; }
+  .b-bad  { background: var(--bad-soft);  color: var(--bad);  border: 1px solid #fecaca; }
+  .b-info { background: var(--info-soft); color: var(--info); border: 1px solid #a5f3fc; }
+  .callout { border-radius: 10px; padding: 14px 18px; margin: 14px 0; font-size: 14px; }
+  .c-red    { background: var(--bad-soft);  border-left: 4px solid var(--bad); }
+  .c-blue   { background: var(--accent-soft); border-left: 4px solid var(--accent); }
+  .c-amber  { background: var(--warn-soft); border-left: 4px solid var(--warn); }
+  .c-green  { background: var(--ok-soft);   border-left: 4px solid var(--ok); }
+  /* 架构图（纯 CSS） */
+  .arch { display: flex; flex-direction: column; align-items: center; gap: 0; margin: 18px 0; }
+  .arch-row { display: flex; gap: 18px; justify-content: center; width: 100%; }
+  .node {
+    border-radius: 10px; padding: 10px 18px; text-align: center; min-width: 170px;
+    border: 2px solid; background: var(--card); font-size: 13px;
+  }
+  .node b { display: block; font-size: 14px; }
+  .node small { color: var(--muted); font-size: 11.5px; line-height: 1.5; display: block; }
+  .n-client { border-color: #94a3b8; background: #f8fafc; }
+  .n-gw     { border-color: var(--accent); background: var(--accent-soft); }
+  .n-orch   { border-color: #7c3aed; background: #f5f3ff; }
+  .n-algo   { border-color: var(--ok); background: var(--ok-soft); }
+  .n-llm    { border-color: var(--bad); background: var(--bad-soft); }
+  .n-data   { border-color: var(--warn); background: var(--warn-soft); }
+  .arrow { color: var(--muted); font-size: 18px; padding: 4px 0; text-align: center; }
+  .arrow small { display: block; font-size: 11px; }
+  /* run 状态机 */
+  .fsm { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 14px 0; }
+  .fsm .st { border: 2px solid var(--accent); border-radius: 999px; padding: 5px 16px; font-size: 13px; font-weight: 600; background: var(--accent-soft); }
+  .fsm .st.term { border-color: var(--muted); background: #f3f4f6; }
+  .fsm .st.hitl { border-color: #7c3aed; background: #f5f3ff; }
+  .fsm .ar { color: var(--muted); font-size: 13px; }
+  ul, ol { padding-left: 24px; margin: 8px 0; }
+  li { margin: 4px 0; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 960px) {
+    nav.toc { display: none; }
+    main { padding: 20px; }
+    .grid2 { grid-template-columns: 1fr; }
+    .arch-row { flex-direction: column; align-items: center; }
+  }
+  footer { color: var(--muted); font-size: 12.5px; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav class="toc">
+  <div class="toc-title">目录</div>
+  <a href="#s1">1. 项目定位与范围</a>
+  <a href="#s2">2. 总体架构设计</a>
+  <a class="lv2" href="#s2-1">2.1 四服务单向 DAG</a>
+  <a class="lv2" href="#s2-2">2.2 核心设计原则</a>
+  <a href="#s3">3. 已实现功能全景</a>
+  <a href="#s4">4. svc-algo 算法服务</a>
+  <a class="lv2" href="#s4-1">4.1 Kratos 三层结构</a>
+  <a class="lv2" href="#s4-2">4.2 四个 RPC 的算法设计</a>
+  <a class="lv2" href="#s4-3">4.3 可复现纪律</a>
+  <a href="#s5">5. svc-orchestrator 编排服务</a>
+  <a class="lv2" href="#s5-1">5.1 RunLifecycle 状态机</a>
+  <a class="lv2" href="#s5-2">5.2 LangGraph 画像图</a>
+  <a class="lv2" href="#s5-3">5.3 算法预览流水线</a>
+  <a href="#s6">6. svc-gateway 网关</a>
+  <a href="#s7">7. svc-llm-gateway（未实现）</a>
+  <a href="#s8">8. 前端 Run Console</a>
+  <a href="#s9">9. 数据层设计</a>
+  <a href="#s10">10. RAG 检索与数据资产</a>
+  <a href="#s11">11. 工程红线与决策（ADR）</a>
+  <a href="#s12">12. 缺口与路线图</a>
+  <a href="#s13">13. 测试与验证现状</a>
+</nav>
+<main>
+
+<header class="hero">
+  <h1>AI 高考志愿智能决策系统 · 实现现状与设计分析</h1>
+  <p>多 Agent 编排 + RAG + 确定性领域算法，解决考生「不知道该问什么」的模糊决策需求。</p>
+  <p>仅覆盖<b>湖南省新高考 3+1+2</b> 模式，其他省份不在范围内。</p>
+  <div class="meta">依据：仓库代码实测 + docs/prd.md (v1.3) + docs/gap-analysis.md (2026-11-18) + docs/adr/0001~0006 · 生成于 2026-11-19</div>
+</header>
+
+<!-- ================= 1 ================= -->
+<section id="s1">
+  <h2>1. 项目定位与范围</h2>
+  <div class="card">
+    <p>本项目是一个<b>高考志愿填报的智能决策 Agent 系统</b>：用户以自然语言（或结构化输入）描述成绩与偏好，系统通过多轮对话采集画像、经用户确认（HITL）后，由确定性算法生成「冲 / 稳 / 保」分档的院校专业组候选池，估计录取概率，做硬约束校验与志愿表优化，最终产出带证据、风险提示与免责声明的志愿方案报告。</p>
+    <ul>
+      <li><b>产品原则</b>：LLM 管语义 / 生成，确定性代码管数值 / 规则 —— 「LLM 不许算数，算法不许编话」。</li>
+      <li><b>数据边界</b>：湖南省新高考 3+1+2；历史数据 2022–2024 作训练窗口、2025 作验证；5700+ 院校招生章程原始文档。</li>
+      <li><b>安全底线</b>：禁止任何「保证录取」表述；无可靠数据时明确输出「不予推荐 / UNKNOWN」，宁报错不编数据。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 2 ================= -->
+<section id="s2">
+  <h2>2. 总体架构设计</h2>
+
+  <h3 id="s2-1">2.1 四服务单向 DAG + 前端</h3>
+  <div class="card">
+    <div class="arch">
+      <div class="arch-row">
+        <div class="node n-client"><b>Frontend（Vue 3 + Vite）</b><small>Run Console：创建任务 / SSE 订阅 / 画像确认卡 / 算法预览</small></div>
+      </div>
+      <div class="arrow">↓<small>HTTP + SSE</small></div>
+      <div class="arch-row">
+        <div class="node n-gw"><b>svc-gateway（Go / Kratos）</b><small>入口 · 鉴权(principal) · 幂等键透传 · SSE 事件流<br>只做接入与门控，不判断图内业务</small></div>
+      </div>
+      <div class="arrow">↓<small>gRPC：SubmitRun / ResumeRun / GetRun / CancelRun / WatchRun</small></div>
+      <div class="arch-row">
+        <div class="node n-orch"><b>svc-orchestrator（Python / LangGraph）</b><small>RunLifecycle 状态机 · 画像图 interrupt/resume · worker 租约<br>图控制权唯一归属：下一步 / 补问 / Critic 回边由此裁决</small></div>
+      </div>
+      <div class="arrow">↓&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↓<small>gRPC（下游不回调上游）</small></div>
+      <div class="arch-row">
+        <div class="node n-algo"><b>svc-algo（Go / Kratos）</b><small>位次换算 · 概率估计 · 约束校验 · 志愿表优化<br>✅ 四 RPC 全部实现，唯一成体系闭环</small></div>
+        <div class="node n-llm"><b>svc-llm-gateway（Go / Kratos）</b><small>模型路由 · prompt_hash 缓存 · 预算记账<br>⛔ Chat / StreamChat 均为 TODO（M4/M5）</small></div>
+      </div>
+      <div class="arrow">↓</div>
+      <div class="arch-row">
+        <div class="node n-data"><b>PostgreSQL + Redis</b><small>关系表 + pgvector(向量) + pg_trgm(关键词) · langgraph-checkpoint-postgres · release 不可变快照 · run 生命周期表</small></div>
+      </div>
+    </div>
+    <p style="text-align:center;color:var(--muted);font-size:12.5px;">调用方向严格单向：客户端 → gateway → orchestrator → { algo, llm-gateway }；proto 契约为单一事实来源（<code>api/*/v1</code>，<code>make api</code> 生成 Go + Python 双端代码）。</p>
+  </div>
+
+  <h3 id="s2-2">2.2 核心设计原则（工程红线）</h3>
+  <table>
+    <tr><th>红线</th><th>含义</th></tr>
+    <tr><td>LLM 不许算数</td><td>位次 / 概率 / 规则 / 配比一律由 svc-algo 给出；LLM 只写解释文案，不得生成或改写数值与候选身份。</td></tr>
+    <tr><td>强结构化数据只走 SQL</td><td>pgx + sqlc 参数化查询；RAG 仅用于非结构化章程文本，检索内容视为数据、显式分隔转义。</td></tr>
+    <tr><td>图控制权归 orchestrator</td><td>下一步 / 条件补问 / Critic 回边由 orchestrator 裁决；gateway 只转交命令与事件。</td></tr>
+    <tr><td>可复现纪律（svc-algo）</td><td>单线程、全序排序带 tie-break、禁 map 迭代产序；同输入同输出。</td></tr>
+    <tr><td>宁报错不编数据</td><td>无可靠数据 / 无规则覆盖时明确告知「不予推荐 / UNKNOWN」，不得伪造概率。</td></tr>
+    <tr><td>禁止「保证录取」</td><td>报告必带风险提示与免责声明；算法预览明确标注非录取保证。</td></tr>
+    <tr><td>密钥不入 Git</td><td>只放 <code>.env</code> / secrets；模型 key 仅存在于 llmgw 侧。</td></tr>
+  </table>
+
+  <div class="callout c-blue">
+    <b>设计文档体系（施工事实来源分工）</b>：<code>docs/prd.md</code> v1.3 = 目标态唯一权威（24 条 FR + §5.2 端到端 15 步 + 20 条验收场景）；<code>docs/gap-analysis.md</code> = 代码现状唯一权威（活文档）；<code>docs/adr/0001~0006</code> = 决策理由权威；<code>docs/algorithms.md</code> = 算法口径；<code>GLOSSARY.md</code> = 领域术语单一来源。冲突裁决：目标态看 PRD、现状看 gap-analysis 实测、理由看 ADR。
+  </div>
+</section>
+
+<!-- ================= 3 ================= -->
+<section id="s3">
+  <h2>3. 已实现功能全景</h2>
+  <div class="card">
+    <table>
+      <tr><th>模块</th><th>状态</th><th>已实现内容</th></tr>
+      <tr>
+        <td><b>svc-algo</b>（Go）</td>
+        <td><span class="badge b-ok">✅ 完整闭环</span></td>
+        <td>四个 RPC 全部实现：<code>RankConvert</code>（分数→位次）、<code>EstimateProb</code>（候选池生成+概率+AuditBasis）、<code>CheckConstraints</code>（选科硬约束）、<code>OptimizeWishlist</code>（冲稳保配比+滑档率保底）。Kratos 三层 + Wire 装配 + 78 个单测 + 真实库集成测试。</td>
+      </tr>
+      <tr>
+        <td><b>svc-orchestrator</b>（Python）</td>
+        <td><span class="badge b-warn">🟡 底座已落地</span></td>
+        <td><b>RunLifecycle（约 2700 行核心服务）</b>：run 状态机、幂等受理、worker 租约 + epoch fencing、HITL interrupt/resume、事件序号 + 游标补发、取消竞态处理；LangGraph 画像图（官方 postgres checkpointer）；确认后调 algo 四 RPC 产出受控 <code>ALGORITHM_PREVIEW</code>（含多重门禁校验）。另有旧图骨架 4 节点（业务节点仍为 TODO 桩）与离线 HybridRetriever。</td>
+      </tr>
+      <tr>
+        <td><b>svc-gateway</b>（Go）</td>
+        <td><span class="badge b-ok">✅ 已接线</span></td>
+        <td>三入口（CreatePlan / ConfirmProfile / BackfillProfile）+ GetRun / CancelRun / WatchRun 全部实现：principal 鉴权、幂等键校验、命令转交 RunLifecycle、标准 SSE 事件流（心跳、Last-Event-ID / after_event_seq 断线重连）。限流器仍为 TODO。</td>
+      </tr>
+      <tr>
+        <td><b>svc-llm-gateway</b>（Go）</td>
+        <td><span class="badge b-bad">⛔ 仅骨架</span></td>
+        <td>Chat / StreamChat 均返回 TODO；仅有 <code>llm_call_log</code> 记账表 schema。路由 / 缓存 / 预算原子预占结算计划在 M4/M5 落地。</td>
+      </tr>
+      <tr>
+        <td><b>Frontend</b>（Vue 3）</td>
+        <td><span class="badge b-warn">🟡 受控预览</span></td>
+        <td>Run Console：创建 run、SSE 订阅（<code>useRunLifecycle</code> 组合式函数）、画像确认交互、算法预览展示（<code>AlgorithmPreview.vue</code>）；Playwright e2e 用例。</td>
+      </tr>
+      <tr>
+        <td><b>数据层</b>（PostgreSQL）</td>
+        <td><span class="badge b-ok">✅ 已版本化</span></td>
+        <td>15 个迁移：基础 schema（院校/专业/招生计划/录取历史/一分一段表）+ pg_trgm 政策检索 + release 不可变快照 + run 生命周期 + 租约 + 算法预览结果 + 默认 release scope。sqlc 生成类型安全查询。</td>
+      </tr>
+      <tr>
+        <td><b>RAG / ETL</b>（Python）</td>
+        <td><span class="badge b-warn">🟡 离线可用</span></td>
+        <td><code>HybridRetriever</code>（pgvector 向量 + pg_trgm 关键词 + RRF k=60，SQL 全参数化）、<code>etl.py</code> 摄取管线、<code>qa_check.py</code> 质检脚本、5700+ 院校章程原料。在线节点接线属 M4。</td>
+      </tr>
+      <tr>
+        <td><b>报告生成 / Verifier / Critic / 政策问答</b></td>
+        <td><span class="badge b-bad">⛔ 未实现</span></td>
+        <td>PRD 已定义完整目标态（三类证据模型、有界修订循环），代码为设计目标，属 M5/M6。</td>
+      </tr>
+    </table>
+  </div>
+  <div class="callout c-green">
+    <b>当前端到端能走通的链路</b>：前端创建 run → gateway 受理转交 → orchestrator 持久化 + 画像图 interrupt → 用户确认画像 → worker 领取（租约）→ 调 algo 四 RPC（位次换算 → 候选池 + 概率 → 选科过滤 → 志愿表优化）→ 多重门禁校验后发布 <code>ALGORITHM_PREVIEW</code> 事件 → SSE 推送前端展示。这条「受控算法预览」链路是 M2/M3 里程碑的实际产出；<b>正式推荐报告</b>（规则发布链路、证据校验、报告生成、LLM 治理）尚未实现。
+  </div>
+</section>
+
+<!-- ================= 4 ================= -->
+<section id="s4">
+  <h2>4. svc-algo 算法服务（唯一成体系的已实现能力）</h2>
+
+  <h3 id="s4-1">4.1 Kratos 三层结构</h3>
+  <div class="card">
+    <table>
+      <tr><th>层</th><th>包</th><th>职责与约束</th></tr>
+      <tr><td><b>service</b></td><td><code>internal/algo/service</code><br>(algo.go / dto.go / error.go)</td><td>薄层：每个 RPC 只做 ①解析校验入参 ②调一个 usecase 方法 ③biz↔pb DTO 映射 + <code>toKratosErr</code> 错误映射。dto.go 保证 <code>fromPb(toPb(x))==x</code> round-trip 一致（slice/map 空→nil 约定）。</td></tr>
+      <tr><td><b>biz</b></td><td><code>internal/algo/biz</code><br>(rank / prob / constraint / utility / optimize / recommend / config / types / repo)</td><td>领域算法纯函数 + Repo 接口；不碰 SQL、不 import pb、不 import kratos errors；框架无关 sentinel error（如 <code>ErrCandidateWithoutProb</code>）。</td></tr>
+      <tr><td><b>data</b></td><td><code>internal/algo/data</code><br>(data.go / rank.go / admission.go)</td><td>pgx/v5 实现 <code>AdmissionRepo</code> / <code>RankRepo</code>；SQL 只存在于这一层；三段批量 SQL（LoadCandidates / BatchGroupHistory / BatchGroupPlan）避免 N+1。</td></tr>
+    </table>
+    <p>依赖注入：Wire（<code>cmd/algo/wire.go</code> + 手写维护的 <code>wire_gen.go</code>）；配置：<code>conf.Bootstrap</code> 三段式，算法常量外部化到 <code>configs/algo.yaml</code>（不在代码内写默认值）。</p>
+  </div>
+
+  <h3 id="s4-2">4.2 四个 RPC 的算法设计（一 RPC = 一 usecase）</h3>
+  <div class="card">
+    <table>
+      <tr><th>RPC</th><th>usecase</th><th>算法要点</th></tr>
+      <tr>
+        <td><code>RankConvert</code></td>
+        <td>RankUsecase.Convert</td>
+        <td>分数→位次正向换算（基于一分一段表 <code>score_rank_map</code>，按批次互斥分数分区，含 <code>control_score</code> 控制线列）。仅正向，不做 rank-only 反推（符合 R7 口径）。</td>
+      </tr>
+      <tr>
+        <td><code>EstimateProb</code></td>
+        <td>RecommendUsecase.EstimateProb</td>
+        <td>编排链：rank.Convert → LoadCandidates（院校专业组为候选单位，GroupKey 内存合并）→ CheckConstraints 选科过滤 → BatchGroupHistory/Plan → RecommendCandidates。概率用<b>加权命中率法</b>，钳制 [0.01, 0.99]；基准年窗口 = [year−W, year−1]，<b>不含报考年</b>（防验证泄漏）；末尾回填 <code>AuditBasis</code>（sampleYears / UserRank / UserPercentile，与 RankConvert 同源口径）。候选按概率分档：冲 / 稳 / 保。</td>
+      </tr>
+      <tr>
+        <td><code>CheckConstraints</code></td>
+        <td>RecommendUsecase.CheckConstraints</td>
+        <td>纯函数无 Repo。<code>subject_req</code> 文本解析：全角逗号切首选/再选；再选「不限」→none、单科→all、「X/Y(2选1)」→atLeastOne、「X、Y(2科必选)」→all；政治→思想政治归一；组级 match-any；按输入序保序。<b>目前仅实现选科维度</b>——单科/体检/性别/学费需等规则发布链路（M4）。</td>
+      </tr>
+      <tr>
+        <td><code>OptimizeWishlist</code></td>
+        <td>OptimizeUsecase.OptimizeWishlist</td>
+        <td>五步：按 Category 分组 → 按风险偏好配比（RiskAppetite 覆盖 TargetRatio）定向配额 round(L×ratio)、保档兜底 L−rush−stable、不足空位按全局 utility 降序补 → 全序排序赋 FinalRank → checkSafeGuard 保底校验。效用打分四维：tierScore / majorScore（子串匹配）/ locationScore（城市 1.0 / 同省湖南 0.8 / 其他 0.5）/ strengthScore（0.4 硕士点 + 0.3 博士点 + 0.3 软科），min-max 归一 + 偏好维度加权（PriorityDims×2，归一 Σ=1）。滑档率用<b>解析式</b> Π(1−pᵢ) 取代蒙特卡洛；SafeGuardOK=false 是告警非 error。</td>
+      </tr>
+    </table>
+  </div>
+
+  <h3 id="s4-3">4.3 可复现纪律（确定性保障）</h3>
+  <div class="callout c-amber">
+    三条硬纪律贯穿全部算法代码：<b>①单线程</b>执行不引入并发乱序；<b>②全序排序带 tie-break</b>（如 <code>lessByUtilityThenKey</code>：Score↓ → UniversityCode↑ → MajorGroup↑），杜绝排序不稳定；<b>③禁止 map 迭代产序</b>，遍历走固定维度 slice。同输入必同输出，这是「算法结果可审计、可回放」的基础。
+  </div>
+</section>
+
+<!-- ================= 5 ================= -->
+<section id="s5">
+  <h2>5. svc-orchestrator 编排服务（Python / LangGraph）</h2>
+
+  <h3 id="s5-1">5.1 RunLifecycle：持久 run 生命周期（核心底座，约 2700 行）</h3>
+  <div class="card">
+    <p><code>app/run_lifecycle/service.py</code> 是整个编排服务的唯一公开 seam，实现了 PRD §5.2 中步骤 1–7 + 15 的受控子集：</p>
+    <div class="fsm">
+      <span class="st">QUEUED</span><span class="ar">→ worker 领取(租约) →</span>
+      <span class="st">RUNNING</span><span class="ar">→ interrupt →</span>
+      <span class="st hitl">WAITING_HITL</span><span class="ar">→ ResumeRun →</span>
+      <span class="st">QUEUED / RUNNING</span><span class="ar">→</span>
+      <span class="st term">SUCCEEDED / FAILED / CANCELLED / EXPIRED</span>
+    </div>
+    <ul>
+      <li><b>命令接口</b>：<code>SubmitRun</code>（幂等受理，同幂等键重放原回执）、<code>ResumeRun</code>（回答/确认指定 interrupt，校验所有权、状态版本、profile_version、interrupt 未过期未消费）、<code>GetRun</code>、<code>CancelRun</code>（处理取消与发布竞态）、<code>WatchRun</code>（持久 <code>event_seq</code>、typed progress/interrupt/result/error 事件、游标补发与断线重订）。</li>
+      <li><b>并发安全</b>：worker 租约 + <code>lease_epoch</code> fencing（防旧 worker 写入），执行/HITL 双时限，到期 HITL 自动过期；有检查点 ≠ 有执行权，执行权由租约裁决（收口审查问题 P1-09）。</li>
+      <li><b>断点续跑</b>：官方 <code>langgraph-checkpoint-postgres</code> 承载检查点（ADR-0002）；receipt / interrupt 原子恢复。</li>
+      <li><b>画像模型</b>：不可变画像 revision（<code>profile_revision</code>），确认绑定 profile_version，修正生成新版本（<code>profile.py</code> 约 370 行）。</li>
+      <li><b>release 绑定</b>：run 创建时绑定内容哈希不可变 <code>release_id</code>（ADR-0004），algo 查询按 release 过滤，防止跨版本数据漂移。</li>
+    </ul>
+  </div>
+
+  <h3 id="s5-2">5.2 LangGraph 画像图（interrupt / resume 双闸门）</h3>
+  <div class="card">
+    <p><code>profile_graph.py</code> 定义了当前真正运行的业务图，结构刻意精简：</p>
+    <div class="fsm">
+      <span class="st">prepare_profile</span><span class="ar">→</span>
+      <span class="st hitl">pause_for_user<br><small>interrupt：画像确认卡</small></span><span class="ar">→ CONFIRM_PROFILE →</span>
+      <span class="st hitl">wait_for_execution<br><small>内部执行闸门 interrupt</small></span><span class="ar">→ worker 恢复 →</span>
+      <span class="st">algorithm_preview</span><span class="ar">→ END</span>
+    </div>
+    <p>两个 interrupt 的分工：<b>用户闸门</b>（画像确认，等待人类回答）与<b>内部执行闸门</b>（确认写回业务库后由 worker 恢复，保证执行权与租约一致）。拒绝/修改画像则走 END 或生成新 revision 重新确认。</p>
+    <p>另有旧图骨架 <code>graph/build.py</code>（intake → profile_confirm → retrieve → check_conditional），护栏常量已就位（补问上限 6 / Verifier 重试 2 / Critic 回边 2，与 PRD v1.3 对齐），但四个业务节点仍是 TODO 桩，属 M2/M6 后续接线对象。确定性完整性闸门 <code>state.py::check_completeness</code> 是纯函数（符合「LLM 不当闸门」原则）。</p>
+  </div>
+
+  <h3 id="s5-3">5.3 算法预览流水线（受控 ALGORITHM_PREVIEW）</h3>
+  <div class="card">
+    <p>用户确认画像后，RunLifecycle 通过 <code>GrpcAlgoClient</code>（<code>algo.py</code>，grpc.aio）串联 algo 四 RPC，并在发布前执行多重<b>确定性门禁</b>（对应审查问题 P1-14 的收口方式）：</p>
+    <ol>
+      <li><code>RankConvert</code>：run 绑定 release_id 传入，校验 reply rank 与后续 EstimateProb 的 <code>AuditBasis</code> 一致（同源口径校验）；</li>
+      <li><code>EstimateProb</code>：传确认后省/年/科/批/分数/选科，校验概率范围 [0.01,0.99]、候选身份、重复/漂移、执行时限；</li>
+      <li><code>CheckConstraints</code>：只把 kept 候选送入下一步；</li>
+      <li><code>OptimizeWishlist</code>：结果连同候选、概率、AuditBasis <b>原样</b>发布为 <code>ALGORITHM_PREVIEW</code>（编排层不改写任何数值与候选身份）；</li>
+      <li>预览非空才发布，且明确标注<b>非录取保证</b>；正式推荐发布仍需 M4/M5 的规则/证据/报告门禁。</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ================= 6 ================= -->
+<section id="s6">
+  <h2>6. svc-gateway 网关（Go / Kratos）</h2>
+  <div class="card">
+    <p><code>internal/gateway/service.go</code>（448 行）定位是<b>纯接入层</b>——「只做接入与门控；run 生命周期和图内控制归 svc-orchestrator」，内部不含第二套状态机（仅依赖 <code>runClient</code> 最小传输接口）：</p>
+    <ul>
+      <li><b>命令转交</b>：CreatePlan → SubmitRun；ConfirmProfile / BackfillProfile → ResumeRun（按 answer.type 分派 CONFIRM_PROFILE / REJECT_OR_EDIT_PROFILE / ANSWER_FIELDS / DECLINE_FIELDS 四类回答）；GetRun / CancelRun / WatchRun 直接透传。</li>
+      <li><b>鉴权</b>：<code>x-principal-id</code> 必填（gRPC metadata 或 HTTP header），缺失返回 <code>PRINCIPAL_REQUIRED</code>；入站校验后以 outgoing metadata 传给 orchestrator。</li>
+      <li><b>幂等</b>：IdempotencyKey 必填校验；回执状态映射 accepted / replayed / rejected。</li>
+      <li><b>SSE 事件流</b>：<code>RegisterRunEventStream</code> 挂 <code>GET /v1/runs/{run_id}/events</code>，typed RunEvent 以 protojson 写入标准 SSE（id=event_seq, event=type），15s 心跳不占业务序号，支持 <code>Last-Event-ID</code> 头与 <code>after_event_seq</code> 查询参数断线重连——SSE 连接不承担任务生命周期（收口 P1-08）。</li>
+      <li><b>未实现</b>：令牌桶限流 + 并发闸门（FR-21，M2/M4）。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 7 ================= -->
+<section id="s7">
+  <h2>7. svc-llm-gateway（未实现，设计已定）</h2>
+  <div class="card">
+    <p>当前 <code>internal/llmgw/service.go</code> 仅 38 行：Chat / StreamChat 均返回 TODO。目标态设计（FR-20 + ADR-0003）已明确：</p>
+    <ul>
+      <li>role→model 路由表（Go 侧唯一决策点）；早期模型选 DeepSeek（deepseek-v4-pro），M5 收口网关；</li>
+      <li>prompt_hash 缓存，缓存键 = <code>prompt_hash + release_id + model</code>（ADR-0004 根治「data_version 可变快照」问题 P1-11）；</li>
+      <li>Budget Guard：原子预占 + 结算 + 账本（超预算直接拒绝，不先花钱再记账）；</li>
+      <li>调用后写 <code>llm_call_log</code>（trace / role / model / token / cost / latency）。</li>
+    </ul>
+    <p>当前过渡策略：orchestrator 早期 Python 直连模型 = 实验链路（须标注「无完整治理链路」）；M2 任务底座用测试替身，不需真模型。</p>
+  </div>
+</section>
+
+<!-- ================= 8 ================= -->
+<section id="s8">
+  <h2>8. 前端 Run Console（Vue 3 + Vite + TS）</h2>
+  <div class="card">
+    <ul>
+      <li><code>src/api/gateway.ts</code>（220 行）：封装 gateway HTTP 接口（创建 / 确认 / 补答 / 查询 / 取消）；</li>
+      <li><code>src/composables/useRunLifecycle.ts</code>（211 行）：SSE 订阅组合式函数，处理事件游标与重连；</li>
+      <li><code>src/components/AlgorithmPreview.vue</code>：算法预览卡（候选、概率、AuditBasis、保底告警展示）；</li>
+      <li><code>App.vue</code>（271 行）+ 单元测试；<code>e2e/run-console.spec.ts</code> Playwright 端到端用例。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 9 ================= -->
+<section id="s9">
+  <h2>9. 数据层设计（PostgreSQL，15 个平铺迁移）</h2>
+  <div class="card">
+    <table>
+      <tr><th>迁移</th><th>内容</th></tr>
+      <tr><td><code>00_schema.sql</code></td><td>基础 13 表：university / major / enrollment_plan / major_admission / school_admission / score_rank_map（含 control_score）/ charter_doc / charter_chunk（已废弃，见 ADR-0006）/ chat_session / plan_checkpoint（降级为业务审计快照）/ llm_call_log / eval_run / data_version（过渡）；pgvector + pg_trgm 扩展、HNSW + GIN 索引齐备。</td></tr>
+      <tr><td><code>01~06</code></td><td>院校 / 专业 / 招生计划 / 专业录取 / 院校录取 / 一分一段表数据装载（2022–2024 训练、2025 验证）。</td></tr>
+      <tr><td><code>07</code></td><td><code>policy_doc / policy_chunk</code> + pg_trgm 索引 —— 检索活表（ADR-0001 维持 pg_trgm + 向量主导，推迟 zhparser）。</td></tr>
+      <tr><td><code>08~10</code></td><td>release 不可变快照（内容哈希 release_id）+ run 生命周期基础 + 画像 revision + run 租约（lease epoch fencing）。</td></tr>
+      <tr><td><code>11~14</code></td><td>算法预览结果、run 视图字段、release 数据维度、默认 release scope。</td></tr>
+    </table>
+    <p>访问方式：Go 侧 pgx/v5 + sqlc（<code>sqlc.yaml</code>，SQL 全参数化，<code>make sqlc-generate</code> 生成类型安全代码）；Python 侧 psycopg AsyncConnection（RunLifecycle 直写业务库）+ LangGraph 官方 postgres checkpointer。<b>历史迁移只增不改</b>是禁改红线。</p>
+  </div>
+</section>
+
+<!-- ================= 10 ================= -->
+<section id="s10">
+  <h2>10. RAG 检索与数据资产</h2>
+  <div class="card">
+    <ul>
+      <li><b>HybridRetriever</b>（<code>rag/retrieve.py</code>）：双路召回 —— pgvector 向量语义路 + pg_trgm 关键词路（ILIKE / similarity），RRF（k=60）融合，确定性 tie-break，SQL 全参数化；meta 硬过滤目前仅 school_name / year（province / category 待补）。</li>
+      <li><b>ETL 管线</b>（<code>rag/etl.py</code> 376 行 + <code>scripts/ingest_charters.py</code>）：从 <code>docs/charters/2025/</code> 的 5700+ 院校章程 txt/json 原料摄取入库；<code>scripts/qa_check.py</code> 质检（四层质检防线的完整核实属 M4）。</li>
+      <li><b>分工纪律</b>：强结构化数据（分数/位次/计划/录取）只走 SQL；RAG 仅服务非结构化章程文本；SQL 数值结果不与 chunk 混进同一 RRF 排名。</li>
+      <li><b>表名收口</b>（ADR-0006）：检索走 <code>policy_chunk</code>，废弃孤儿空表 <code>charter_*</code>。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 11 ================= -->
+<section id="s11">
+  <h2>11. 工程红线与已拍板决策（ADR 0001~0006）</h2>
+  <div class="card">
+    <table>
+      <tr><th>ADR</th><th>决策</th><th>要点与否决项</th></tr>
+      <tr><td>0001</td><td>中文分词选型</td><td>维持 pg_trgm + 向量主导，<b>推迟 zhparser</b>；否决现在自定义 PG 镜像 / pg_bigm（无 golden set 无法量化收益，M4 建评测集后再评估）。</td></tr>
+      <tr><td>0002</td><td>LangGraph saver</td><td>官方 <code>langgraph-checkpoint-postgres</code>（自带 interrupt/resume + pending writes + 并发语义）；<code>plan_checkpoint</code> 降级为业务审计快照；否决改造自定义表。</td></tr>
+      <tr><td>0003</td><td>早期 LLM</td><td>DeepSeek（deepseek-v4-pro）；早期 Python 直连 = 实验链路，M5 收口 llmgw；key 只放 .env。</td></tr>
+      <tr><td>0004</td><td>release_id 形态</td><td>内容哈希不可变 <code>release</code> 表（各数据源版本清单 SHA256 前缀）；run 创建时绑定；缓存键 = prompt_hash + release_id + model；禁原地覆盖；根治跨服务快照不一致（P1-11）。</td></tr>
+      <tr><td>0005</td><td>golden set 归属</td><td>Francis 最终定标，Agent 出草稿 + 跑评测 + diff；首批检索集 30 条 + 端到端集 10 条（覆盖冲稳保 / 硬约束剔除 / 无可靠数据三类场景）。</td></tr>
+      <tr><td>0006</td><td>表名收口</td><td>收口到 <code>policy_*</code>（活表），废弃 <code>charter_*</code>（孤儿空表）；零数据迁移。</td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- ================= 12 ================= -->
+<section id="s12">
+  <h2>12. 缺口与路线图（M1~M6）</h2>
+  <div class="card">
+    <table>
+      <tr><th>阶段</th><th>里程碑</th><th>状态</th><th>内容</th></tr>
+      <tr><td>A</td><td>M1 规格对齐</td><td><span class="badge b-ok">✅ 基本完成</span></td><td>八份 runtime 契约（Profile / Run / Retrieval / Rules / Evidence / LLM Gateway / Eval-SLO / Security-Retention）已建立于 <code>docs/specs/</code>。</td></tr>
+      <tr><td>B</td><td>M2 任务底座</td><td><span class="badge b-ok">✅ 已接</span></td><td>run 状态机 + 租约 + 幂等恢复 + SSE 事件分型 + LangGraph saver + gateway 三入口转 RunLifecycle 命令。</td></tr>
+      <tr><td>C</td><td>M3 算法闭环</td><td><span class="badge b-warn">🟡 受控预览已接</span></td><td>orchestrator 接 algo 四 RPC 产出 ALGORITHM_PREVIEW；正式推荐仍需 M4/M5 门禁。</td></tr>
+      <tr><td>D</td><td>M4 生产资格与证据</td><td><span class="badge b-bad">⛔ 未开始</span></td><td>ETL 四层质检 + 双路检索在线化 + rerank；当年规则发布链路（单科/体检/性别/学费，PASS/FAIL/UNKNOWN 三态）；三类证据校验；golden set + CI 门禁。</td></tr>
+      <tr><td>E</td><td>M5 模型治理与表达</td><td><span class="badge b-bad">⛔ 未开始</span></td><td>llmgw 路由 / 缓存 / 原子预占结算；报告生成 + 失败模板 + 强制免责声明；隐私脱敏。</td></tr>
+      <tr><td>F</td><td>M6 智能增强</td><td><span class="badge b-bad">⛔ 未开始</span></td><td>Strategy / Critic / 政策问答 / 解释·修订子图；全链路 OTel；压测。</td></tr>
+    </table>
+    <h3>已知口径缺口（写代码前要修，来自 gap-analysis §4）</h3>
+    <ul>
+      <li><b>B4</b>：<code>chat_session</code> 缺 profile_version 列 → 画像修正后派生数据失效一致性（P1-13）无锚点；</li>
+      <li><b>B5</b>：charter_* / policy_* 双轨表尚未在 00_schema 标注收口；</li>
+      <li><b>C1</b>：<code>state.py</code> GLOBAL_REQUIRED 用 track，proto/DB 用 category，字段口径待统一；</li>
+      <li><b>C2</b>：闸门接受 rank-only 输入，但接口仅支持 score→rank；</li>
+      <li><b>C4</b>：route_after_intake 到补问上限静默放行（应 FAILED/INCOMPLETE_PROFILE，不带缺项进算法）；</li>
+      <li><b>C5</b>：画像为 TypedDict 仅类型提示，需换 Pydantic 运行时校验；</li>
+      <li><b>D1</b>：RankConvertReply 缺控制线透出（DB 有 control_score，proto 无字段）。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 13 ================= -->
+<section id="s13">
+  <h2>13. 测试与验证现状</h2>
+  <div class="card">
+    <table>
+      <tr><th>范围</th><th>状态</th></tr>
+      <tr><td>svc-algo biz 单测</td><td>✅ 60 PASS（rank / prob / constraint / utility / optimize 纯函数）</td></tr>
+      <tr><td>svc-algo service 单测</td><td>✅ 18 PASS（12 DTO round-trip + 4 RPC + 2 输出断言组）</td></tr>
+      <tr><td>svc-algo 集成测试</td><td>✅ <code>//go:build integration</code> + 只读 <code>ALGO_TEST_DSN</code>：data 层 6 个（含志愿表 len=45 端到端）+ service 层四 RPC 串联（600 分→rank=15860；冲38/稳17/保1864；kept=1919；滑档率 1.67e-38）</td></tr>
+      <tr><td>orchestrator Python 测试</td><td>✅ 约 82 个测试函数：<code>test_run_lifecycle_{submit,profile,lease,transport,algorithm_preview,preview_gates,migration}.py</code> + <code>test_offline.py</code>（离线，不下载模型不入库）</td></tr>
+      <tr><td>gateway 测试</td><td>✅ <code>service_test.go</code> + <code>http_test.go</code>（SSE / 命令转交 / 鉴权）</td></tr>
+      <tr><td>前端</td><td>🟡 <code>App.test.ts</code> 单测 + Playwright e2e（run-console.spec.ts）</td></tr>
+      <tr><td>容器化</td><td>✅ 四镜像经 DaoCloud 镜像源构建成功；Compose 校验、algo 容器四 RPC、Python 镜像 12 项离线测试通过；整栈 / amd64 / GPU / 生产部署未验证</td></tr>
+      <tr><td>验证命令</td><td><code>make api / build / check / test</code>（Go）· <code>make py-check py-test PY=$PY</code>（Python，Conda 环境）· <code>make sqlc-generate</code>（改 SQL 后）</td></tr>
+    </table>
+  </div>
+
+  <div class="callout c-blue">
+    <b>一句话总结</b>：这是一个「文档驱动 + 决策留痕」的工程项目——目标态（PRD v1.3 的 24 条 FR、15 步端到端流程）已完整定义并拍板 6 项 ADR；代码层面 <b>svc-algo 算法闭环、RunLifecycle 任务底座、gateway 接入与 SSE、受控算法预览链路、前端 Run Console</b> 已实测落地（M1~M3），而 <b>LLM 治理、正式规则发布、证据校验、报告生成与智能增强子图</b>（M4~M6）仍是设计目标。当前系统的准确定位是：<b>可跑通「画像采集 → 确认 → 算法预览」的受控最小闭环，尚不能对外声称具备正式推荐发布能力</b>。
+  </div>
+</section>
+
+<footer>
+  本文档由代码实测与项目权威文档（prd.md v1.3 / gap-analysis.md / adr 0001~0006 / AGENTS.md）交叉核对生成 · 2026-11-19 · 仅供阅读分析，不修改任何仓库文件。
+</footer>
+
+</main>
+</div>
+</body>
+</html>

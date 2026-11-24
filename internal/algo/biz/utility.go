@@ -107,12 +107,14 @@ func tierScore(tier string) float64 {
 	}
 }
 
-// majorScore 专业匹配（关键词包含）：任一 interest 作为子串命中任一组内 MajorName → 1.0，否则 0.0。
-// 无 interests → 0.0（该维对本批全体一致，不影响相对排序）。后续优化：LLM 语义匹配。
+// majorScore 专业匹配：任一受控专业名称与组内 MajorName 完全一致 → 1.0，否则 0.0。
+// 用户接受相关专业时，上游会把可核验的专业名称逐项加入 interests；这里不做模糊扩写。
+// 无 interests → 0.0（该维对本批全体一致，不影响相对排序）。
 func majorScore(interests []string, majors []MajorDetail) float64 {
 	for _, m := range majors {
-		for _, kw := range interests {
-			if kw != "" && strings.Contains(m.MajorName, kw) {
+		for _, interest := range interests {
+			if strings.TrimSpace(interest) != "" &&
+				strings.TrimSpace(interest) == strings.TrimSpace(m.MajorName) {
 				return 1.0
 			}
 		}
@@ -166,6 +168,9 @@ func deriveWeights(profile UserProfile, config UtilityConfig) map[string]float64
 		if _, ok := w[d]; ok { // 只认四维内的合法 key，忽略未知维度
 			boost[d] = true
 		}
+	}
+	if len(profile.Interests) > 0 {
+		boost[DimMajor] = true
 	}
 	if len(profile.PreferredTiers) > 0 {
 		boost[DimTier] = true // 强调学校层次 → tier ×2（封顶，不与 PriorityDims 叠加）

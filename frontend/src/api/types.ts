@@ -12,6 +12,21 @@ export interface StructuredProfileForm {
   batch: string;
   score: number;
   subjects: string[];
+  riskAppetite: "conservative" | "balanced" | "aggressive";
+  priorityDims: string[];
+  interests: string[];
+  preferredCities: string[];
+  preferredTiers: string[];
+  requiredProvinces: string[];
+  excludedProvinces: string[];
+  requiredCities: string[];
+  excludedCities: string[];
+  requiredTiers: string[];
+  requiredMajorNames: string[];
+  requiredMajorKeywords: string[];
+  excludedMajorKeywords: string[];
+  excludedMajorNames: string[];
+  excludedUniversities: string[];
 }
 
 export interface CreatePlanReply {
@@ -34,12 +49,38 @@ export interface InterruptView {
   state: string;
   profileVersion?: string;
   fields?: Record<string, ProfileFieldView>;
+  regionClarification?: RegionClarification;
   findings?: Array<{
     code: string;
     fieldKeys: string[];
     blocking: boolean;
     messageKey: string;
   }>;
+}
+
+export interface RegionPreset {
+  id: string;
+  name: string;
+  provinces: string[];
+}
+
+export interface RegionClarification {
+  clarificationId: string;
+  clarificationKind: "SELECT_PROVINCES";
+  reasonCode: string;
+  term: string;
+  operation: "exclude" | "require" | "withdraw";
+  catalogVersion: string;
+  provinces: string[];
+  presets: RegionPreset[];
+}
+
+export interface RegionAnswer {
+  clarificationId: string;
+  provinces: string[];
+  presetIds: string[];
+  catalogVersion: string;
+  cancelRegionRestriction: boolean;
 }
 
 export interface UnverifiedCondition {
@@ -135,6 +176,7 @@ export interface CandidateWithProb {
     majorGroup: string;
     schoolTier?: string;
     location?: string;
+    majors?: AlgorithmMajor[];
   };
   prob?: {
     probability: number;
@@ -142,6 +184,44 @@ export interface CandidateWithProb {
     dataYears: number;
     category: string;
   };
+}
+
+export interface AlgorithmMajor {
+  majorCode: string;
+  majorName: string;
+  subjectReq?: string;
+  duration?: string;
+  tuition?: number;
+  hasTuition?: boolean;
+  minScore?: number;
+  minRank?: number;
+  referenceYear?: number;
+  admissionProbability?: number;
+  probabilityDataYears?: number;
+  planCount?: number;
+  recommended?: boolean;
+  recommendationRank?: number;
+  selectable?: boolean;
+  unavailableReason?: string;
+}
+
+export interface ReportMajor {
+  majorCode: string;
+  majorName: string;
+  subjectReq: string;
+  duration: string;
+  minScore?: number;
+  minRank?: number;
+  referenceYear?: number;
+  admissionProbability?: number;
+  probabilityDataYears: number;
+  probabilitySampleYears?: number[];
+  planCount?: number;
+  tuition?: number;
+  recommended: boolean;
+  recommendationRank: number;
+  selectable: boolean;
+  unavailableReason: string;
 }
 
 export interface FormalEvidenceCitation {
@@ -159,6 +239,27 @@ export interface FormalReportSection {
   title: string;
   body: string;
   citations: FormalEvidenceCitation[];
+  history?: HistoricalAdmissionReference[];
+  majors?: ReportMajor[];
+  planCount?: number;
+  previousPlanCount?: number;
+  planAdjustFactor?: number;
+  probability?: number;
+  strategyTier?: string;
+  utilityScore?: number;
+  finalRank?: number;
+  universityCode?: string;
+  universityName?: string;
+  majorGroup?: string;
+}
+
+export interface HistoricalAdmissionReference {
+  year: number;
+  minScore?: number;
+  minRank?: number;
+  totalCount?: number;
+  mappingMethod?: string;
+  mappingConfidence?: number;
 }
 
 export interface FormalReport {
@@ -167,6 +268,7 @@ export interface FormalReport {
   sections: FormalReportSection[];
   claimIds: string[];
   unverifiedFacts: string[];
+  degradationReason?: string;
 }
 
 export interface FormalResult {
@@ -182,6 +284,35 @@ export interface FormalResult {
   riskNotice: string;
   noAdmissionGuarantee: string;
   report: FormalReport;
+}
+
+export interface WishlistDraftGroup {
+  universityCode: string;
+  majorGroup: string;
+  majorCodes: string[];
+}
+
+export interface WishlistDraftRisk {
+  groupCount: number;
+  rushCount: number;
+  stableCount: number;
+  safeTierCount: number;
+  safeGuardCount: number;
+  safeGuardTarget: number;
+  safeGuardOk: boolean;
+  slipRate: number;
+  expectedSatisfaction?: number;
+}
+
+export interface WishlistDraft {
+  draftVersionId: string;
+  resultVersion: string;
+  runId: string;
+  releaseId: string;
+  draftVersion: number;
+  groups: WishlistDraftGroup[];
+  createdAt: string;
+  risk?: WishlistDraftRisk;
 }
 
 export interface RejectedCandidate {
@@ -242,4 +373,55 @@ export interface CancelReceipt {
   runId: string;
   state: string;
   stage: string;
+}
+
+export interface ChatMessageView {
+  messageId: string;
+  runId?: string;
+  role: "USER" | "ASSISTANT" | "SYSTEM";
+  kind: "TEXT" | "PROGRESS" | "RESULT" | "ERROR";
+  content: string;
+  createdAt?: string;
+  metadata?: Record<string, string>;
+}
+
+export interface SessionSummary {
+  sessionId: string;
+  title: string;
+  latestRunId?: string;
+  latestState: string;
+  latestResultVersion?: string;
+  latestResultKind?: string;
+  runCount: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface SessionRun {
+  runId: string;
+  taskKind: string;
+  state: RunView["state"];
+  stage: string;
+  terminalReason?: string;
+  parentResultVersion?: string;
+  resultVersion?: string;
+  resultKind?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ChatSessionDetail {
+  summary: SessionSummary;
+  messages: ChatMessageView[];
+  runs: SessionRun[];
+  profileFields: Record<string, ProfileFieldView>;
+}
+
+export interface ConversationReply {
+  sessionId: string;
+  runId?: string;
+  taskKind?: string;
+  status: string;
+  assistantMessage: string;
+  regionClarification?: RegionClarification;
 }

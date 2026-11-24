@@ -22,47 +22,106 @@ func toInt(v int32) int { return int(v) }
 // ======== MajorDetail ========
 
 func toPbMajorDetail(m biz.MajorDetail) *algov1.MajorDetail {
-	return &algov1.MajorDetail{
-		MajorCode:     m.MajorCode,
-		MajorName:     m.MajorName,
-		SubjectReq:    m.SubjectReq,
-		Duration:      m.Duration,
-		Tuition:       m.Tuition,
-		MajorNote:     m.MajorNote,
-		MinScore:      i32(m.MinScore),
-		MinRank:       i32(m.MinRank),
-		AdmitCount:    i32(m.AdmitCount),
-		InCurrentPlan: m.InCurrentPlan,
+	pb := &algov1.MajorDetail{
+		MajorCode:            m.MajorCode,
+		MajorName:            m.MajorName,
+		SubjectReq:           m.SubjectReq,
+		Duration:             m.Duration,
+		Tuition:              m.Tuition,
+		HasTuition:           m.HasTuition,
+		MajorNote:            m.MajorNote,
+		MinScore:             i32(m.MinScore),
+		MinRank:              i32(m.MinRank),
+		AdmitCount:           i32(m.AdmitCount),
+		Recommended:          m.Recommended,
+		RecommendationRank:   i32(m.RecommendationRank),
+		ProbabilityDataYears: i32(m.ProbabilityDataYears),
+		Selectable:           m.Selectable,
+		UnavailableReason:    m.UnavailableReason,
+		InCurrentPlan:        m.InCurrentPlan,
 	}
+	if len(m.ProbabilitySampleYears) > 0 {
+		pb.ProbabilitySampleYears = make([]int32, 0, len(m.ProbabilitySampleYears))
+		for _, year := range m.ProbabilitySampleYears {
+			pb.ProbabilitySampleYears = append(pb.ProbabilitySampleYears, i32(year))
+		}
+	}
+	if m.PlanCount != nil {
+		value := i32(*m.PlanCount)
+		pb.PlanCount = &value
+	}
+	if m.AdmissionProbability != nil {
+		value := *m.AdmissionProbability
+		pb.AdmissionProbability = &value
+	}
+	if m.ReferenceYear > 0 {
+		value := i32(m.ReferenceYear)
+		pb.ReferenceYear = &value
+	}
+	return pb
 }
 
 func fromPbMajorDetail(m *algov1.MajorDetail) biz.MajorDetail {
 	if m == nil {
 		return biz.MajorDetail{}
 	}
-	return biz.MajorDetail{
-		MajorCode:     m.GetMajorCode(),
-		MajorName:     m.GetMajorName(),
-		SubjectReq:    m.GetSubjectReq(),
-		Duration:      m.GetDuration(),
-		Tuition:       m.GetTuition(),
-		MajorNote:     m.GetMajorNote(),
-		MinScore:      toInt(m.GetMinScore()),
-		MinRank:       toInt(m.GetMinRank()),
-		AdmitCount:    toInt(m.GetAdmitCount()),
-		InCurrentPlan: m.GetInCurrentPlan(),
+	result := biz.MajorDetail{
+		MajorCode:            m.GetMajorCode(),
+		MajorName:            m.GetMajorName(),
+		SubjectReq:           m.GetSubjectReq(),
+		Duration:             m.GetDuration(),
+		Tuition:              m.GetTuition(),
+		HasTuition:           m.GetHasTuition(),
+		MajorNote:            m.GetMajorNote(),
+		MinScore:             toInt(m.GetMinScore()),
+		MinRank:              toInt(m.GetMinRank()),
+		AdmitCount:           toInt(m.GetAdmitCount()),
+		Recommended:          m.GetRecommended(),
+		RecommendationRank:   toInt(m.GetRecommendationRank()),
+		ProbabilityDataYears: toInt(m.GetProbabilityDataYears()),
+		Selectable:           m.GetSelectable(),
+		UnavailableReason:    m.GetUnavailableReason(),
+		InCurrentPlan:        m.GetInCurrentPlan(),
 	}
+	if len(m.GetProbabilitySampleYears()) > 0 {
+		result.ProbabilitySampleYears = make(
+			[]int,
+			0,
+			len(m.GetProbabilitySampleYears()),
+		)
+		for _, year := range m.GetProbabilitySampleYears() {
+			result.ProbabilitySampleYears = append(
+				result.ProbabilitySampleYears,
+				toInt(year),
+			)
+		}
+	}
+	if m.PlanCount != nil {
+		value := toInt(*m.PlanCount)
+		result.PlanCount = &value
+	}
+	if m.AdmissionProbability != nil {
+		value := *m.AdmissionProbability
+		result.AdmissionProbability = &value
+	}
+	if m.ReferenceYear != nil {
+		result.ReferenceYear = toInt(*m.ReferenceYear)
+	}
+	return result
 }
 
 // ======== AdmissionRecord ========
 
 func toPbAdmissionRecord(r biz.AdmissionRecord) *algov1.AdmissionRecord {
 	return &algov1.AdmissionRecord{
-		Year:          i32(r.Year),
-		GroupMinRank:  i32(r.GroupMinRank),
-		TotalCount:    i32(r.TotalCount),
-		MinPercentile: r.MinPercentile,
-		EnrollCount:   i32(r.EnrollCount),
+		Year:              i32(r.Year),
+		GroupMinScore:     i32(r.GroupMinScore),
+		GroupMinRank:      i32(r.GroupMinRank),
+		TotalCount:        i32(r.TotalCount),
+		MinPercentile:     r.MinPercentile,
+		EnrollCount:       i32(r.EnrollCount),
+		MappingMethod:     r.MappingMethod,
+		MappingConfidence: r.MappingConfidence,
 	}
 }
 
@@ -71,11 +130,14 @@ func fromPbAdmissionRecord(r *algov1.AdmissionRecord) biz.AdmissionRecord {
 		return biz.AdmissionRecord{}
 	}
 	return biz.AdmissionRecord{
-		Year:          toInt(r.GetYear()),
-		GroupMinRank:  toInt(r.GetGroupMinRank()),
-		TotalCount:    toInt(r.GetTotalCount()),
-		MinPercentile: r.GetMinPercentile(),
-		EnrollCount:   toInt(r.GetEnrollCount()),
+		Year:              toInt(r.GetYear()),
+		GroupMinScore:     toInt(r.GetGroupMinScore()),
+		GroupMinRank:      toInt(r.GetGroupMinRank()),
+		TotalCount:        toInt(r.GetTotalCount()),
+		MinPercentile:     r.GetMinPercentile(),
+		EnrollCount:       toInt(r.GetEnrollCount()),
+		MappingMethod:     r.GetMappingMethod(),
+		MappingConfidence: r.GetMappingConfidence(),
 	}
 }
 
@@ -98,6 +160,14 @@ func toPbCandidate(c biz.Candidate) *algov1.Candidate {
 	if c.PlanCountKnown {
 		planCount := i32(c.PlanCount)
 		pb.PlanCount = &planCount
+	}
+	if c.PreviousPlanCountKnown {
+		previousPlanCount := i32(c.PreviousPlanCount)
+		pb.PreviousPlanCount = &previousPlanCount
+	}
+	if c.PlanAdjustFactor != nil {
+		factor := *c.PlanAdjustFactor
+		pb.PlanAdjustFactor = &factor
 	}
 	if len(c.Majors) > 0 {
 		pb.Majors = make([]*algov1.MajorDetail, 0, len(c.Majors))
@@ -137,6 +207,14 @@ func fromPbCandidate(c *algov1.Candidate) biz.Candidate {
 	if c.PlanCount != nil {
 		bc.PlanCount = toInt(c.GetPlanCount())
 		bc.PlanCountKnown = true
+	}
+	if c.PreviousPlanCount != nil {
+		bc.PreviousPlanCount = toInt(c.GetPreviousPlanCount())
+		bc.PreviousPlanCountKnown = true
+	}
+	if c.PlanAdjustFactor != nil {
+		factor := c.GetPlanAdjustFactor()
+		bc.PlanAdjustFactor = &factor
 	}
 	if ms := c.GetMajors(); len(ms) > 0 {
 		bc.Majors = make([]biz.MajorDetail, 0, len(ms))
@@ -287,21 +365,41 @@ func fromPbUserProfile(p *algov1.UserProfile) biz.UserProfile {
 		return biz.UserProfile{}
 	}
 	return biz.UserProfile{
-		RiskAppetite:    p.GetRiskAppetite(),
-		PriorityDims:    copyStrSlice(p.GetPriorityDims()),
-		Interests:       copyStrSlice(p.GetInterests()),
-		PreferredCities: copyStrSlice(p.GetPreferredCities()),
-		PreferredTiers:  copyStrSlice(p.GetPreferredTiers()),
+		RiskAppetite:          p.GetRiskAppetite(),
+		PriorityDims:          copyStrSlice(p.GetPriorityDims()),
+		Interests:             copyStrSlice(p.GetInterests()),
+		PreferredCities:       copyStrSlice(p.GetPreferredCities()),
+		PreferredTiers:        copyStrSlice(p.GetPreferredTiers()),
+		RequiredProvinces:     copyStrSlice(p.GetRequiredProvinces()),
+		ExcludedProvinces:     copyStrSlice(p.GetExcludedProvinces()),
+		RequiredCities:        copyStrSlice(p.GetRequiredCities()),
+		ExcludedCities:        copyStrSlice(p.GetExcludedCities()),
+		RequiredTiers:         copyStrSlice(p.GetRequiredTiers()),
+		RequiredMajorNames:    copyStrSlice(p.GetRequiredMajorNames()),
+		RequiredMajorKeywords: copyStrSlice(p.GetRequiredMajorKeywords()),
+		ExcludedMajorKeywords: copyStrSlice(p.GetExcludedMajorKeywords()),
+		ExcludedMajorNames:    copyStrSlice(p.GetExcludedMajorNames()),
+		ExcludedUniversities:  copyStrSlice(p.GetExcludedUniversities()),
 	}
 }
 
 func toPbUserProfile(p biz.UserProfile) *algov1.UserProfile {
 	return &algov1.UserProfile{
-		RiskAppetite:    p.RiskAppetite,
-		PriorityDims:    copyStrSlice(p.PriorityDims),
-		Interests:       copyStrSlice(p.Interests),
-		PreferredCities: copyStrSlice(p.PreferredCities),
-		PreferredTiers:  copyStrSlice(p.PreferredTiers),
+		RiskAppetite:          p.RiskAppetite,
+		PriorityDims:          copyStrSlice(p.PriorityDims),
+		Interests:             copyStrSlice(p.Interests),
+		PreferredCities:       copyStrSlice(p.PreferredCities),
+		PreferredTiers:        copyStrSlice(p.PreferredTiers),
+		RequiredProvinces:     copyStrSlice(p.RequiredProvinces),
+		ExcludedProvinces:     copyStrSlice(p.ExcludedProvinces),
+		RequiredCities:        copyStrSlice(p.RequiredCities),
+		ExcludedCities:        copyStrSlice(p.ExcludedCities),
+		RequiredTiers:         copyStrSlice(p.RequiredTiers),
+		RequiredMajorNames:    copyStrSlice(p.RequiredMajorNames),
+		RequiredMajorKeywords: copyStrSlice(p.RequiredMajorKeywords),
+		ExcludedMajorKeywords: copyStrSlice(p.ExcludedMajorKeywords),
+		ExcludedMajorNames:    copyStrSlice(p.ExcludedMajorNames),
+		ExcludedUniversities:  copyStrSlice(p.ExcludedUniversities),
 	}
 }
 
@@ -333,6 +431,50 @@ func toPbWishlistResult(w biz.WishlistResult) *algov1.WishlistResult {
 		for _, c := range w.Candidates {
 			pb.Candidates = append(pb.Candidates, toPbCandidateWithScore(c))
 		}
+	}
+	return pb
+}
+
+func fromPbDraftGroupRiskInputs(
+	groups []*algov1.DraftGroupRiskInput,
+) []biz.DraftGroupRiskInput {
+	if len(groups) == 0 {
+		return nil
+	}
+	result := make([]biz.DraftGroupRiskInput, 0, len(groups))
+	for _, group := range groups {
+		if group == nil {
+			continue
+		}
+		item := biz.DraftGroupRiskInput{
+			UniversityCode: group.GetUniversityCode(),
+			MajorGroup:     group.GetMajorGroup(),
+			Probability:    group.GetProbability(),
+			Category:       group.GetCategory(),
+		}
+		if group.UtilityScore != nil {
+			value := group.GetUtilityScore()
+			item.UtilityScore = &value
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+func toPbWishlistDraftRisk(r biz.WishlistDraftRisk) *algov1.WishlistDraftRisk {
+	pb := &algov1.WishlistDraftRisk{
+		GroupCount:      i32(r.GroupCount),
+		RushCount:       i32(r.RushCount),
+		StableCount:     i32(r.StableCount),
+		SafeTierCount:   i32(r.SafeTierCount),
+		SafeGuardCount:  i32(r.SafeGuardCount),
+		SafeGuardTarget: i32(r.SafeGuardTarget),
+		SafeGuardOk:     r.SafeGuardOK,
+		SlipRate:        r.SlipRate,
+	}
+	if r.ExpectedSatisfaction != nil {
+		value := *r.ExpectedSatisfaction
+		pb.ExpectedSatisfaction = &value
 	}
 	return pb
 }

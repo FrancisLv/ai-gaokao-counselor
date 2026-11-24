@@ -537,6 +537,120 @@ class RunLifecycleGrpcTests(RunLifecyclePostgresTest):
         self.assertEqual(view.state, pb.FAILED)
         self.assertFalse(view.HasField("result_preview"))
 
+    async def test_grpc_macro_region_answer_uses_typed_clarification(self):
+        from app.run_lifecycle import RunLifecycle
+        from app.server import OrchestratorServicer
+
+        await self.seed_release()
+        server = grpc.aio.server()
+        pb_grpc.add_OrchestratorServicer_to_server(
+            OrchestratorServicer(
+                lifecycle=RunLifecycle(self.dsn, auto_profile=True),
+            ),
+            server,
+        )
+        port = server.add_insecure_port("127.0.0.1:0")
+        await server.start()
+        channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+        client = pb_grpc.OrchestratorStub(channel)
+        metadata = (("x-principal-id", "principal-a"),)
+
+        try:
+            receipt = await client.SubmitRun(
+                pb.SubmitRunRequest(
+                    task_kind=pb.GENERATE_PLAN,
+                    profile_input=pb.StructuredProfileInput(
+                        province="湖南",
+                        application_year=2025,
+                        category="物理类",
+                        batch="本科批",
+                        score=600,
+                        subjects=["物理", "化学", "生物"],
+                    ),
+                    user_message="我不想去北方读大学",
+                    idempotency_key="grpc-macro-region-submit",
+                ),
+                metadata=metadata,
+            )
+            asking = await self._wait_for_grpc_interrupt(
+                client,
+                receipt.run_id,
+                metadata,
+            )
+            clarification = asking.current_interrupt.region_clarification
+            self.assertEqual(
+                clarification.reason_code,
+                "MACRO_REGION_SCOPE_UNRESOLVED",
+            )
+            self.assertEqual(clarification.term, "北方")
+            self.assertEqual(clarification.operation, "exclude")
+            self.assertEqual(len(clarification.provinces), 31)
+            self.assertEqual(len(clarification.presets), 7)
+
+            await client.ResumeRun(
+                pb.ResumeRunRequest(
+                    run_id=receipt.run_id,
+                    interrupt_id=asking.current_interrupt.interrupt_id,
+                    expected_state_version=asking.state_version,
+                    profile_version=(
+                        asking.current_interrupt.profile_version
+                    ),
+                    region_answer=pb.RegionAnswer(
+                        clarification_id=clarification.clarification_id,
+                        provinces=[
+                            "北京",
+                            "天津",
+                            "河北",
+                            "山西",
+                            "内蒙古",
+                        ],
+                        preset_ids=["north_china"],
+                        catalog_version=clarification.catalog_version,
+                    ),
+                    idempotency_key="grpc-macro-region-answer",
+                ),
+                metadata=metadata,
+            )
+            confirmation = await self._wait_for_grpc_interrupt(
+                client,
+                receipt.run_id,
+                metadata,
+            )
+            self.assertEqual(
+                confirmation.current_interrupt.kind,
+                "PROFILE_CONFIRM",
+            )
+            excluded = (
+                confirmation.current_interrupt.fields[
+                    "preferences.excluded_provinces"
+                ].string_list.values
+            )
+            self.assertEqual(
+                set(excluded),
+                {"北京", "天津", "河北", "山西", "内蒙古"},
+            )
+            session = await client.GetSession(
+                pb.GetSessionRequest(session_id=str(receipt.session_id)),
+                metadata=metadata,
+            )
+            region_metadata = [
+                message.metadata
+                for message in session.messages
+                if "region_clarification" in message.metadata
+                or "resolved_provinces" in message.metadata
+            ]
+            self.assertTrue(region_metadata)
+            self.assertTrue(
+                all(
+                    isinstance(value, str)
+                    for metadata_item in region_metadata
+                    for value in metadata_item.values()
+                )
+            )
+        finally:
+            await channel.close()
+            await server.stop(grace=None)
+
     async def _wait_for_grpc_interrupt(self, client, run_id, metadata):
         import asyncio
 

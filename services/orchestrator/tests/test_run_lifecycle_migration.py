@@ -7,6 +7,80 @@ from run_lifecycle_support import RunLifecyclePostgresTest
 
 
 class FreshSchemaTests(RunLifecyclePostgresTest):
+    async def test_conversation_history_schema_is_installed(self):
+        conn = await self._connect()
+        try:
+            columns = await (
+                await conn.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'chat_message'
+                    ORDER BY column_name
+                    """
+                )
+            ).fetchall()
+            constraint = await (
+                await conn.execute(
+                    """
+                    SELECT pg_get_constraintdef(oid) AS definition
+                    FROM pg_constraint
+                    WHERE conname = 'run_result_result_kind_check'
+                      AND conrelid = 'run_result'::regclass
+                    """
+                )
+            ).fetchone()
+            lineage = await (
+                await conn.execute(
+                    """
+                    SELECT to_regclass('public.admission_group_lineage') AS name
+                    """
+                )
+            ).fetchone()
+        finally:
+            await conn.close()
+
+        names = {row["column_name"] for row in columns}
+        self.assertTrue(
+            {
+                "message_id",
+                "message_seq",
+                "session_id",
+                "run_id",
+                "role",
+                "kind",
+                "content",
+                "metadata",
+                "created_at",
+            }.issubset(names)
+        )
+        self.assertIn("EXPLAIN_RESULT", constraint["definition"])
+        self.assertEqual(
+            lineage["name"],
+            "admission_group_lineage",
+        )
+
+    async def test_shared_fixture_keeps_release_rrf_contract(self):
+        release_id = await self.seed_release()
+        conn = await self._connect()
+        try:
+            row = await (
+                await conn.execute(
+                    """
+                    SELECT rrf_k
+                    FROM release
+                    WHERE release_id = %s
+                    """,
+                    (release_id,),
+                )
+            ).fetchone()
+        finally:
+            await conn.close()
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["rrf_k"], 60)
+
     async def test_run_lifecycle_works_on_fresh_schema_through_m5b_deletion(self):
         from app.run_lifecycle import RunLifecycle, StructuredProfileInput, SubmitRunCommand
 

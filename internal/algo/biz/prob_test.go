@@ -50,7 +50,7 @@ func BenchmarkRecommendCandidates(b *testing.B) {
 // 原权重计算作为优化对照，逐位比较而非误差容忍。
 func TestCalculateProbability_ExactReference(t *testing.T) {
 	for _, decay := range []float64{0.1, 0.7, 0.9, 1} {
-		for n := 1; n <= 8; n++ {
+		for n := 3; n <= 8; n++ {
 			for mask := 0; mask < 1<<n; mask++ {
 				history := make([]AdmissionRecord, n)
 				weights := make([]float64, n)
@@ -146,10 +146,10 @@ func TestCalculateProbability_ThreeYearsNoHit(t *testing.T) {
 }
 
 func TestCalculateProbability_OneYear(t *testing.T) {
-	// 1 年：权重 [1.0]，命中 → 1.0→0.99；不命中 → 0.0→0.01
+	// 1 年：强命中封顶 0.75，仍可进入稳档；不命中仍为 0.01
 	cfg := testRecommendConfig()
-	if got := calculateProbability(0.30, []AdmissionRecord{hist(2024, 0.50)}, cfg); got != 0.99 {
-		t.Errorf("1 年命中 prob = %f, want 0.99", got)
+	if got := calculateProbability(0.30, []AdmissionRecord{hist(2024, 0.50)}, cfg); got != 0.75 {
+		t.Errorf("1 年命中 prob = %f, want 0.75", got)
 	}
 	if got := calculateProbability(0.70, []AdmissionRecord{hist(2024, 0.50)}, cfg); got != 0.01 {
 		t.Errorf("1 年不命中 prob = %f, want 0.01", got)
@@ -166,11 +166,56 @@ func TestCalculateProbability_TwoYears(t *testing.T) {
 	}
 }
 
-func TestCalculateProbability_BoundaryHitIsInclusive(t *testing.T) {
-	// 用户百分位 == 录取百分位 → 「够得着」（≤ 含等号）
-	h := []AdmissionRecord{hist(2024, 0.50)}
-	if got := calculateProbability(0.50, h, testRecommendConfig()); got != 0.99 {
-		t.Errorf("相等应命中 prob = %f, want 0.99", got)
+func TestCalculateProbability_TwoYearsAllHit(t *testing.T) {
+	// 两年虽然全命中，也保留有限样本的不确定度，不能直接给 99%。
+	h := []AdmissionRecord{hist(2024, 0.60), hist(2023, 0.60)}
+	if got := calculateProbability(0.50, h, testRecommendConfig()); got != 0.95 {
+		t.Errorf("2 年全命中 prob = %f, want 0.95", got)
+	}
+}
+
+func TestCalculateProbability_CriticalBandUsesHalfCredit(t *testing.T) {
+	// 与录取百分位相差不超过 0.2 个百分点时视为临界，命中权重记 0.5。
+	h := []AdmissionRecord{hist(2024, 0.50), hist(2023, 0.50)}
+	for _, user := range []float64{0.499, 0.50, 0.501} {
+		if got := calculateProbability(user, h, testRecommendConfig()); !almostEq(got, 0.5) {
+			t.Errorf("临界 user=%f prob = %f, want 0.5", user, got)
+		}
+	}
+	singleYear := []AdmissionRecord{hist(2024, 0.50)}
+	if got := calculateProbability(0.498, singleYear, testRecommendConfig()); got != 0.75 {
+		t.Errorf("用户领先 0.2pp 的单年命中 prob = %f, want 0.75", got)
+	}
+	if got := calculateProbability(0.502, singleYear, testRecommendConfig()); got != 0.01 {
+		t.Errorf("用户落后 0.2pp 的未命中 prob = %f, want 0.01", got)
+	}
+}
+
+func TestCalculateProbability_UserReportedCases(t *testing.T) {
+	cfg := testRecommendConfig()
+	user := 20503.0 / 320192.0
+	chinaOcean := []AdmissionRecord{
+		hist(2024, 16978.0/313685.0),
+		hist(2023, 18020.0/277310.0),
+	}
+	if got, want := calculateProbability(user, chinaOcean, cfg), 0.35/1.70; !almostEq(got, want) {
+		t.Errorf("中国海洋大学 prob=%f, want %f", got, want)
+	}
+	chinaMedia := []AdmissionRecord{
+		hist(2024, 21515.0/313685.0),
+		hist(2023, 16325.0/277310.0),
+		hist(2022, 10627.0/254970.0),
+	}
+	if got, want := calculateProbability(user, chinaMedia, cfg), 1.0/2.19; !almostEq(got, want) {
+		t.Errorf("中国传媒大学 prob=%f, want %f", got, want)
+	}
+	chinaMedical := []AdmissionRecord{
+		hist(2024, 22516.0/313685.0),
+		hist(2023, 20665.0/277310.0),
+		hist(2022, 13636.0/254970.0),
+	}
+	if got, want := calculateProbability(user, chinaMedical, cfg), 1.70/2.19; !almostEq(got, want) {
+		t.Errorf("中国医科大学 prob=%f, want %f", got, want)
 	}
 }
 
@@ -212,11 +257,10 @@ func TestBatchEstimateProb_PercentileAndSkip(t *testing.T) {
 	}
 }
 
-func TestBatchEstimateProb_PlanAdjustFlips(t *testing.T) {
+func TestBatchEstimateProb_PlanChangeIsWarningOnly(t *testing.T) {
 	cfg := testRecommendConfig()
 	cands := []Candidate{{UniversityCode: "U1", MajorGroup: "(101)"}}
-	// 无计划修正时：MinPercentile=400/1000=0.4，用户 0.5 > 0.4 → 不命中 → 0.01
-	// 有计划修正：PlanCount=200/PrevPlanCount=100 → change=1.0 → ×(1+1.0×0.5)=1.5 → 0.4×1.5=0.6，用户 0.5 ≤ 0.6 → 命中 → 0.99
+	// 计划变化不再修正历史百分位：MinPercentile=0.4，用户 0.5 → 未命中 → 0.01。
 	historyMap := map[GroupKey][]AdmissionRecord{
 		{UniversityCode: "U1", MajorGroup: "(101)"}: {{Year: 2024, GroupMinRank: 400, TotalCount: 1000}},
 	}
@@ -224,19 +268,17 @@ func TestBatchEstimateProb_PlanAdjustFlips(t *testing.T) {
 		{UniversityCode: "U1", MajorGroup: "(101)"}: {PlanCount: 200, PrevPlanCount: 100},
 	}
 	got := batchEstimateProb(cands, 0.5, historyMap, planMap, cfg)
-	if len(got) != 1 || got[0].Probability != 0.99 {
-		t.Fatalf("计划修正后应命中 → 0.99，got %+v", got)
+	if len(got) != 1 || got[0].Probability != 0.01 {
+		t.Fatalf("计划变化不应修改概率，got %+v", got)
 	}
 	if !got[0].PlanCountKnown || got[0].PlanCount != 200 {
 		t.Fatalf("计划数身份丢失: %+v", got[0].Candidate)
 	}
-	// 对照：无 planMap 时不命中
-	gotNoPlan := batchEstimateProb(cands, 0.5, historyMap, nil, cfg)
-	if gotNoPlan[0].Probability != 0.01 {
-		t.Errorf("无计划修正应 0.01，got %f", gotNoPlan[0].Probability)
+	if !got[0].PreviousPlanCountKnown || got[0].PreviousPlanCount != 100 {
+		t.Fatalf("上一年计划数丢失: %+v", got[0].Candidate)
 	}
-	if gotNoPlan[0].PlanCountKnown {
-		t.Errorf("无报考年计划时不得把缺失计划数视为已知")
+	if got[0].PlanAdjustFactor != nil {
+		t.Fatalf("计划修正因子已停用，不应生成数值: %+v", got[0].Candidate)
 	}
 }
 

@@ -31,6 +31,45 @@ service Orchestrator {
 
   // 幂等取消 run。
   rpc CancelRun(CancelRunRequest) returns (RunReceiptReply);
+
+  // 列出当前 principal 的对话；最新优先。
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsReply);
+
+  // 读取一条对话的完整消息、运行摘要与当前画像；必须校验 principal 所有权。
+  rpc GetSession(GetSessionRequest) returns (ChatSessionReply);
+
+  // 报告生成后继续对话：解释现有报告或按筛选条件创建修订 run。
+  rpc SubmitConversationMessage(SubmitConversationMessageRequest)
+      returns (SubmitConversationMessageReply);
+
+  // 读取当前 principal 绑定某正式结果的最近一版志愿草稿。
+  rpc GetWishlistDraft(GetWishlistDraftRequest) returns (WishlistDraftReply);
+
+  // 显式保存用户拟填院校专业组及组内专业；创建新草稿版本，不修改正式结果。
+  rpc SaveWishlistDraft(SaveWishlistDraftRequest)
+      returns (WishlistDraftReply);
+
+  // 列出当前 principal 已保存的志愿表；每份正式结果仅返回最新草稿。
+  rpc ListWishlists(ListWishlistsRequest) returns (ListWishlistsReply);
+
+  // 读取某正式结果下当前 principal 的全部草稿版本。
+  rpc ListWishlistHistory(GetWishlistDraftRequest)
+      returns (WishlistHistoryReply);
+
+  // 把历史版本复制为新的最新版本。
+  rpc RestoreWishlistDraftVersion(RestoreWishlistDraftVersionRequest)
+      returns (WishlistDraftReply);
+
+  // 删除当前 principal 的一份志愿表及全部草稿版本。
+  rpc DeleteWishlist(DeleteWishlistRequest) returns (DeleteWishlistReply);
+
+  // 内部入口：网关完成账号凭据校验后删除 principal 的全部私有资料。
+  rpc DeletePrincipalData(DeletePrincipalDataRequest)
+      returns (DeletePrincipalDataReply);
+
+  // 撤销当前 principal 的敏感资格数据同意。
+  rpc RevokeSensitiveConsent(RevokeSensitiveConsentRequest)
+      returns (RevokeSensitiveConsentReply);
 }
 
 message StartGraphRequest {
@@ -86,6 +125,21 @@ message StructuredProfileInput {
   string batch = 4;
   int32 score = 5;
   repeated string subjects = 6;
+  string risk_appetite = 7;
+  repeated string priority_dims = 8;
+  repeated string interests = 9;
+  repeated string preferred_cities = 10;
+  repeated string preferred_tiers = 11;
+  repeated string required_cities = 12;
+  repeated string excluded_cities = 13;
+  repeated string required_tiers = 14;
+  repeated string required_major_keywords = 15;
+  repeated string excluded_major_keywords = 16;
+  repeated string excluded_universities = 17;
+  repeated string excluded_major_names = 18;
+  repeated string required_provinces = 19;
+  repeated string excluded_provinces = 20;
+  repeated string required_major_names = 21;
 }
 
 message PolicyQaInput {
@@ -106,6 +160,26 @@ message SubmitRunRequest {
   StructuredProfileInput profile_input = 4;
   string idempotency_key = 5;
   PolicyQaInput policy_input = 6;
+  repeated ChatMessageInput messages = 7;
+  string parent_result_version = 8;
+  string user_message = 9;
+}
+
+message ChatMessageInput {
+  string client_message_id = 1;
+  string role = 2;
+  string kind = 3;
+  string content = 4;
+}
+
+message ChatMessageView {
+  string message_id = 1;
+  string run_id = 2;
+  string role = 3;
+  string kind = 4;
+  string content = 5;
+  google.protobuf.Timestamp created_at = 6;
+  map<string, string> metadata = 7;
 }
 
 message RunReceiptReply {
@@ -167,6 +241,14 @@ message DeclineFieldsAnswer {
   repeated string field_keys = 1;
 }
 
+message RegionAnswer {
+  string clarification_id = 1;
+  repeated string provinces = 2;
+  repeated string preset_ids = 3;
+  string catalog_version = 4;
+  bool cancel_region_restriction = 5;
+}
+
 message ResumeRunRequest {
   common.v1.Trace trace = 1;
   string run_id = 2;
@@ -180,6 +262,7 @@ message ResumeRunRequest {
     ConfirmProfileAnswer confirm_profile = 8;
     RejectOrEditProfileAnswer reject_or_edit_profile = 9;
     DeclineFieldsAnswer decline_fields = 10;
+    RegionAnswer region_answer = 11;
   }
 }
 
@@ -200,6 +283,24 @@ message InterruptView {
   string profile_version = 8;
   map<string, ProfileFieldView> fields = 9;
   repeated ProfileFinding findings = 10;
+  RegionClarificationView region_clarification = 11;
+}
+
+message RegionPreset {
+  string id = 1;
+  string name = 2;
+  repeated string provinces = 3;
+}
+
+message RegionClarificationView {
+  string clarification_id = 1;
+  string clarification_kind = 2;
+  string reason_code = 3;
+  string term = 4;
+  string operation = 5;
+  string catalog_version = 6;
+  repeated string provinces = 7;
+  repeated RegionPreset presets = 8;
 }
 
 message ResultReference {
@@ -330,11 +431,51 @@ message FormalResultSummary {
   FormalReport report = 17;
 }
 
+message HistoricalAdmissionReference {
+  int32 year = 1;
+  optional int32 min_score = 2;
+  optional int32 min_rank = 3;
+  optional int32 total_count = 4;
+  string mapping_method = 5;
+  double mapping_confidence = 6;
+}
+
+message ReportMajor {
+  string major_code = 1;
+  string major_name = 2;
+  string subject_req = 3;
+  optional int32 min_score = 4;
+  optional int32 min_rank = 5;
+  optional int32 reference_year = 6;
+  optional double admission_probability = 7;
+  int32 probability_data_years = 8;
+  optional int32 plan_count = 9;
+  optional double tuition = 10;
+  string duration = 11;
+  bool recommended = 12;
+  int32 recommendation_rank = 13;
+  bool selectable = 14;
+  string unavailable_reason = 15;
+  repeated int32 probability_sample_years = 16;
+}
+
 message FormalReportSection {
   string section_key = 1;
   string title = 2;
   string body = 3;
   repeated FormalEvidenceCitation citations = 4;
+  repeated HistoricalAdmissionReference history = 5;
+  repeated ReportMajor majors = 6;
+  optional int32 plan_count = 7;
+  optional double probability = 8;
+  string strategy_tier = 9;
+  int32 final_rank = 10;
+  string university_code = 11;
+  string university_name = 12;
+  string major_group = 13;
+  optional int32 previous_plan_count = 14;
+  optional double plan_adjust_factor = 15; // Deprecated：兼容保留
+  optional double utility_score = 16; // 草稿风险摘要的期望满意度输入；不直接作为用户主文案
 }
 
 message FormalEvidenceCitation {
@@ -353,6 +494,7 @@ message FormalReport {
   repeated FormalReportSection sections = 3;
   repeated string claim_ids = 4;
   repeated string unverified_facts = 5;
+  string degradation_reason = 6;
 }
 
 message RunViewReply {
@@ -375,6 +517,189 @@ message RunViewReply {
   google.protobuf.Timestamp expires_at = 17;
   PolicyEvidenceResult policy_evidence = 18;
   FormalResultSummary formal_result = 19;
+  string parent_result_version = 20;
+  string conversation_answer = 21;
+}
+
+message SessionRunView {
+  string run_id = 1;
+  TaskKind task_kind = 2;
+  RunState state = 3;
+  string stage = 4;
+  string terminal_reason = 5;
+  string parent_result_version = 6;
+  string result_version = 7;
+  string result_kind = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+}
+
+message ChatSessionSummary {
+  string session_id = 1;
+  string title = 2;
+  string latest_run_id = 3;
+  string latest_state = 4;
+  string latest_result_version = 5;
+  string latest_result_kind = 6;
+  int32 run_count = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+message ChatSessionReply {
+  ChatSessionSummary summary = 1;
+  repeated ChatMessageView messages = 2;
+  repeated SessionRunView runs = 3;
+  map<string, ProfileFieldView> profile_fields = 4;
+}
+
+message ListSessionsRequest {
+  common.v1.Trace trace = 1;
+  int32 limit = 2;
+}
+
+message ListSessionsReply {
+  repeated ChatSessionSummary sessions = 1;
+}
+
+message GetSessionRequest {
+  common.v1.Trace trace = 1;
+  string session_id = 2;
+}
+
+message SubmitConversationMessageRequest {
+  common.v1.Trace trace = 1;
+  string session_id = 2;
+  StructuredProfileInput profile_input = 3;
+  string parent_result_version = 4;
+  string message_text = 5;
+  string idempotency_key = 6;
+  RegionAnswer region_answer = 7;
+}
+
+message SubmitConversationMessageReply {
+  string session_id = 1;
+  string run_id = 2;
+  string task_kind = 3;
+  string status = 4;
+  string assistant_message = 5;
+  RegionClarificationView region_clarification = 6;
+}
+
+message WishlistDraftGroup {
+  string university_code = 1;
+  string major_group = 2;
+  repeated string major_codes = 3; // 拟填顺序；每组 1..6，且不得重复
+}
+
+message GetWishlistDraftRequest {
+  common.v1.Trace trace = 1;
+  string result_version = 2;
+}
+
+message SaveWishlistDraftRequest {
+  common.v1.Trace trace = 1;
+  string result_version = 2;
+  int64 expected_version = 3; // 0 表示首次创建
+  string idempotency_key = 4;
+  repeated WishlistDraftGroup groups = 5; // 用户顺序；正式报告的 1..45 个组子集
+}
+
+message WishlistDraftRisk {
+  int32 group_count = 1;
+  int32 rush_count = 2;
+  int32 stable_count = 3;
+  int32 safe_tier_count = 4;
+  int32 safe_guard_count = 5;
+  int32 safe_guard_target = 6;
+  bool safe_guard_ok = 7;
+  double slip_rate = 8;
+  optional double expected_satisfaction = 9;
+}
+
+message WishlistDraft {
+  string draft_version_id = 1;
+  string result_version = 2;
+  string run_id = 3;
+  string release_id = 4;
+  int64 draft_version = 5;
+  repeated WishlistDraftGroup groups = 6;
+  google.protobuf.Timestamp created_at = 7;
+  optional WishlistDraftRisk risk = 8;
+}
+
+message WishlistDraftReply {
+  optional WishlistDraft draft = 1;
+}
+
+message ListWishlistsRequest {
+  common.v1.Trace trace = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+  string status = 4;
+}
+
+message WishlistSummary {
+  string draft_version_id = 1;
+  string result_version = 2;
+  string run_id = 3;
+  string release_id = 4;
+  int64 draft_version = 5;
+  string title = 6;
+  int32 application_year = 7;
+  string category = 8;
+  string batch = 9;
+  int32 group_count = 10;
+  int32 major_count = 11;
+  string status = 12;
+  string stale_reason = 13;
+  string successor_run_id = 14;
+  google.protobuf.Timestamp saved_at = 15;
+}
+
+message ListWishlistsReply {
+  repeated WishlistSummary wishlists = 1;
+}
+
+message WishlistHistoryReply {
+  repeated WishlistDraft drafts = 1;
+}
+
+message RestoreWishlistDraftVersionRequest {
+  common.v1.Trace trace = 1;
+  string result_version = 2;
+  int64 draft_version = 3;
+  string idempotency_key = 4;
+}
+
+message DeleteWishlistRequest {
+  common.v1.Trace trace = 1;
+  string result_version = 2;
+  string request_id = 3;
+}
+
+message DeleteWishlistReply {
+  bool deleted = 1;
+  string request_id = 2;
+}
+
+message DeletePrincipalDataRequest {
+  common.v1.Trace trace = 1;
+  string request_id = 2;
+}
+
+message DeletePrincipalDataReply {
+  bool accepted = 1;
+  string status = 2;
+  string reason = 3;
+}
+
+message RevokeSensitiveConsentRequest {
+  common.v1.Trace trace = 1;
+}
+
+message RevokeSensitiveConsentReply {
+  int32 revoked_count = 1;
 }
 
 message StateChangedPayload {

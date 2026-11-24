@@ -6,12 +6,11 @@ import (
 
 	"github.com/choucisan/ai-gaokao-counselor/internal/algo/biz"
 	"github.com/choucisan/ai-gaokao-counselor/internal/algo/data/dbgen"
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func TestCandidateFromRow_AllFields(t *testing.T) {
 	row := dbgen.ListCandidateGroupsRow{
-		UniversityID:   pgtype.Int8{Int64: 123, Valid: true},
+		UniversityID:   123,
 		UniversityCode: "A", UniversityName: "示例大学", MajorGroup: "101",
 		GroupMinRank: 12000, Is985: true, Is211: true, IsDualClass: true,
 		City: "长沙", Province: "湖南", NumMaster: 10, NumDoctor: 8, RuankeRank: 20,
@@ -27,21 +26,26 @@ func TestCandidateFromRow_AllFields(t *testing.T) {
 }
 
 func TestMajorFromRow_AllFields(t *testing.T) {
+	planCount := 30
 	row := dbgen.ListCandidateMajorsRow{
 		MajorCode: "01", MajorName: "计算机", SubjectReq: "首选物理，再选化学",
 		Duration: "四年", Tuition: 5200.5, MajorNote: "示例备注",
-		MinScore: 600, MinRank: 10000, AdmitCount: 25, InCurrentPlan: true,
+		MinScore: 600, MinRank: 10000, ReferenceYear: 2024,
+		AdmitCount: 25, PlanCount: 30, InCurrentPlan: true,
 	}
 	want := biz.MajorDetail{
 		MajorCode: "01", MajorName: "计算机", SubjectReq: "首选物理，再选化学",
-		Duration: "四年", Tuition: 5200.5, MajorNote: "示例备注",
-		MinScore: 600, MinRank: 10000, AdmitCount: 25, InCurrentPlan: true,
+		Duration: "四年", Tuition: 5200.5, HasTuition: true, MajorNote: "示例备注",
+		MinScore: 600, MinRank: 10000, ReferenceYear: 2024,
+		AdmitCount: 25, PlanCount: &planCount, Selectable: true,
+		InCurrentPlan: true,
 	}
-	if got := majorFromRow(row); got != want {
+	if got := majorFromRow(row); !reflect.DeepEqual(got, want) {
 		t.Fatalf("专业字段映射错误: %+v", got)
 	}
-	if got := majorFromRow(dbgen.ListCandidateMajorsRow{}); got != (biz.MajorDetail{}) {
-		t.Fatalf("空展示字段未保留零值: %+v", got)
+	empty := majorFromRow(dbgen.ListCandidateMajorsRow{})
+	if empty.HasTuition || empty.ReferenceYear != 0 || empty.PlanCount == nil || *empty.PlanCount != 0 {
+		t.Fatalf("空行三态映射错误: %+v", empty)
 	}
 }
 
@@ -56,6 +60,8 @@ func TestAssembleCandidates_GroupKeyOrderAndSubjects(t *testing.T) {
 		{UniversityCode: "A", MajorGroup: "101", MajorCode: "24", SubjectReq: "化学"},
 		{UniversityCode: "A", MajorGroup: "101", MajorCode: "25", SubjectReq: "生物"},
 		{UniversityCode: "A", MajorGroup: "101", MajorCode: "26"},
+		{UniversityCode: "A", MajorGroup: "101", MajorCode: "", SubjectReq: "不能混入"},
+		{UniversityCode: "A", MajorGroup: "101", MajorCode: "   ", SubjectReq: "不能混入"},
 		{UniversityCode: "A", MajorGroup: "102", MajorCode: "01", SubjectReq: "化学"},
 		{UniversityCode: "X", MajorGroup: "101", MajorCode: "99", SubjectReq: "不能混入"},
 	}
@@ -86,13 +92,13 @@ func TestAssembleCandidates_GroupKeyOrderAndSubjects(t *testing.T) {
 
 func TestGroupHistoryRows_YearOrderAndOriginalValues(t *testing.T) {
 	rows := []dbgen.ListGroupHistoryRow{
-		{UniversityCode: "A", MajorGroup: "101", Year: 2024, GroupMinRank: 100, TotalCount: 1000},
-		{UniversityCode: "A", MajorGroup: "101", Year: 2022, GroupMinRank: 200, TotalCount: 2000},
-		{UniversityCode: "A", MajorGroup: "102", Year: 2023, GroupMinRank: 300, TotalCount: 3000},
+		{UniversityCode: "A", MajorGroup: "101", Year: 2024, GroupMinScore: 620, GroupMinRank: 100, TotalCount: 1000, MappingMethod: "EXACT_CODE", MappingConfidence: 1},
+		{UniversityCode: "A", MajorGroup: "101", Year: 2022, GroupMinScore: 610, GroupMinRank: 200, TotalCount: 2000, MappingMethod: "MAJOR_NAME_JACCARD", MappingConfidence: 0.75},
+		{UniversityCode: "A", MajorGroup: "102", Year: 2023, GroupMinScore: 600, GroupMinRank: 300, TotalCount: 3000, MappingMethod: "EXACT_CODE", MappingConfidence: 1},
 	}
 	want := map[biz.GroupKey][]biz.AdmissionRecord{
-		{UniversityCode: "A", MajorGroup: "101"}: {{Year: 2024, GroupMinRank: 100, TotalCount: 1000}, {Year: 2022, GroupMinRank: 200, TotalCount: 2000}},
-		{UniversityCode: "A", MajorGroup: "102"}: {{Year: 2023, GroupMinRank: 300, TotalCount: 3000}},
+		{UniversityCode: "A", MajorGroup: "101"}: {{Year: 2024, GroupMinScore: 620, GroupMinRank: 100, TotalCount: 1000, MappingMethod: "EXACT_CODE", MappingConfidence: 1}, {Year: 2022, GroupMinScore: 610, GroupMinRank: 200, TotalCount: 2000, MappingMethod: "MAJOR_NAME_JACCARD", MappingConfidence: 0.75}},
+		{UniversityCode: "A", MajorGroup: "102"}: {{Year: 2023, GroupMinScore: 600, GroupMinRank: 300, TotalCount: 3000, MappingMethod: "EXACT_CODE", MappingConfidence: 1}},
 	}
 	if got := groupHistoryRows(rows); !reflect.DeepEqual(got, want) {
 		t.Fatalf("历史分组映射错误: %+v", got)

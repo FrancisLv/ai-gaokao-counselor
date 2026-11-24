@@ -3,7 +3,7 @@
 | 项 | 值 |
 | --- | --- |
 | 文档版本 | v1.0 |
-| 目的 | 把 `prd.md` 的 24 条 FR 逐条对照**真实代码**，给「现状 / 证据文件 / 剩余工作」，并合并 `agent-architecture-review.md` 的 19 项问题，作为拆票与 Codex 上下文的事实底座 |
+| 目的 | 把 `prd.md` 的 25 条 FR 逐条对照**真实代码**，给「现状 / 证据文件 / 剩余工作」，并合并 `agent-architecture-review.md` 的 19 项问题，作为拆票与 Codex 上下文的事实底座 |
 | 基准 | 现状以**仓库代码实测**为准；目标态以 `prd.md` **v1.3** 为准（已修正矛盾与发布范围、为目标态唯一权威）；决策理由以 `docs/adr/` 为准；`agent-architecture-review.md` 已降级为历史存档 |
 | 方法 | 通读 gateway / orchestrator / algo / llmgw / rag / migrations 源码，grep 调用点与表名，不轻信任何登记文本（含审查报告本身） |
 | 生成时间 | 2026-11-18 |
@@ -26,7 +26,7 @@
 - **svc-algo（Go）**：既有四 RPC 全部实现（`RankConvert / EstimateProb / CheckConstraints / OptimizeWishlist`）；`EvaluateEligibility` 已具备 release-bound 规则、生命周期、覆盖声明、受限 AST、条件字段 typed facts，以及专业五态与组级 PASS_PARTIAL 汇总。薄 service + biz usecase 分层，仍是当前最成体系的已实现能力。
 - **svc-orchestrator（Python/LangGraph）**：🟡 RunLifecycle 已提供持久 run/interrupt/租约与受控算法预览，`RetrievePolicy` 与在线检索节点已接线；自然语言画像、完整 POLICY_QA 子图、Strategy/Critic/report 等业务节点仍待实现，未调用 llmgw。
 - **svc-gateway（Go）**：⛔ 三个入口方法（`CreatePlan / ConfirmProfile / BackfillProfile`）全部 `return errors.New("TODO")`。
-- **svc-llm-gateway（Go）**：🟡 M5a 治理 seam 已具备可信 principal、session/run/release 校验、封闭 M5a 角色与消息协议白名单、release-bound route/模型白名单/价格、注册 prompt template 与 response schema、结构化输出校验、六类数据分类、原子 token/cost 硬预算、显式可信 usage、主备 attempt、未知费用对账、release-bound 结果缓存及类型化 `Chat/StreamChat`；普通与流式调用共享同一治理用例，`START` 发送失败按明确未计费收口，超限先于缓存，流内序号、稳定 ERROR、缓存回放与断流 `STREAM_INTERRUPTED` 已有真实 PG 测试。强结构化查询走独立 `internal/llmgw/data/queries` + sqlc 包。生产 provider 仍 fail closed，尚未接线真实付费模型、账单 adapter 或 orchestrator 入口。
+- **svc-llm-gateway（Go）**：🟢 治理 seam 与 DeepSeek provider 已具备可信 principal、session/run/release 校验、封闭角色与消息协议白名单、release-bound route/模型白名单/价格、注册 prompt/schema、结构化输出、六类数据分类、原子预算、主备 attempt、未知费用对账、缓存及类型化 `Chat/StreamChat`；报告叙事和模糊意图分类已接 orchestrator，失败时确定性降级。真实调用仍需注入 DeepSeek key；账单对账 adapter 和真实付费模型质量评测需继续补。
 
 ---
 
@@ -39,9 +39,9 @@
 | FR | 现状 | 证据（文件:行） | 剩余工作 | 关联 | 里程碑 |
 | --- | --- | --- | --- | --- | --- |
 | FR-01 对话式画像采集（P0） | 🟡 | `graph/state.py:83` 确定性闸门 `check_completeness` 已实现；`graph/nodes/intake.py:12` 节点为 TODO 桩（无 LLM 解析、无 interrupt 追问） | 接 llmgw `role=profile` 解析 user_text→profile；缺项生成追问并 `interrupt()`；字段口径改 `category`（非 track）、主输入仅分数；TypedDict 换运行时校验（Pydantic） | P1-02, P1-14, §9.2 | M2/M3 |
-| FR-02 画像确认 HITL（P0） | 🟡 | `migrations/09_profile_run_lifecycle.sql`、`app/run_lifecycle` 已实现不可变画像 revision、确认卡 interrupt 与 ResumeRun；旧 gateway `ConfirmProfile` 仍未接新命令 | 接 gateway 适配器与前端画像卡；旧 `ResumeGraph` 收口到 RunLifecycle | P1-03, P1-13, §9.1 | M2 |
+| FR-02 画像确认 HITL（P0） | ✅ 前后端已接 | `migrations/09_profile_run_lifecycle.sql`、`app/run_lifecycle` 实现不可变画像 revision、确认卡 interrupt 与 ResumeRun；gateway `/v1/plans/{session_id}/profile:confirm` 和前端画像卡已真实联调 | 后续仅补更多条件必需字段的确认交互 | P1-03, P1-13, §9.1 | M2 已接 |
 | FR-03 条件必需按需补问（P0） | 🟡 有冲突 | `graph/nodes/check_conditional.py:15` 现实现为「问所有条件字段」，`:13` TODO 注明应由候选硬要求驱动 | 改为候选驱动（候选无体检限制则不问体检）；接 backfill interrupt；UNKNOWN 不放行 | P1-02 | M2 |
-| FR-04 多轮修正与协商探索（P1） | ⛔ | 无对应节点；`build.py:38` 标注 strategy/critic/... 全 TODO | REVISE_PLAN 新建 run；画像修正后派生数据失效一致性 | P1-13 | M6 |
+| FR-04 多轮修正与协商探索（P1） | 🟡 报告后筛选修订已接 | 报告后消息由 orchestrator 路由：解释创建绑定父结果的 `EXPLAIN_RESULT`，省份/城市/专业/学校层次/院校排除/风险变化创建 `REVISE_PLAN`；省份与城市分别使用独立硬约束。专业“想学 / 喜欢”只写受控名称软兴趣，“只看 / 仅限”才写 `required_major_names` 精确硬限定，相关专业扩围必须用户明确接受。明确“增加冲档”由 deterministic 规则直接写入偏冲刺与 `MORE_RUSH`，即使风险偏好已是偏冲刺也执行目标档门禁；含义模糊时才进入受限 LLM，意图调用只携带当前风险偏好和冲稳保数量。若修订后目标档没有实际增加则以 `TARGET_ALLOCATION_UNSATISFIED` 保留旧报告。无关问题与范围外问题分别返回 `off_topic / out_of_scope`，安全危机输入优先 `safety_support`，三者均不创建 run。同一 session 记录 `parent_result_version`，重新确认画像并完整重算，旧结果不可变。大区表达使用 release 绑定的七区目录和结构化 `SELECT_PROVINCES` 澄清；未确认时不创建修订 run，确认后只固化具体省份，显式取消才可绕过该限制 | 任意自然语言约束抽取、Critic 协商与软偏好增量复用仍待增强；当前不支持的约束必须明确澄清 | P1-13 | M6 进行中 |
 | FR-05 SSE 流式输出（P0） | ✅ RunLifecycle 侧 | `WatchRun` 提供持久 `event_seq`、typed progress/interrupt/result/error、游标补发和断线重订；gateway 已接 RunLifecycle 命令 | HTTP SSE 具体响应适配与前端重连仍属后续接线 | P1-08 | M2 已接 |
 | FR-06 任务状态机与超时（P0） | ✅ RunLifecycle 侧 | `app/run_lifecycle` 实现 QUEUED / RUNNING / WAITING_HITL / 终态、interrupt、租约 epoch、执行/HITL 时限与取消竞态；gateway 旧入口转同一命令 | 生产容量与外部队列扩展不在 M2 最小底座 | P1-01(生命周期), P1-10, P2-01, §9.1 | M2 已接 |
 | FR-07 幂等与断点续跑（P0） | ✅ RunLifecycle 侧 | 官方 `langgraph-checkpoint-postgres` 承载画像→算法预览业务图与内部执行闸门；receipt/interrupt 原子恢复，租约 fencing 防旧 worker 写入 | 更大吞吐调度后续演进 | P1-09, P1-10, §6.3 | M2 已接 |
@@ -51,7 +51,7 @@
 | FR | 现状 | 证据（文件:行） | 剩余工作 | 关联 | 里程碑 |
 | --- | --- | --- | --- | --- | --- |
 | FR-08 结构化/非结构化分流检索（P0） | 🟡 在线 keyword / vector / hybrid + 可选 rerank，POLICY_QA 浏览器证据查看已接 | 唯一主 seam `rag/policy_retrieval.py::RetrievePolicy` 已实现 release 可用性校验、release/候选共享只读快照、`UNSUPPORTED_SCOPE`/`NO_EVIDENCE`、省份/科类/批次/学校/文档类型/有效区间 SQL 共同硬过滤、pg_trgm 关键词路、pgvector 余弦向量路、`RRF(k=60)` 与稳定证据投影；学校筛选保留 `school_id=NULL` 的全国/省级政策，校级文档缺学校身份或全部候选不可投影时统一返回 `NO_EVIDENCE`；hybrid 对单路技术故障按同范围另一路降级并给出稳定 `degraded_reason`，两路均不可用返回 `RETRIEVAL_UNAVAILABLE`；向量查询以有界 `ann_candidates` 直接触发 `idx_chunk_embedding` HNSW 距离访问，并用 `strict_order` 迭代扫描防止域外高相似度候选耗尽；release 可在 RRF 池内启用版本化 rerank；`RunLifecycle` 接受 typed POLICY_QA 并发布 `POLICY_EVIDENCE`，gateway `/v1/policy-queries` 与前端证据卡展示 source/hash/locator/release；验收手册见 `docs/m4a-frontend-acceptance.md` | 最终政策解释、golden set 真实签字基线 | P1-04, P1-13, §9.2 | M4 进行中 |
-| FR-09 非结构化知识问答（P1） | ⛔ | `build.py:46` `check_conditional → END`，无 POLICY_QA 子图 | 子图路由（POLICY_QA/GENERATE_PLAN/EXPLAIN_RESULT/REVISE_PLAN）；依赖 FR-08 在线化 | P2-02 | M6 |
+| FR-09 非结构化知识问答（P1） | 🟡 子图路由部分接线 | POLICY_QA 已走独立检索生命周期；报告后的 `EXPLAIN_RESULT` 与 `REVISE_PLAN` 路由已接，解释只读父正式结果。通用政策答案生成和可验证解释文案仍待补 | 完整子图路由与 LLM 政策答案生成；依赖 FR-08 在线化 | P2-02 | M6 进行中 |
 | FR-10 离线数据采集与索引管线（P0） | 🟡 | `rag/etl.py`(376 行) + `scripts/ingest_charters.py` 存在；`docs/charters/2025/` 有 5700+ 院校 txt/json 原料；`migrations/15_policy_retrieval_release_scope.sql` 已补齐 policy 文档类型、发布者、学校、抓取时间、原件来源、文档/chunk hash、字符定位、embedding/index 身份和 release→文档/chunk set 映射，`migrations/16_policy_vector_release_identity.sql` 已补 release 级索引身份，`migrations/17_policy_rerank_release_identity.sql` 已补 release 级 rerank 启用状态/模型/配置/超时身份，并标注 `charter_*` 废弃 | ETL 尚未写新 metadata/release/index/rerank 配置，已有 policy 数据需离线修复后才会进入在线结果；四层质检与正式 release 发布流程仍待接入 | P2-03 | M4 进行中 |
 | FR-11 ETL 四层质检防线（P0） | 🟡 | `scripts/qa_check.py` 存在 | 按 FR-11 四层（结构/语义/交叉/抽样）逐层核实；`etl_run_id` 回溯链 | P1-01 | M4 |
 
@@ -62,9 +62,15 @@
 | FR-12 冲/稳/保方案生成（P0） | 🟡 确定性正式报告已接线 | `internal/algo/service/algo.go:54` `EstimateProb` 从分数生成整池；RunLifecycle 在确认画像后按 RankConvert → EstimateProb → EvaluateEligibility → OptimizeWishlist 执行，只有 PASS/PASS_PARTIAL 组进入优化。M5b-01 将候选、概率、位次、样本年份、资格状态和必需说明构造成最终 Claims/EvidencePackage，经 `VerifyPackage` 后自动发布 `V1_FORMAL` | LLM 叙事、版本化 golden set、Eval/SLO 与删除安全门禁仍由 M5b 后续 tickets 完成；Strategy 仍不可替换候选身份或概率 | P1-14 | M3/M4b/M5b-01 已接 |
 | FR-13 硬约束校验（P0） | ✅ 结构化资格闭环 | `EvaluateEligibility` 已提供 release-bound 规则快照、FULL/PARTIAL/NONE 覆盖、证据引用和专业五态；迁移 21 建立 `rule_version / rule_coverage`。迁移 22 增加 DRAFT→REVIEWED→PUBLISHED→REVOKED、内容不可变、状态审计、发布覆盖/重叠冲突门禁和撤销失效；迁移 23 增加 AST v1、Kleene 三值逻辑与资源上限；迁移 24 增加 typed facts 字段目录；迁移 25 增加规范 scope、来源完整性与覆盖冻结；迁移 26 将字段目录冻结为 release-scoped 快照。规则进入 REVIEWED/PUBLISHED 前执行与运行时相同的 AST、allowlist、literal 类型和来源证据静态校验。`EstimateProb` 输出报考年计划成员标记，RunLifecycle 不再无条件把所有历史专业视为当年计划。组级已按 PASS / PASS_PARTIAL / FAIL / UNKNOWN 汇总；所有声明的 PARTIAL/NONE 覆盖都会阻止 V1_FORMAL，PARTIAL/UNKNOWN/MISSING/BLOCKED 明确门禁。旧 `CheckConstraints` 保留兼容，正式路径不再使用 | 后续仍需真实规则内容发布和报告 Verifier；这些不计入本能力伪造通过 | P1-01, P1-15 | M4b 已接 |
 | FR-14 位次换算（P0） | ✅ 正向 | `algo.go:36` `RankConvert` score→rank；RunLifecycle 传入 run 绑定 `release_id` 并校验 reply rank 与 EstimateProb `AuditBasis` 一致 | 仅正向（符合 R7，rank-only 不反推）；**`RankConvertReply` 无控制线**，而 `score_rank_map.control_score` 在库（`00_schema.sql:223`）——可补透出 | §2(控制线未透出) | M3 已接 |
-| FR-15 录取概率估计（P0） | ✅ 正式事实闭环 | `algo.proto:84` `ProbEstimate` method=`weighted_hit`、clamp `[0.01,0.99]`；RunLifecycle 校验概率范围、候选身份、重复/漂移与执行时限，并把最终概率、单位和样本年份以 `DERIVED` EvidenceRef 送入正式报告门禁 | 置信区间仍为 P2；概率与滑档率仍只能作为近似估计，不能写成录取保证 | P1-05, P1-15 | M3/M5b-01 已接 |
+| FR-15 录取概率估计（P0） | ✅ 正式事实闭环 | `algo.proto` `ProbEstimate` method=`weighted_hit`、clamp `[0.01,0.99]`；历史组线改为组内最低录取分同条记录的位次，不再使用 `MIN(min_rank)` 误取强专业位次。2022–2024 最低分/位次写入候选历史，并由正式报告生成可校验事实 | 置信区间仍为 P2；概率与滑档率仍只能作为近似估计，不能写成录取保证 | P1-05, P1-15 | M3/M5b-01 已接 |
 | FR-16 方案自我挑战 Critic（P1） | 🟡 有偏差 | `build.py:17-19` `MAX_ASK_ROUNDS=6` ✅、`MAX_VERIFY_RETRIES=2` ✅、`MAX_CRITIC_LOOPS=2` 已与 PRD v1.3 对齐；Critic 节点仍未实现 | 实现已优化方案上的结构化审查、无进展检测与 P1 发布门禁；硬错误不得由 Critic 豁免 | P1-02, P1-03 | M2/M6 |
-| FR-17 志愿表优化（P0） | 🟡 确定性正式报告已接线 | `algo.go:86` `OptimizeWishlist`；RunLifecycle 只把 `EvaluateEligibility` 的 PASS/PASS_PARTIAL 候选组送入优化，并把最终顺序、候选身份和概率写入确定性报告与 `V1_FORMAL` 结果 | LLM 叙事与 Eval/SLO 门禁仍由 M5b 后续 tickets 完成；(P2)投档模拟未做 | P1-14 | M3/M4b/M5b-01 已接 |
+| FR-17 志愿表优化（P0） | ✅ 确定性正式报告与专业组级草稿闭环 | `OptimizeWishlist` 生成最多 45 个正式候选组；RunLifecycle 将 PASS/PASS_PARTIAL 候选写入 `V1_FORMAL`。报告页可移出、重新加入和重排拟填院校专业组、编辑组内专业；`SaveWishlistDraft` 接受正式报告的 1–45 组非空子集并保留用户顺序。新增 algo `SummarizeWishlistDraft` 和迁移 55，按已验证概率与效用持久化草稿风险摘要；正式报告及单项概率不变。PDF 仅渲染最新已保存草稿，未保存修改会先保存 | LLM 叙事与 Eval/SLO 门禁仍由 M5b 后续 tickets 完成；(P2)投档模拟未做 | P1-14 | M3/M4b/M5b-01 + ADR-0030（2026-11-23） |
+
+### 1.5 身份与用户自助（FR-25）
+
+| FR | 现状 | 证据（文件:行） | 剩余工作 | 关联 | 里程碑 |
+| --- | --- | --- | --- | --- | --- |
+| FR-25 身份、账户与“我的志愿表”（P0） | ✅ 主流程已接 | `migrations/49_account_authentication.sql` 建立账号、邀请码、恢复码和登录会话；`internal/gateway/identity.go` 实现 Argon2id、邀请码消费、Cookie principal、改密/恢复码/删除及单实例登录失败限流；`cmd/gateway/main.go` 每日执行 24 个月不活跃账号清理；`migrations/50_wishlist_deletion.sql`、`RunLifecycle.ListWishlists/ListWishlistHistory/RestoreWishlistDraftVersion/DeleteWishlist` 提供列表、状态、历史、恢复和删除；保留清理排除已保存草稿及其 run 归属；前端新增 `login.html`、`account.html`、`wishlists.html` | 正式公网多实例前需共享限流；仍需安全/未成年人合规复核 | — | 2026-11-23 已接 |
 
 ### 1.4 生成、校验与治理（FR-18 ~ FR-24）
 
@@ -236,9 +242,25 @@
 - `data/golden/evaluation-hunan-2025-v0.2.0-draft/` — 31 条检索 case + 10 条带显式 driver 的端到端 case 不可变草稿
 - `services/orchestrator/tests/test_retrieval_eval.py` — hash/schema、指标分母、安全泄漏与 baseline 复现测试
 - `scripts/run_retrieval_eval.py` — 实际 `RetrievePolicy` 与确定性 fixture 的 baseline 入口
+- `migrations/42_conversation_history.sql` — 用户可见消息时间线、session 标题与 `EXPLAIN_RESULT` 结果类型
+- `migrations/44_macro_region_catalog.sql` — release 绑定的七区省份快捷组与不可变目录
+- `services/orchestrator/app/run_lifecycle/macro_region.py` — 大区表达识别、七区目录校验与结构化省份回答
+- `frontend/src/composables/useConversation.ts` — 首次画像/报告后共用省份多选与大区快捷组澄清卡
+- `services/orchestrator/app/run_lifecycle/service.py` — 会话历史读取、报告后意图路由、父结果绑定、筛选修订与受控解释
+- `api/gateway/v1/gateway.proto` / `internal/gateway/service.go` — `/v1/sessions`、会话详情与报告后消息 HTTP 契约
+- `frontend/src/composables/useConversation.ts` — 报告后继续对话、服务端历史恢复、画像与修订版本恢复
+- `migrations/49_account_authentication.sql` / `internal/gateway/identity.go` — 受控邀请账号、Argon2id、Cookie 登录、恢复码与删除
+- `migrations/50_wishlist_deletion.sql` / `services/orchestrator/app/run_lifecycle/service.py` — “我的志愿表”列表、状态、历史、恢复、删除与长期保留
+- `frontend/src/auth` / `frontend/src/account` / `frontend/src/wishlists` — 登录注册、账户自助与志愿表页面
+- `frontend/e2e/real-gateway.spec.ts` — 真实链路生成、低分终态、报告解释、筛选修订与刷新恢复
+- `internal/algo/data/queries/history.sql` — 2022–2024 专业组最低分及同条记录最低位次
+- `internal/algo/data/queries/candidates.sql` — 报考年计划专业身份、当年代码变化与空白代码保守排除
+- `migrations/43_admission_group_lineage.sql` / `scripts/build_group_lineage.py` — release 绑定跨年专业组 lineage v2：专业构成是匹配前提，同代码仅作 tie-break，并保留匹配依据与置信度
+- `services/orchestrator/app/run_lifecycle/report.py` — 三年历史事实、Claims、证据与报告结构
+- `frontend/src/report/main.ts` / `frontend/src/school/main.ts` — 汇总报告和学校详情三年历史表
 - `migrations/00_schema.sql:223,272,306,314,333,353,385,409` — control_score / charter_chunk / chat_session / status / plan_checkpoint / llm_call_log / eval_run / data_version
 - `migrations/07_policy_chunk_trgm.sql:19,30` — policy_doc / policy_chunk
 - `migrations/15_policy_retrieval_release_scope.sql` — policy 适用域、`policy_chunk_set`、`release_policy_doc` 与检索索引
 - `migrations/16_policy_vector_release_identity.sql` — release 级 policy embedding 模型、向量维度与 index version
-- `docs/prd.md` **v1.3**（24 条 FR + §5.2 端到端 15 步 + §8 服务/契约/表映射/证据/旁路 + §9 里程碑 + §10 风险 + §12 验收总则 + §13 20 验收场景）
+- `docs/prd.md` **v1.3**（25 条 FR + §5.2 端到端 15 步 + §8 服务/契约/表映射/证据/旁路 + §9 里程碑 + §10 风险 + §12 验收总则 + §13 22 验收场景）
 - `docs/agent-architecture-review.md`（**历史存档**，结论已吸收进 PRD v1.3；P1-01~P1-15 + P2-01~P2-04 + §6.3 + §9 + §10.1）

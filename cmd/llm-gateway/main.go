@@ -10,6 +10,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"net/http"
 	"os"
 	"time"
 
@@ -34,7 +35,10 @@ type bootstrap struct {
 			DSNEnv string `yaml:"dsn_env"`
 		} `yaml:"database"`
 		Provider struct {
-			Mode string `yaml:"mode"`
+			Mode        string `yaml:"mode"`
+			BaseURLEnv  string `yaml:"base_url_env"`
+			APIKeyEnv   string `yaml:"api_key_env"`
+			HTTPTimeout string `yaml:"http_timeout"`
 		} `yaml:"provider"`
 	} `yaml:"llm"`
 }
@@ -43,8 +47,8 @@ func main() {
 	configPath := flag.String("conf", "configs/llm-gateway.yaml", "服务配置文件路径")
 	flag.Parse()
 	config := loadConfig(*configPath)
-	if config.LLM.Provider.Mode != "fail_closed" {
-		log.Fatal("M5a-01 仅允许 fail_closed 测试 provider")
+	if mode := os.Getenv("LLM_PROVIDER_MODE"); mode != "" {
+		config.LLM.Provider.Mode = mode
 	}
 	dsnEnv := config.LLM.Database.DSNEnv
 	if dsnEnv == "" {
@@ -72,8 +76,43 @@ func main() {
 		timeout = parsed
 	}
 	gs := grpc.NewServer(grpc.Address(addr), grpc.Timeout(timeout))
-	// M5a-01 只验收受控 fake provider；未接线真实 provider 时保持 fail closed。
-	llmgwv1.RegisterLLMGatewayServer(gs, llmgw.NewService(pool, nil))
+	var provider llmgw.Provider
+	switch config.LLM.Provider.Mode {
+	case "fail_closed":
+		provider = nil
+	case "deepseek":
+		apiKeyEnv := config.LLM.Provider.APIKeyEnv
+		if apiKeyEnv == "" {
+			apiKeyEnv = "DEEPSEEK_API_KEY"
+		}
+		baseURLEnv := config.LLM.Provider.BaseURLEnv
+		if baseURLEnv == "" {
+			baseURLEnv = "DEEPSEEK_BASE_URL"
+		}
+		apiKey := os.Getenv(apiKeyEnv)
+		if apiKey == "" {
+			log.Fatalf("%s 未配置", apiKeyEnv)
+		}
+		baseURL := os.Getenv(baseURLEnv)
+		if baseURL == "" {
+			baseURL = "https://api.deepseek.com"
+		}
+		httpTimeout := 60 * time.Second
+		if parsed, err := time.ParseDuration(config.LLM.Provider.HTTPTimeout); err == nil && parsed > 0 {
+			httpTimeout = parsed
+		}
+		provider, err = llmgw.NewDeepSeekProvider(
+			baseURL,
+			apiKey,
+			&http.Client{Timeout: httpTimeout},
+		)
+		if err != nil {
+			log.Fatal("DeepSeek provider 配置不可用")
+		}
+	default:
+		log.Fatalf("不支持的 LLM provider mode: %s", config.LLM.Provider.Mode)
+	}
+	llmgwv1.RegisterLLMGatewayServer(gs, llmgw.NewService(pool, provider))
 
 	app := kratos.New(
 		kratos.Name("svc-llm-gateway"),
@@ -90,6 +129,9 @@ func loadConfig(path string) bootstrap {
 	config.Server.GRPC.Timeout = "120s"
 	config.LLM.Database.DSNEnv = "LLMGW_DSN"
 	config.LLM.Provider.Mode = "fail_closed"
+	config.LLM.Provider.BaseURLEnv = "DEEPSEEK_BASE_URL"
+	config.LLM.Provider.APIKeyEnv = "DEEPSEEK_API_KEY"
+	config.LLM.Provider.HTTPTimeout = "60s"
 
 	body, err := os.ReadFile(path)
 	if err != nil {

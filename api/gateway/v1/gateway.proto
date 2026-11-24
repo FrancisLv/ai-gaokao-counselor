@@ -10,6 +10,87 @@ import "api/orchestrator/v1/orchestrator.proto";
 // svc-gateway 对外 API。唯一对客户端暴露的服务。
 // 流式输出（token / 节点事件）走 HTTP SSE，由 gateway 转推。
 service Gateway {
+  // 使用一次性邀请码创建账号；成功后建立登录会话。
+  rpc Register(RegisterRequest) returns (RegisterReply) {
+    option (google.api.http) = {
+      post: "/v1/auth/register"
+      body: "*"
+    };
+  }
+
+  // 使用用户名密码登录并建立服务端会话。
+  rpc Login(LoginRequest) returns (LoginReply) {
+    option (google.api.http) = {
+      post: "/v1/auth/login"
+      body: "*"
+    };
+  }
+
+  // 使用一次性恢复码重设密码，不自动登录。
+  rpc ResetPassword(ResetPasswordRequest) returns (ResetPasswordReply) {
+    option (google.api.http) = {
+      post: "/v1/auth/password:reset"
+      body: "*"
+    };
+  }
+
+  // 撤销当前登录会话。
+  rpc Logout(LogoutRequest) returns (LogoutReply) {
+    option (google.api.http) = {
+      post: "/v1/auth/logout"
+      body: "*"
+    };
+  }
+
+  // 读取当前登录账号的资料。
+  rpc GetAccount(GetAccountRequest) returns (AccountReply) {
+    option (google.api.http) = {
+      get: "/v1/account"
+    };
+  }
+
+  // 修改当前账号的昵称。
+  rpc UpdateAccount(UpdateAccountRequest) returns (AccountReply) {
+    option (google.api.http) = {
+      patch: "/v1/account"
+      body: "*"
+    };
+  }
+
+  // 验证当前密码后修改密码，并撤销其他设备上的登录会话。
+  rpc ChangePassword(ChangePasswordRequest) returns (ChangePasswordReply) {
+    option (google.api.http) = {
+      post: "/v1/account/password:change"
+      body: "*"
+    };
+  }
+
+  // 验证当前密码后重新生成一组一次性恢复码。
+  rpc RegenerateRecoveryCodes(RegenerateRecoveryCodesRequest)
+      returns (RecoveryCodesReply) {
+    option (google.api.http) = {
+      post: "/v1/account/recovery-codes:regenerate"
+      body: "*"
+    };
+  }
+
+  // 验证密码并删除账号及全部私有资料；不可恢复。
+  rpc DeleteAccount(DeleteAccountRequest) returns (DeleteAccountReply) {
+    option (google.api.http) = {
+      post: "/v1/account:delete"
+      body: "*"
+    };
+  }
+
+  // 撤销敏感资格数据同意；既有报告仍只读可见。
+  rpc RevokeSensitiveConsent(RevokeSensitiveConsentRequest)
+      returns (RevokeSensitiveConsentReply) {
+    option (google.api.http) = {
+      post: "/v1/account/consents/sensitive:revoke"
+      body: "*"
+    };
+  }
+
   // 提交一次志愿规划请求（自然语言），返回 session，随后经 SSE 订阅事件。
   rpc CreatePlan(CreatePlanRequest) returns (CreatePlanReply) {
     option (google.api.http) = { post: "/v1/plans" body: "*" };
@@ -61,6 +142,169 @@ service Gateway {
       get: "/v1/runs/{run_id}/events"
     };
   }
+
+  // 当前 principal 的最近对话。
+  rpc ListSessions(ListSessionsRequest)
+      returns (orchestrator.v1.ListSessionsReply) {
+    option (google.api.http) = {
+      get: "/v1/sessions"
+    };
+  }
+
+  // 读取对话消息、运行摘要与当前画像。
+  rpc GetSession(GetSessionRequest)
+      returns (orchestrator.v1.ChatSessionReply) {
+    option (google.api.http) = {
+      get: "/v1/sessions/{session_id}"
+    };
+  }
+
+  // 报告后继续对话；由 orchestrator 判断解释或修订。
+  rpc SubmitConversationMessage(SubmitConversationMessageRequest)
+      returns (orchestrator.v1.SubmitConversationMessageReply) {
+    option (google.api.http) = {
+      post: "/v1/sessions/{session_id}/messages"
+      body: "*"
+    };
+  }
+
+  // 读取绑定正式结果的最新志愿草稿。
+  rpc GetWishlistDraft(GetWishlistDraftRequest)
+      returns (orchestrator.v1.WishlistDraftReply) {
+    option (google.api.http) = {
+      get: "/v1/results/{result_version}/wishlist-draft"
+    };
+  }
+
+  // 显式保存拟填专业；正式推荐结果保持不变。
+  rpc SaveWishlistDraft(SaveWishlistDraftRequest)
+      returns (orchestrator.v1.WishlistDraftReply) {
+    option (google.api.http) = {
+      post: "/v1/results/{result_version}/wishlist-draft"
+      body: "*"
+    };
+  }
+
+  // 列出当前账号已保存的志愿表。
+  rpc ListWishlists(ListWishlistsRequest)
+      returns (orchestrator.v1.ListWishlistsReply) {
+    option (google.api.http) = {
+      get: "/v1/wishlists"
+    };
+  }
+
+  // 读取一份志愿表的全部版本。
+  rpc ListWishlistHistory(ListWishlistHistoryRequest)
+      returns (orchestrator.v1.WishlistHistoryReply) {
+    option (google.api.http) = {
+      get: "/v1/results/{result_version}/wishlist-history"
+    };
+  }
+
+  // 将历史版本恢复为新的最新版本。
+  rpc RestoreWishlistDraftVersion(RestoreWishlistDraftVersionRequest)
+      returns (orchestrator.v1.WishlistDraftReply) {
+    option (google.api.http) = {
+      post: "/v1/results/{result_version}/wishlist-draft:restore"
+      body: "*"
+    };
+  }
+
+  // 删除一份已保存志愿表。
+  rpc DeleteWishlist(DeleteWishlistRequest)
+      returns (orchestrator.v1.DeleteWishlistReply) {
+    option (google.api.http) = {
+      post: "/v1/results/{result_version}/wishlist:delete"
+      body: "*"
+    };
+  }
+}
+
+message RegisterRequest {
+  string invite_code = 1;
+  string username = 2;
+  string password = 3;
+  string nickname = 4;
+  string privacy_policy_version = 5;
+  bool guardian_ack_recorded = 6;
+}
+
+message AccountView {
+  string account_id = 1;
+  string username = 2;
+  string nickname = 3;
+}
+
+message RegisterReply {
+  AccountView account = 1;
+  repeated string recovery_codes = 2;
+}
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message LoginReply {
+  AccountView account = 1;
+}
+
+message ResetPasswordRequest {
+  string username = 1;
+  string recovery_code = 2;
+  string new_password = 3;
+}
+
+message ResetPasswordReply {
+  bool reset = 1;
+}
+
+message LogoutRequest {}
+
+message LogoutReply {
+  bool logged_out = 1;
+}
+
+message GetAccountRequest {}
+
+message UpdateAccountRequest {
+  string nickname = 1;
+}
+
+message AccountReply {
+  AccountView account = 1;
+}
+
+message ChangePasswordRequest {
+  string current_password = 1;
+  string new_password = 2;
+}
+
+message ChangePasswordReply {
+  bool changed = 1;
+}
+
+message RegenerateRecoveryCodesRequest {
+  string current_password = 1;
+}
+
+message RecoveryCodesReply {
+  repeated string recovery_codes = 1;
+}
+
+message DeleteAccountRequest {
+  string current_password = 1;
+  string confirmation = 2;
+}
+
+message DeleteAccountReply {
+  bool deleted = 1;
+}
+
+message RevokeSensitiveConsentRequest {}
+
+message RevokeSensitiveConsentReply {
+  int32 revoked_count = 1;
 }
 
 message CreatePlanRequest {
@@ -126,4 +370,53 @@ message CancelRunRequest {
 message WatchRunRequest {
   string run_id = 1;
   int64 after_event_seq = 2;
+}
+
+message ListSessionsRequest {
+  int32 limit = 1;
+}
+
+message GetSessionRequest {
+  string session_id = 1;
+}
+
+message SubmitConversationMessageRequest {
+  string session_id = 1;
+  orchestrator.v1.StructuredProfileInput profile_input = 2;
+  string parent_result_version = 3;
+  string message_text = 4;
+  string idempotency_key = 5;
+  orchestrator.v1.RegionAnswer region_answer = 6;
+}
+
+message GetWishlistDraftRequest {
+  string result_version = 1;
+}
+
+message SaveWishlistDraftRequest {
+  string result_version = 1;
+  int64 expected_version = 2;
+  string idempotency_key = 3;
+  repeated orchestrator.v1.WishlistDraftGroup groups = 4;
+}
+
+message ListWishlistsRequest {
+  int32 limit = 1;
+  int32 offset = 2;
+  string status = 3;
+}
+
+message ListWishlistHistoryRequest {
+  string result_version = 1;
+}
+
+message RestoreWishlistDraftVersionRequest {
+  string result_version = 1;
+  int64 draft_version = 2;
+  string idempotency_key = 3;
+}
+
+message DeleteWishlistRequest {
+  string result_version = 1;
+  string request_id = 2;
 }

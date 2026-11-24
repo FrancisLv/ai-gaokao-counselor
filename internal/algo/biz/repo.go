@@ -11,6 +11,8 @@ type AdmissionRepo interface {
 	// BatchGroupHistory 窗口=[year-windowYears, year-1]（含上下界，绝不含报考年）。
 	// 数据契约：key=GroupKey，value 按年份降序；每条只填 GroupMinRank+TotalCount，MinPercentile 留空由 biz 计算。
 	BatchGroupHistory(ctx context.Context, releaseID, province, category, batch string, year, windowYears int) (map[GroupKey][]AdmissionRecord, error)
+	// BatchMajorHistory 仅按映射历史组内的同专业代码读取专业级历史，按年份降序返回。
+	BatchMajorHistory(ctx context.Context, releaseID, province, category, batch string, year, windowYears int) (map[MajorKey][]MajorAdmissionRecord, error)
 	// BatchGroupPlan year=报考年, prevYear=报考年-1；按 GroupKey 组装 PlanChange{PlanCount:报考年, PrevPlanCount:报考年-1}。
 	BatchGroupPlan(ctx context.Context, releaseID, province, category string, year, prevYear int) (map[GroupKey]PlanChange, error)
 }

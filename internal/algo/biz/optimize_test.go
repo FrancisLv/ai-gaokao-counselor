@@ -318,3 +318,74 @@ func TestOptimizeUsecase_OptimizeWishlist_HappyPath(t *testing.T) {
 		t.Errorf("效用分应已注入，got Score=%v", res.Candidates[0].Score)
 	}
 }
+
+func TestSummarizeWishlistDraft(t *testing.T) {
+	itemScores := []float64{0.9, 0.7, 0.5}
+	groups := []DraftGroupRiskInput{
+		{
+			UniversityCode: "A",
+			MajorGroup:     "01",
+			Probability:    0.95,
+			Category:       CategorySafe,
+			UtilityScore:   &itemScores[0],
+		},
+		{
+			UniversityCode: "B",
+			MajorGroup:     "02",
+			Probability:    0.60,
+			Category:       CategoryStable,
+			UtilityScore:   &itemScores[1],
+		},
+		{
+			UniversityCode: "C",
+			MajorGroup:     "03",
+			Probability:    0.30,
+			Category:       CategoryRush,
+			UtilityScore:   &itemScores[2],
+		},
+	}
+	result, err := SummarizeWishlistDraft(groups, OptimizeParams{
+		MaxWishlistSize:    45,
+		MinSafeCount:       2,
+		SafeGuardThreshold: 0.9,
+	})
+	if err != nil {
+		t.Fatalf("SummarizeWishlistDraft 返回 error: %v", err)
+	}
+	if result.GroupCount != 3 || result.RushCount != 1 ||
+		result.StableCount != 1 || result.SafeTierCount != 1 {
+		t.Fatalf("分组统计错误：%+v", result)
+	}
+	if result.SafeGuardCount != 1 || result.SafeGuardTarget != 2 ||
+		result.SafeGuardOK {
+		t.Fatalf("保底统计错误：%+v", result)
+	}
+	wantSlip := (1 - 0.95) * (1 - 0.60) * (1 - 0.30)
+	if math.Abs(result.SlipRate-wantSlip) > 1e-12 {
+		t.Fatalf("SlipRate=%v, want %v", result.SlipRate, wantSlip)
+	}
+	if result.ExpectedSatisfaction == nil ||
+		math.Abs(*result.ExpectedSatisfaction-0.7) > 1e-12 {
+		t.Fatalf("ExpectedSatisfaction=%v, want 0.7", result.ExpectedSatisfaction)
+	}
+}
+
+func TestSummarizeWishlistDraftRejectsInvalidSelection(t *testing.T) {
+	_, err := SummarizeWishlistDraft([]DraftGroupRiskInput{
+		{
+			UniversityCode: "A",
+			MajorGroup:     "01",
+			Probability:    0.60,
+			Category:       CategoryStable,
+		},
+		{
+			UniversityCode: "A",
+			MajorGroup:     "01",
+			Probability:    0.70,
+			Category:       CategoryStable,
+		},
+	}, OptimizeParams{})
+	if !errors.Is(err, errs.ErrInvalidCandidate) {
+		t.Fatalf("err=%v, want ErrInvalidCandidate", err)
+	}
+}

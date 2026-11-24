@@ -122,7 +122,8 @@ ProfileField<T>
 | --- | --- | --- |
 | `preferences.risk_appetite` | `conservative / balanced / aggressive` | 不阻断；算法使用自身默认值，并标记来源为系统默认 |
 | `preferences.preferred_cities` | list<string> | 空列表 |
-| `preferences.major_interests` | list<string> | 空列表 |
+| `preferences.major_interests` | list<string> | 受控本科专业名称或用户明确确认的相关专业名称；空列表 |
+| `preferences.required_major_names` | list<string> | 仅由“只看 / 仅限 / 必须”产生；按当前计划专业名称精确包含 |
 | `preferences.priority_dims` | subset of `tier / major / location / strength` | 空列表 |
 | `preferences.preferred_tiers` | subset of `985 / 211 / 双一流` | 空列表 |
 | `preferences.max_tuition_cny_per_year` | decimal >= 0 | 空；**当前 algo proto 尚无此字段，V1 不得声称已执行学费过滤** |
@@ -134,6 +135,7 @@ ProfileField<T>
 - `risk_appetite=balanced`；
 - `preferred_cities=[]`；
 - `major_interests=[]`；
+- `required_major_names=[]`；
 - `priority_dims=[]`，由 algo 配置的 `DefaultWeights` 决定效用权重；
 - `preferred_tiers=[]`；
 - `max_tuition_cny_per_year=null`。
@@ -233,6 +235,7 @@ ToAlgoInput(confirmed_profile_version) -> EstimateProbInput
 | `preferences.risk_appetite` | `profile.risk_appetite` |
 | `preferences.priority_dims` | `profile.priority_dims` |
 | `preferences.major_interests` | `profile.interests` |
+| `preferences.required_major_names` | `profile.required_major_names` |
 | `preferences.preferred_cities` | `profile.preferred_cities` |
 | `preferences.preferred_tiers` | `profile.preferred_tiers` |
 | `preferences.max_tuition_cny_per_year` | 暂无映射 |
@@ -255,3 +258,5 @@ ToAlgoInput(confirmed_profile_version) -> EstimateProbInput
 | PC-10 | 已确认后修改分数 | 产生新 draft，旧确认版本保持不可变 |
 | PC-11 | 条件字段 UNKNOWN | 画像本身可继续，规则层不得按 PASS 处理 |
 | PC-12 | 学费预算存在 | 返回值保留该字段，但标记 `PROFILE_OPTIONAL_IGNORED` |
+| PC-13 | “我想学物理学” | `major_interests=["物理学"]`，不推断 `category` 或相关专业 |
+| PC-14 | “我只想看物理学” | `required_major_names=["物理学"]`，只匹配当前计划中名称精确命中的专业 |

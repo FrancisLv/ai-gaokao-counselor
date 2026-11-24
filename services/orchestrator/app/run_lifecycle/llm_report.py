@@ -17,9 +17,9 @@ from app.run_lifecycle.report import (
 
 
 REPORT_PROMPT_TEMPLATE_KEY = "m5b_report_narrative"
-REPORT_PROMPT_TEMPLATE_VERSION = "v1"
+REPORT_PROMPT_TEMPLATE_VERSION = "v4"
 REPORT_RESPONSE_SCHEMA_KEY = "m5b_report_narrative_v1"
-REPORT_RESPONSE_SCHEMA_VERSION = "v1"
+REPORT_RESPONSE_SCHEMA_VERSION = "v3"
 
 
 class GrpcReportNarrativeWriter:
@@ -29,8 +29,8 @@ class GrpcReportNarrativeWriter:
         self,
         channel: grpc.aio.Channel,
         *,
-        max_output_tokens: int = 600,
-        timeout_ms: int = 15000,
+        max_output_tokens: int = 8192,
+        timeout_ms: int = 30000,
     ) -> None:
         if max_output_tokens <= 0 or timeout_ms <= 0:
             raise ValueError("报告模型 token 与超时上限必须为正数")

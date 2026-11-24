@@ -28,7 +28,7 @@ SQLC_VERSION := v1.30.0
 SQLC := $(CURDIR)/bin/tools/sqlc-$(SQLC_VERSION)/sqlc
 
 .PHONY: help api api-go api-py conf tidy build build-gateway build-llm-gateway build-algo \
-        test py-check m4a-acceptance-seed m4a-real-policy-import up down logs run-gateway run-llm-gateway run-algo run-orchestrator
+        test py-check account-invites m4a-acceptance-seed acceptance-eligibility-seed admission-group-lineage m4a-real-policy-import up down logs run-gateway run-llm-gateway run-algo run-orchestrator
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -126,6 +126,7 @@ py-check: api-py ## 语法与模块导入检查
 
 py-test: api-py ## Python 离线逻辑与导入测试，不下载模型、不入库
 	HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 $(PY) -m unittest discover -s $(PY_SVC)/tests -p 'test_*.py' -v
+	HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 $(PY) -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
 m5b-release-gate: ## 执行安全测试、不可变 EvalRun 与 M5b 聚合发布门禁；需 DSN / SECURITY_TEST_DSN / EVAL_RUN_ID
 	@test -n "$(DSN)" || (echo '需设置 DSN'; exit 1)
@@ -140,6 +141,33 @@ m5b-release-gate: ## 执行安全测试、不可变 EvalRun 与 M5b 聚合发布
 m4a-acceptance-seed: ## 为 M4a 前端验收 seed policy release；需 DSN
 	@test -n "$(DSN)" || (echo '需设置 DSN'; exit 1)
 	$(PY) scripts/seed_m4a_frontend_acceptance.py --dsn "$(DSN)" $(if $(RESET_SCHEMA),--reset-schema,)
+
+account-invites: ## 生成一次性账号邀请码；需 DSN，明文仅输出一次
+	@test -n "$(DSN)" || (echo '需设置 DSN'; exit 1)
+	$(PY) scripts/create_account_invites.py \
+		--dsn "$(DSN)" \
+		--count "$(if $(COUNT),$(COUNT),10)" \
+		--expires-days "$(if $(EXPIRES_DAYS),$(EXPIRES_DAYS),30)"
+
+acceptance-eligibility-seed: ## 为隔离验收库发布明确标注的合成 FULL 资格夹具；需 DSN
+	@test -n "$(DSN)" || (echo '需设置 DSN'; exit 1)
+	$(PY) scripts/seed_acceptance_eligibility.py --dsn "$(DSN)" --release-id "$(if $(RELEASE_ID),$(RELEASE_ID),rel_legacy_v1)"
+
+admission-group-lineage: ## 构建 release 绑定的跨年院校专业组身份映射；默认物理类+历史类，需 DSN
+	@test -n "$(DSN)" || (echo '需设置 DSN'; exit 1)
+	@$(foreach category,$(if $(CATEGORY),$(CATEGORY),物理类 历史类), \
+		$(PY) scripts/build_group_lineage.py \
+			--dsn "$(DSN)" \
+			--release-id "$(if $(RELEASE_ID),$(RELEASE_ID),rel_legacy_v1)" \
+			--target-year "$(if $(TARGET_YEAR),$(TARGET_YEAR),2025)" \
+			--category "$(category)" \
+			$(if $(REPLACE),--replace,);)
+
+llm-release-seed: ## 为验收 release 注册 DeepSeek route、Prompt、Schema 与价格；需 DSN
+	@test -n "$(DSN)" || (echo '需设置 DSN'; exit 1)
+	$(PY) scripts/seed_llm_release.py \
+		--dsn "$(DSN)" \
+		--release-id "$(if $(RELEASE_ID),$(RELEASE_ID),rel_legacy_v1)"
 
 m4a-real-policy-import: ## 将主库真实 2025 章程复制到隔离测试库并发布 release
 	@test -n "$(SOURCE_DSN)" || (echo '需设置 SOURCE_DSN'; exit 1)

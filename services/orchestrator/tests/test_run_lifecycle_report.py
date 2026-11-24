@@ -166,6 +166,31 @@ class FormalReportLifecycleTests(RunLifecyclePostgresTest):
         self.assertIn("招生计划数：120", candidate_section["body"])
         self.assertIn("2022、2023、2024", candidate_section["body"])
         self.assertTrue(candidate_section["citations"])
+        self.assertEqual(candidate_section["university_code"], "U001")
+        self.assertEqual(candidate_section["major_group"], "01")
+        self.assertEqual(candidate_section["final_rank"], 1)
+        self.assertEqual(candidate_section["probability"], 0.67)
+        self.assertEqual(candidate_section["utility_score"], 0.8)
+        self.assertEqual(candidate_section["plan_count"], 120)
+        self.assertEqual(candidate_section["previous_plan_count"], 138)
+        self.assertIsNone(candidate_section["plan_adjust_factor"])
+        major = candidate_section["majors"][0]
+        self.assertEqual(major["major_code"], "M01")
+        self.assertEqual(major["major_name"], "测试专业")
+        self.assertEqual(major["subject_req"], "首选物理，再选不限")
+        self.assertEqual(major["duration"], "四年")
+        self.assertEqual(major["reference_year"], 2024)
+        self.assertEqual(major["min_score"], 610)
+        self.assertEqual(major["min_rank"], 17000)
+        self.assertEqual(major["admission_probability"], 0.73)
+        self.assertEqual(major["probability_data_years"], 2)
+        self.assertEqual(major["probability_sample_years"], [2023, 2024])
+        self.assertEqual(major["plan_count"], 10)
+        self.assertEqual(major["tuition"], 5000)
+        self.assertTrue(major["recommended"])
+        self.assertEqual(major["recommendation_rank"], 1)
+        self.assertTrue(major["selectable"])
+        self.assertEqual(major["unavailable_reason"], "")
         self.assertTrue(
             all(
                 citation["evidence_id"]
@@ -177,6 +202,12 @@ class FormalReportLifecycleTests(RunLifecyclePostgresTest):
         major_claim_id = "claim:candidate:U001|01:major:M01:major_code"
         plan_count_claim_id = "claim:candidate:U001|01:plan_count"
         tuition_claim_id = "claim:candidate:U001|01:major:M01:tuition"
+        probability_claim_id = (
+            "claim:candidate:U001|01:major:M01:admission_probability"
+        )
+        major_plan_claim_id = (
+            "claim:candidate:U001|01:major:M01:plan_count"
+        )
         strategy_claim_id = "claim:candidate:U001|01:strategy_tier"
         self.assertIn(
             major_claim_id,
@@ -188,6 +219,14 @@ class FormalReportLifecycleTests(RunLifecyclePostgresTest):
         )
         self.assertIn(
             tuition_claim_id,
+            completed.formal_result.report["claim_ids"],
+        )
+        self.assertIn(
+            probability_claim_id,
+            completed.formal_result.report["claim_ids"],
+        )
+        self.assertIn(
+            major_plan_claim_id,
             completed.formal_result.report["claim_ids"],
         )
         self.assertIn(
@@ -205,6 +244,8 @@ class FormalReportLifecycleTests(RunLifecyclePostgresTest):
         self.assertEqual(claims[major_claim_id]["status"], "VERIFIED")
         self.assertEqual(claims[plan_count_claim_id]["status"], "VERIFIED")
         self.assertEqual(claims[tuition_claim_id]["status"], "VERIFIED")
+        self.assertEqual(claims[probability_claim_id]["status"], "VERIFIED")
+        self.assertEqual(claims[major_plan_claim_id]["status"], "VERIFIED")
         self.assertEqual(claims[strategy_claim_id]["status"], "VERIFIED")
         self.assertIn("15860", completed.formal_result.report["sections"][0]["body"])
         self.assertEqual(
@@ -1134,6 +1175,7 @@ class FormalReportWireCompatibilityTests(unittest.TestCase):
                 "sections": 3,
                 "claim_ids": 4,
                 "unverified_facts": 5,
+                "degradation_reason": 6,
             },
         )
         section_fields = {
@@ -1141,3 +1183,29 @@ class FormalReportWireCompatibilityTests(unittest.TestCase):
             for field in pb.FormalReportSection.DESCRIPTOR.fields
         }
         self.assertEqual(section_fields["citations"], 4)
+        self.assertEqual(section_fields["history"], 5)
+        self.assertEqual(section_fields["majors"], 6)
+        self.assertEqual(section_fields["university_code"], 11)
+        major_fields = {
+            field.name: field.number
+            for field in pb.ReportMajor.DESCRIPTOR.fields
+        }
+        self.assertEqual(major_fields["admission_probability"], 7)
+        self.assertEqual(major_fields["plan_count"], 9)
+        self.assertEqual(major_fields["selectable"], 14)
+        self.assertEqual(major_fields["probability_sample_years"], 16)
+        history_fields = {
+            field.name: field.number
+            for field in pb.HistoricalAdmissionReference.DESCRIPTOR.fields
+        }
+        self.assertEqual(
+            history_fields,
+            {
+                "year": 1,
+                "min_score": 2,
+                "min_rank": 3,
+                "total_count": 4,
+                "mapping_method": 5,
+                "mapping_confidence": 6,
+            },
+        )

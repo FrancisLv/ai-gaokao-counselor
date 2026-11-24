@@ -139,6 +139,7 @@ func TestIntegration_CurrentPlanMembershipUsesReportYearPlan(t *testing.T) {
 	}
 	currentMajorID := insertMajor("M01", "当年计划专业")
 	historicalOnlyMajorID := insertMajor("M02", "仅历史专业")
+	newPlanMajorID := insertMajor("M03", "新计划专业")
 	for _, row := range []struct {
 		majorID int64
 		code    string
@@ -151,11 +152,11 @@ func TestIntegration_CurrentPlanMembershipUsesReportYearPlan(t *testing.T) {
 			INSERT INTO major_admission (
 				university_id, major_id, release_id, province, year, category, batch,
 				university_code, university_name, major_group, major_code, major_name,
-				min_rank, subject_req
+				min_score, min_rank, subject_req
 			) VALUES (
 				$1, $2, $3, '湖南', 2024, '物理类', '本科批',
 				$4, '成员核验测试大学', $5, $6, $7,
-				10000, '首选物理，再选不限'
+				600, 10000, '首选物理，再选不限'
 			)`,
 			universityID, row.majorID, releaseID, universityCode,
 			majorGroup, row.code, row.name,
@@ -171,10 +172,44 @@ func TestIntegration_CurrentPlanMembershipUsesReportYearPlan(t *testing.T) {
 		) VALUES (
 			$1, $2, $3, '湖南', 2025, '物理类', '本科批',
 			$4, '成员核验测试大学', $5, 'M01', '当年计划专业', 10
+		), (
+			$1, $6, $3, '湖南', 2025, '物理类', '本科批',
+			$4, '成员核验测试大学', $5, 'M03', '新计划专业', 8
 		)`,
-		universityID, currentMajorID, releaseID, universityCode, majorGroup,
+		universityID,
+		currentMajorID,
+		releaseID,
+		universityCode,
+		majorGroup,
+		newPlanMajorID,
 	); err != nil {
 		t.Fatalf("insert enrollment plan: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO admission_group_lineage (
+			release_id, target_year, target_category, target_batch,
+			target_university_code, target_major_group,
+			history_year, history_university_code, history_major_group,
+			mapping_method, confidence,
+			target_primary_subject, history_primary_subject,
+			target_major_names, history_major_names, matched_major_names,
+			target_major_count, history_major_count, matched_major_count,
+			mapping_version
+		) VALUES (
+			$1, 2025, '物理类', '本科批', $2, $3,
+			2024, $2, $3, 'EXACT_CODE', 1,
+			'首选物理', '首选物理',
+			ARRAY['当年计划专业','新计划专业'],
+			ARRAY['当年计划专业','仅历史专业'],
+			ARRAY['当年计划专业'],
+			2, 2, 1, 'test-lineage-v1'
+		)
+		`,
+		releaseID,
+		universityCode,
+		majorGroup,
+	); err != nil {
+		t.Fatalf("insert lineage: %v", err)
 	}
 
 	repo := setupRepo(t)
@@ -185,14 +220,14 @@ func TestIntegration_CurrentPlanMembershipUsesReportYearPlan(t *testing.T) {
 		t.Fatalf("LoadCandidates: %v", err)
 	}
 	if len(candidates) != 1 || len(candidates[0].Majors) != 2 {
-		t.Fatalf("candidates = %+v, want one group with two historical majors", candidates)
+		t.Fatalf("candidates = %+v, want one group with two current-plan majors", candidates)
 	}
 	got := map[string]bool{}
 	for _, major := range candidates[0].Majors {
 		got[major.MajorCode] = major.InCurrentPlan
 	}
-	if !got["M01"] || got["M02"] {
-		t.Fatalf("current-plan membership = %v, want M01=true M02=false", got)
+	if !reflect.DeepEqual(got, map[string]bool{"M01": true, "M03": true}) {
+		t.Fatalf("current-plan members = %v, want M01/M03 from 2025 plan", got)
 	}
 }
 
@@ -207,7 +242,7 @@ func TestIntegration_LoadCandidates(t *testing.T) {
 		t.Errorf("候选组数 = %d，异常偏少（预期 ~3000+）", len(cands))
 	}
 
-	// 候选主键唯一；历史数据中 1412/（105）关联不同院校身份，须剔除而非任取其一。
+	// 候选主键唯一。跨年来源由 lineage 固定，不能再由历史明细的多重院校身份任取。
 	seen := make(map[biz.GroupKey]bool)
 	for _, c := range cands {
 		key := biz.GroupKey{UniversityCode: c.UniversityCode, MajorGroup: c.MajorGroup}
@@ -215,9 +250,6 @@ func TestIntegration_LoadCandidates(t *testing.T) {
 			t.Fatalf("候选主键重复或缺失: %+v", key)
 		}
 		seen[key] = true
-		if key.UniversityCode == "1412" && key.MajorGroup == "（105）" {
-			t.Fatal("院校身份冲突的组不应被推荐")
-		}
 	}
 
 	// 抽查：找一个有专业明细的组，验证组装完整
@@ -256,7 +288,7 @@ func TestIntegration_LoadCandidates(t *testing.T) {
 	}
 }
 
-// 并列专业排序回归：既固定已知同位次样本的次序，也比较重复查询的完整候选与选科列表。
+// 当前计划专业排序回归：专业代码稳定有序，重复查询的完整候选与选科列表一致。
 func TestIntegration_LoadCandidates_Reproducible(t *testing.T) {
 	repo := setupRepo(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -265,19 +297,22 @@ func TestIntegration_LoadCandidates_Reproducible(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCandidates: %v", err)
 	}
-	var tiedCodes []string
-	for _, c := range first {
-		if c.UniversityCode == "1120" && c.MajorGroup == "（104）" {
-			for _, m := range c.Majors {
-				if m.MinRank == 11037 {
-					tiedCodes = append(tiedCodes, m.MajorCode)
-				}
-			}
-			break
+	for _, candidate := range first {
+		if len(candidate.Majors) == 0 {
+			t.Fatalf("候选 %s/%s 缺少当前计划专业", candidate.UniversityCode, candidate.MajorGroup)
 		}
-	}
-	if !reflect.DeepEqual(tiedCodes, []string{"21", "24"}) {
-		t.Fatalf("1120/（104）同位次专业次序 = %v, want [21 24]", tiedCodes)
+		for index, major := range candidate.Majors {
+			if strings.TrimSpace(major.MajorCode) == "" {
+				t.Fatalf("候选 %s/%s 含空专业代码", candidate.UniversityCode, candidate.MajorGroup)
+			}
+			if index > 0 && candidate.Majors[index-1].MajorCode > major.MajorCode {
+				t.Fatalf(
+					"候选 %s/%s 当前计划专业未按代码稳定排序",
+					candidate.UniversityCode,
+					candidate.MajorGroup,
+				)
+			}
+		}
 	}
 	for i := 0; i < 3; i++ {
 		next, err := repo.LoadCandidates(ctx, itRelease, itProvince, itCategory, itBatch, itYear)
@@ -288,7 +323,7 @@ func TestIntegration_LoadCandidates_Reproducible(t *testing.T) {
 			t.Fatalf("第 %d 次重复查询完整候选不一致（含 Majors/SubjectReq 顺序）", i+1)
 		}
 	}
-	t.Logf("%d 个候选完整内容重复 3 次一致，并列专业次序固定为 %v", len(first), tiedCodes)
+	t.Logf("%d 个候选完整内容重复 3 次一致，当前计划专业代码非空且稳定排序", len(first))
 }
 
 func TestIntegration_BatchGroupHistory_NoHoldoutLeak(t *testing.T) {
@@ -314,14 +349,35 @@ func TestIntegration_BatchGroupHistory_NoHoldoutLeak(t *testing.T) {
 			if r.Year < itYear-itWindow {
 				t.Fatalf("key %+v 含窗口外年份 %d（下界 %d）", key, r.Year, itYear-itWindow)
 			}
-			if r.GroupMinRank <= 0 || r.TotalCount <= 0 {
-				t.Fatalf("key %+v 记录字段异常：minRank=%d totalCount=%d", key, r.GroupMinRank, r.TotalCount)
+			if r.GroupMinScore <= 0 || r.GroupMinRank <= 0 || r.TotalCount <= 0 {
+				t.Fatalf("key %+v 记录字段异常：minScore=%d minRank=%d totalCount=%d", key, r.GroupMinScore, r.GroupMinRank, r.TotalCount)
 			}
 			// 降序校验（index 越小年份越近）
 			if i > 0 && records[i-1].Year < r.Year {
 				t.Fatalf("key %+v history 未按年降序：%d 在 %d 前", key, records[i-1].Year, r.Year)
 			}
 		}
+	}
+	zhongnan := hm[biz.GroupKey{
+		UniversityCode: "4302",
+		MajorGroup:     "（116）",
+	}]
+	foundZhongnan2024 := false
+	for _, record := range zhongnan {
+		if record.Year == 2024 {
+			foundZhongnan2024 = true
+			if record.GroupMinScore != 624 || record.GroupMinRank != 6798 {
+				t.Fatalf(
+					"中南大学 2025（116）→2024（107）历史组线 = %d/%d，want 624/6798（最低分及其对应位次）",
+					record.GroupMinScore,
+					record.GroupMinRank,
+				)
+			}
+			break
+		}
+	}
+	if !foundZhongnan2024 {
+		t.Fatal("缺少中南大学 2025（116）→2024（107）历史样本")
 	}
 	// total_count 口径抽查：2024 湖南物理类全省总人数应为 313685（跨批次 MAX cumulative）
 	var checked2024 bool
@@ -337,6 +393,175 @@ func TestIntegration_BatchGroupHistory_NoHoldoutLeak(t *testing.T) {
 		}
 		if checked2024 {
 			break
+		}
+	}
+}
+
+func TestIntegration_BatchMajorHistory_UsesCurrentPlanMajorIdentity(t *testing.T) {
+	repo := setupRepo(t)
+	candidates, err := repo.LoadCandidates(
+		context.Background(),
+		itRelease,
+		itProvince,
+		itCategory,
+		itBatch,
+		itYear,
+	)
+	if err != nil {
+		t.Fatalf("LoadCandidates: %v", err)
+	}
+	history, err := repo.BatchMajorHistory(
+		context.Background(),
+		itRelease,
+		itProvince,
+		itCategory,
+		itBatch,
+		itYear,
+		itWindow,
+	)
+	if err != nil {
+		t.Fatalf("BatchMajorHistory: %v", err)
+	}
+	if len(history) == 0 {
+		t.Fatal("BatchMajorHistory returned no records")
+	}
+	currentMajors := make(map[biz.MajorKey]string)
+	for _, candidate := range candidates {
+		for _, major := range candidate.Majors {
+			currentMajors[biz.MajorKey{
+				UniversityCode: candidate.UniversityCode,
+				MajorGroup:     candidate.MajorGroup,
+				MajorCode:      major.MajorCode,
+			}] = major.MajorName
+		}
+	}
+	for key, records := range history {
+		currentName, ok := currentMajors[key]
+		if !ok {
+			t.Fatalf("history key not present in current plan majors: %+v", key)
+		}
+		for index, record := range records {
+			if record.Year < itYear-itWindow || record.Year >= itYear {
+				t.Fatalf("history year outside window: %+v", record)
+			}
+			if index > 0 && records[index-1].Year <= record.Year {
+				t.Fatalf("major history is not year-descending: %+v", records)
+			}
+			if record.MajorName != currentName {
+				t.Fatalf(
+					"major history name %q does not match current plan name %q: key=%+v",
+					record.MajorName,
+					currentName,
+					key,
+				)
+			}
+		}
+	}
+}
+
+func TestIntegration_BatchMajorHistory_MatchesRenumberedMajorByExactName(t *testing.T) {
+	repo := setupRepo(t)
+	history, err := repo.BatchMajorHistory(
+		context.Background(),
+		itRelease,
+		itProvince,
+		itCategory,
+		itBatch,
+		itYear,
+		itWindow,
+	)
+	if err != nil {
+		t.Fatalf("BatchMajorHistory: %v", err)
+	}
+	key := biz.MajorKey{
+		UniversityCode: "3702",
+		MajorGroup:     "（212）",
+		MajorCode:      "51",
+	}
+	records := history[key]
+	if len(records) != 2 {
+		t.Fatalf(
+			"中国海洋大学（212）数学与应用数学历史 = %+v, want 2023/2024",
+			records,
+		)
+	}
+	wants := []struct {
+		year     int
+		minScore int
+		minRank  int
+	}{
+		{year: 2024, minScore: 599, minRank: 14586},
+		{year: 2023, minScore: 600, minRank: 15149},
+	}
+	for index, want := range wants {
+		if records[index].Year != want.year ||
+			records[index].MinScore != want.minScore ||
+			records[index].MinRank != want.minRank {
+			t.Fatalf(
+				"history[%d] = %+v, want year=%d score=%d rank=%d",
+				index,
+				records[index],
+				want.year,
+				want.minScore,
+				want.minRank,
+			)
+		}
+		if records[index].MajorName != "数学与应用数学" {
+			t.Fatalf("history[%d] name = %q", index, records[index].MajorName)
+		}
+	}
+}
+
+func TestIntegration_BatchMajorHistory_MatchesRenamedGroupAndRenumberedMajors(t *testing.T) {
+	repo := setupRepo(t)
+	history, err := repo.BatchMajorHistory(
+		context.Background(),
+		itRelease,
+		itProvince,
+		itCategory,
+		itBatch,
+		itYear,
+		itWindow,
+	)
+	if err != nil {
+		t.Fatalf("BatchMajorHistory: %v", err)
+	}
+	key := biz.MajorKey{
+		UniversityCode: "4302",
+		MajorGroup:     "（217）",
+		MajorCode:      "85",
+	}
+	records := history[key]
+	if len(records) != 3 {
+		t.Fatalf(
+			"中南大学（217）数学与应用数学历史 = %+v, want 2022/2023/2024",
+			records,
+		)
+	}
+	wants := []struct {
+		year     int
+		minScore int
+		minRank  int
+	}{
+		{year: 2024, minScore: 610, minRank: 10702},
+		{year: 2023, minScore: 612, minRank: 10771},
+		{year: 2022, minScore: 586, minRank: 13272},
+	}
+	for index, want := range wants {
+		if records[index].Year != want.year ||
+			records[index].MinScore != want.minScore ||
+			records[index].MinRank != want.minRank {
+			t.Fatalf(
+				"history[%d] = %+v, want year=%d score=%d rank=%d",
+				index,
+				records[index],
+				want.year,
+				want.minScore,
+				want.minRank,
+			)
+		}
+		if records[index].MajorName != "数学与应用数学" {
+			t.Fatalf("history[%d] name = %q", index, records[index].MajorName)
 		}
 	}
 }

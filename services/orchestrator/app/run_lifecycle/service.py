@@ -6,8 +6,11 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import logging
 import math
+import re
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any, AsyncIterator, Protocol
 from uuid import UUID, uuid4
 
@@ -21,11 +24,15 @@ from psycopg.types.json import Jsonb
 
 from api.algo.v1 import algo_pb2
 from api.common.v1 import common_pb2
-from app.run_lifecycle.algo import AlgoClient
+from app.run_lifecycle.algo import AlgoClient, grpc_error_reason
 from app.run_lifecycle.consent import (
     CONSENT_POLICY_VERSION,
     redact_sensitive_profile_fields,
     require_sensitive_consent,
+)
+from app.run_lifecycle.conversation_intent import (
+    ConversationIntentClassifier,
+    ConversationIntentRequest,
 )
 from app.run_lifecycle.events import append_event
 from app.run_lifecycle.formal import (
@@ -40,14 +47,31 @@ from app.run_lifecycle.formal import (
     retained_package,
     verification_report_payload,
 )
+from app.run_lifecycle.macro_region import (
+    MACRO_REGION_SCOPE_UNRESOLVED,
+    PROVINCES,
+    MacroRegionError,
+    RegionCatalog,
+    clarification_payload,
+    detect_macro_region,
+    load_region_catalog,
+    mentions_macro_region,
+    validate_region_answer,
+)
 from app.run_lifecycle.models import (
     AlgorithmPreviewPayload,
     AnswerFields,
+    ChatMessage,
+    ChatMessageInput,
+    ChatSessionSummary,
+    ChatSessionView,
     ConfirmProfileAnswer,
+    ConversationSubmission,
     CancelRunCommand,
     DeclineFieldsAnswer,
     InterruptView,
     PolicyQaInput,
+    RegionAnswer,
     RejectOrEditProfileAnswer,
     ResumeRunCommand,
     ResultReference,
@@ -55,8 +79,14 @@ from app.run_lifecycle.models import (
     RunLifecycleError,
     RunReceipt,
     RunView,
+    SessionRunSummary,
     StructuredProfileInput,
     SubmitRunCommand,
+    WishlistDraft,
+    WishlistDeletionReceipt,
+    WishlistDraftGroup,
+    WishlistDraftRisk,
+    WishlistSummary,
 )
 from app.run_lifecycle.profile import ProfileRuntime, build_profile_fields
 from app.run_lifecycle.profile_graph import build_profile_graph
@@ -92,6 +122,74 @@ from rag.policy_retrieval import (
     PolicyRetrievalResult,
 )
 
+ALGO_BUSINESS_ERROR_REASONS = frozenset({
+    "INVALID_SUBJECTS",
+    "SCORE_ABOVE_MAX",
+    "SCORE_BELOW_CONTROL_LINE",
+    "NO_RELIABLE_DATA",
+})
+
+_CONVERSATION_CITIES = (
+    "长沙", "武汉", "广州", "深圳", "北京", "上海", "南京",
+    "西安", "成都", "重庆", "杭州", "天津", "苏州", "厦门",
+    "青岛", "郑州", "济南", "合肥", "南昌", "昆明", "哈尔滨",
+    "大连", "沈阳", "长春", "福州",
+)
+_CONVERSATION_PROVINCES = PROVINCES
+_CITY_PROVINCE = {
+    "长沙": "湖南",
+    "武汉": "湖北",
+    "广州": "广东",
+    "深圳": "广东",
+    "北京": "北京",
+    "上海": "上海",
+    "南京": "江苏",
+    "苏州": "江苏",
+    "西安": "陕西",
+    "成都": "四川",
+    "重庆": "重庆",
+    "杭州": "浙江",
+    "天津": "天津",
+    "厦门": "福建",
+    "福州": "福建",
+    "青岛": "山东",
+    "济南": "山东",
+    "郑州": "河南",
+    "合肥": "安徽",
+    "南昌": "江西",
+    "昆明": "云南",
+    "哈尔滨": "黑龙江",
+    "大连": "辽宁",
+    "沈阳": "辽宁",
+    "长春": "吉林",
+}
+_CONVERSATION_MAJOR_KEYWORDS = (
+    "计算机", "电子信息", "自动化", "人工智能", "软件工程",
+    "临床医学", "医学", "法学", "金融", "会计", "数学", "物理",
+    "化学", "汉语言", "英语", "机械", "土木",
+)
+_CONVERSATION_MAJOR_EXCLUSION_KEYWORDS = ("师范",)
+_CONVERSATION_EXACT_MAJOR_NAMES = (
+    "康复物理治疗", "地球物理学类", "地球物理学", "应用物理学",
+    "材料物理", "工程物理", "核物理", "物理学类", "物理学",
+)
+_PHYSICS_RELATED_MAJOR_INTERESTS = (
+    "物理学", "物理学类", "应用物理学", "核物理", "材料物理",
+    "地球物理学", "工程物理",
+)
+_MORE_RUSH_PATTERN = re.compile(
+    r"(?:"
+    r"(?:增加|多加|多放|多来|再加|加几个|多几个|多一些)"
+    r".{0,8}(?:冲|冲刺)"
+    r"|"
+    r"(?:冲|冲刺)(?:档|比例|学校|候选|专业组|方案)?"
+    r".{0,8}(?:太少|少了|不够)"
+    r".{0,12}(?:增加|多加|多放|多来|再加|加几个|多几个|多一些)"
+    r")"
+)
+
+logger = logging.getLogger(__name__)
+
 
 class PolicyRetriever(Protocol):
     async def retrieve(
@@ -124,6 +222,7 @@ class RunLifecycle:
         formal_publish_guard: FormalPublishGuard | None = None,
         consent_policy_version: str = CONSENT_POLICY_VERSION,
         report_narrative_writer: ReportNarrativeWriter | None = None,
+        conversation_intent_classifier: ConversationIntentClassifier | None = None,
     ) -> None:
         if not dsn:
             raise ValueError("RunLifecycle 需要 PostgreSQL DSN")
@@ -140,6 +239,7 @@ class RunLifecycle:
         self._formal_verifier_version = formal_verifier_version
         self._formal_publish_guard = formal_publish_guard
         self._report_narrative_writer = report_narrative_writer
+        self._conversation_intent_classifier = conversation_intent_classifier
         if not consent_policy_version.strip():
             raise ValueError("consent_policy_version 不能为空")
         self._consent_policy_version = consent_policy_version
@@ -181,14 +281,21 @@ class RunLifecycle:
                 "RETRIEVAL_SCOPE_INVALID",
                 "POLICY_QA requires PolicyQaInput",
             )
-        if command.task_kind == "GENERATE_PLAN" and not isinstance(
+        if command.task_kind in {"GENERATE_PLAN", "REVISE_PLAN", "EXPLAIN_RESULT"} and not isinstance(
             command.input,
             StructuredProfileInput,
         ):
             raise RunLifecycleError(
                 "PROFILE_UNSUPPORTED_INPUT",
-                "GENERATE_PLAN requires StructuredProfileInput",
+                f"{command.task_kind} requires StructuredProfileInput",
             )
+        if command.task_kind in {"REVISE_PLAN", "EXPLAIN_RESULT"}:
+            if command.parent_result_version is None:
+                raise RunLifecycleError("PARENT_RESULT_REQUIRED")
+            if command.session_id is None:
+                raise RunLifecycleError("SESSION_REQUIRED")
+        if command.task_kind == "EXPLAIN_RESULT" and not command.user_message.strip():
+            raise RunLifecycleError("MESSAGE_REQUIRED")
         if isinstance(command.input, PolicyQaInput):
             if not command.input.query_text.strip():
                 raise RunLifecycleError("RETRIEVAL_QUERY_REQUIRED")
@@ -204,7 +311,7 @@ class RunLifecycle:
         scope_key = f"session:{command.session_id}" if command.session_id else "session:new"
         receipt_lock = f"{command.principal_id}:SUBMIT_RUN:{scope_key}:{command.idempotency_key}"
 
-        conn = await self._connect()
+        conn = await self._connect(autocommit=True)
         try:
             async with conn.transaction():
                 await self._raise_if_principal_unavailable(
@@ -240,23 +347,64 @@ class RunLifecycle:
                     ),
                 )
                 session_id = await self._resolve_session(conn, command)
+                if command.parent_result_version is not None:
+                    await self._validate_parent_result(
+                        conn,
+                        principal_id=command.principal_id,
+                        session_id=session_id,
+                        parent_result_version=command.parent_result_version,
+                    )
                 run_id = uuid4()
                 await conn.execute(
                     """
                     INSERT INTO run (
-                        run_id, session_id, principal_id, task_kind, task_input,
+                        run_id, session_id, principal_id, parent_result_version,
+                        task_kind, task_input,
                         state, stage, state_version, release_id
                     )
-                    VALUES (%s, %s, %s, %s, %s, 'QUEUED', 'INTAKE', 1, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'QUEUED', 'INTAKE', 1, %s)
                     """,
                     (
                         run_id,
                         session_id,
                         command.principal_id,
+                        command.parent_result_version,
                         command.task_kind,
                         Jsonb(asdict(command.input)),
                         release,
                     ),
+                )
+                if command.user_message.strip() and not any(
+                    message.role == "USER"
+                    and message.content.strip() == command.user_message.strip()
+                    for message in command.messages
+                ):
+                    await self._store_messages(
+                        conn,
+                        session_id=session_id,
+                        run_id=run_id,
+                        messages=(
+                            ChatMessageInput(
+                                client_message_id=(
+                                    f"server:{run_id}:user"
+                                ),
+                                role="USER",
+                                kind="TEXT",
+                                content=command.user_message.strip(),
+                            ),
+                        ),
+                    )
+                await self._store_messages(
+                    conn,
+                    session_id=session_id,
+                    run_id=run_id,
+                    messages=command.messages,
+                )
+                await self._update_session_for_run(
+                    conn,
+                    session_id=session_id,
+                    command=command,
+                    run_id=run_id,
                 )
                 await conn.execute(
                     """
@@ -309,6 +457,7 @@ class RunLifecycle:
                     SELECT r.run_id, r.session_id, r.task_kind, r.state, r.stage,
                            r.terminal_reason, r.state_version, r.release_id,
                            r.confirmed_profile_version,
+                           r.parent_result_version,
                            r.active_execution_remaining_ms, r.cancel_requested_at,
                            r.result_version, r.result_kind,
                            rr.payload AS result_payload,
@@ -401,6 +550,14 @@ class RunLifecycle:
                     result_state=row["result_state"] or "ACTIVE",
                     stale_reason=row["stale_reason"],
                 )
+            conversation_answer = None
+            if (
+                result is not None
+                and result.result_kind == "EXPLAIN_RESULT"
+            ):
+                conversation_answer = (
+                    row["result_payload"] or {}
+                ).get("answer")
             current_interrupt = None
             if row["interrupt_id"] is not None:
                 current_interrupt = InterruptView(
@@ -429,12 +586,2321 @@ class RunLifecycle:
                 result=result,
                 result_payload=row["result_payload"],
                 formal_result=formal_result,
+                parent_result_version=row["parent_result_version"],
+                conversation_answer=(
+                    str(conversation_answer)
+                    if conversation_answer is not None
+                    else None
+                ),
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
                 expires_at=row["expires_at"],
             )
         finally:
             await conn.close()
+
+    async def ListSessions(
+        self,
+        *,
+        principal_id: str,
+        limit: int = 20,
+    ) -> tuple[ChatSessionSummary, ...]:
+        limit = max(1, min(limit, 100))
+        conn = await self._connect()
+        try:
+            await self._raise_if_principal_unavailable(conn, principal_id)
+            rows = await (
+                await conn.execute(
+                    """
+                    SELECT cs.id AS session_id,
+                           COALESCE(NULLIF(btrim(cs.title), ''), '新的志愿对话') AS title,
+                           latest.run_id AS latest_run_id,
+                           latest.state AS latest_state,
+                           latest.result_version AS latest_result_version,
+                           latest.result_kind AS latest_result_kind,
+                           counts.run_count,
+                           cs.created_at, cs.updated_at
+                    FROM chat_session cs
+                    LEFT JOIN LATERAL (
+                        SELECT run_id, state, result_version, result_kind
+                        FROM run
+                        WHERE session_id = cs.id
+                        ORDER BY created_at DESC, run_id DESC
+                        LIMIT 1
+                    ) latest ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT COUNT(*)::int AS run_count
+                        FROM run
+                        WHERE session_id = cs.id
+                    ) counts ON TRUE
+                    WHERE cs.principal_id = %s
+                      AND cs.status <> 'retention_expired'
+                    ORDER BY cs.updated_at DESC, cs.id DESC
+                    LIMIT %s
+                    """,
+                    (principal_id, limit),
+                )
+            ).fetchall()
+            return tuple(self._session_summary(row) for row in rows)
+        finally:
+            await conn.close()
+
+    async def GetSession(
+        self,
+        *,
+        principal_id: str,
+        session_id: UUID,
+    ) -> ChatSessionView:
+        conn = await self._connect()
+        try:
+            await self._raise_if_principal_unavailable(conn, principal_id)
+            session = await (
+                await conn.execute(
+                    """
+                    SELECT cs.id AS session_id,
+                           COALESCE(NULLIF(btrim(cs.title), ''), '新的志愿对话') AS title,
+                           latest.run_id AS latest_run_id,
+                           latest.state AS latest_state,
+                           latest.result_version AS latest_result_version,
+                           latest.result_kind AS latest_result_kind,
+                           counts.run_count,
+                           cs.created_at, cs.updated_at
+                    FROM chat_session cs
+                    LEFT JOIN LATERAL (
+                        SELECT run_id, state, result_version, result_kind
+                        FROM run
+                        WHERE session_id = cs.id
+                        ORDER BY created_at DESC, run_id DESC
+                        LIMIT 1
+                    ) latest ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT COUNT(*)::int AS run_count
+                        FROM run
+                        WHERE session_id = cs.id
+                    ) counts ON TRUE
+                    WHERE cs.id = %s AND cs.principal_id = %s
+                    """,
+                    (session_id, principal_id),
+                )
+            ).fetchone()
+            if session is None:
+                raise RunLifecycleError("SESSION_NOT_FOUND")
+            message_rows = await (
+                await conn.execute(
+                    """
+                    SELECT message_id, session_id, run_id, role, kind,
+                           content, metadata, created_at
+                    FROM chat_message
+                    WHERE session_id = %s
+                    ORDER BY message_seq
+                    """,
+                    (session_id,),
+                )
+            ).fetchall()
+            run_rows = await (
+                await conn.execute(
+                    """
+                    SELECT run_id, task_kind, state, stage, terminal_reason,
+                           parent_result_version, result_version, result_kind,
+                           created_at, updated_at
+                    FROM run
+                    WHERE session_id = %s
+                    ORDER BY created_at, run_id
+                    """,
+                    (session_id,),
+                )
+            ).fetchall()
+            profile = await (
+                await conn.execute(
+                    """
+                    SELECT fields
+                    FROM profile_revision
+                    WHERE session_id = %s
+                    ORDER BY revision_no DESC
+                    LIMIT 1
+                    """,
+                    (session_id,),
+                )
+            ).fetchone()
+            return ChatSessionView(
+                summary=self._session_summary(session),
+                messages=tuple(
+                    ChatMessage(
+                        message_id=row["message_id"],
+                        session_id=row["session_id"],
+                        run_id=row["run_id"],
+                        role=row["role"],
+                        kind=row["kind"],
+                        content=row["content"],
+                        metadata=dict(row["metadata"] or {}),
+                        created_at=row["created_at"],
+                    )
+                    for row in message_rows
+                ),
+                runs=tuple(
+                    SessionRunSummary(
+                        run_id=row["run_id"],
+                        task_kind=row["task_kind"],
+                        state=row["state"],
+                        stage=row["stage"],
+                        terminal_reason=row["terminal_reason"],
+                        parent_result_version=row["parent_result_version"],
+                        result_version=row["result_version"],
+                        result_kind=row["result_kind"],
+                        created_at=row["created_at"],
+                        updated_at=row["updated_at"],
+                    )
+                    for row in run_rows
+                ),
+                profile_fields=(
+                    dict(profile["fields"]) if profile is not None else {}
+                ),
+            )
+        finally:
+            await conn.close()
+
+    async def GetWishlistDraft(
+        self,
+        *,
+        principal_id: str,
+        result_version: UUID,
+    ) -> WishlistDraft | None:
+        conn = await self._connect()
+        try:
+            await self._raise_if_principal_unavailable(conn, principal_id)
+            result_owner = await (
+                await conn.execute(
+                    """
+                    SELECT 1
+                    FROM run_result rr
+                    JOIN run r ON r.run_id = rr.run_id
+                    WHERE rr.result_version = %s
+                      AND rr.result_kind = 'V1_FORMAL'
+                      AND r.principal_id = %s
+                    """,
+                    (result_version, principal_id),
+                )
+            ).fetchone()
+            if result_owner is None:
+                raise RunLifecycleError("RESULT_NOT_FOUND")
+            row = await (
+                await conn.execute(
+                    """
+                    SELECT draft.draft_version_id, draft.result_version,
+                           draft.run_id, draft.release_id, draft.draft_version,
+                           draft.selections, draft.risk_summary,
+                           draft.session_id, draft.created_at,
+                           result.payload AS result_payload
+                    FROM wishlist_draft_version AS draft
+                    JOIN run_result AS result
+                      ON result.result_version = draft.result_version
+                    WHERE draft.principal_id = %s
+                      AND draft.result_version = %s
+                    ORDER BY draft.draft_version DESC
+                    LIMIT 1
+                    """,
+                    (principal_id, result_version),
+                )
+            ).fetchone()
+            if row is None:
+                return None
+            draft = self._wishlist_draft_from_row(row)
+            if draft.risk is not None or not row.get("result_payload"):
+                return draft
+            try:
+                risk = await self._summarize_draft_risk(
+                    row["result_payload"],
+                    draft.groups,
+                    release_id=draft.release_id,
+                    session_id=row["session_id"],
+                )
+            except RunLifecycleError as exc:
+                log.warning(
+                    "无法为历史草稿重算风险摘要: %s",
+                    exc.reason,
+                )
+                return draft
+            return replace(draft, risk=risk)
+        finally:
+            await conn.close()
+
+    async def ListWishlists(
+        self,
+        *,
+        principal_id: str,
+        limit: int = 20,
+        offset: int = 0,
+        status_filter: str = "",
+    ) -> tuple[WishlistSummary, ...]:
+        if limit < 1 or limit > 100 or offset < 0:
+            raise RunLifecycleError("DRAFT_COMMAND_INVALID")
+        normalized_filter = status_filter.strip().upper()
+        if normalized_filter not in {"", "CURRENT", "SUPERSEDED", "STALE"}:
+            raise RunLifecycleError("DRAFT_COMMAND_INVALID")
+        conn = await self._connect()
+        try:
+            await self._raise_if_principal_unavailable(conn, principal_id)
+            rows = await (
+                await conn.execute(
+                    """
+                    WITH latest AS (
+                        SELECT DISTINCT ON (draft.result_version)
+                               draft.draft_version_id,
+                               draft.result_version,
+                               draft.run_id,
+                               draft.release_id,
+                               draft.draft_version,
+                               draft.selections,
+                               draft.created_at
+                        FROM wishlist_draft_version AS draft
+                        WHERE draft.principal_id = %s
+                        ORDER BY draft.result_version, draft.draft_version DESC
+                    ),
+                    classified AS (
+                        SELECT latest.*,
+                               run.session_id,
+                               run.task_input,
+                               COALESCE(result_state.status, 'ACTIVE') AS result_state,
+                               result_state.reason AS result_state_reason,
+                               release.status AS release_status,
+                               successor.run_id AS successor_run_id,
+                               CASE
+                                   WHEN COALESCE(result_state.status, 'ACTIVE') = 'STALE'
+                                        OR release.status <> 'PUBLISHED'
+                                   THEN 'STALE'
+                                   WHEN successor.run_id IS NOT NULL
+                                   THEN 'SUPERSEDED'
+                                   ELSE 'CURRENT'
+                               END AS status
+                        FROM latest
+                        JOIN run ON run.run_id = latest.run_id
+                        JOIN release ON release.release_id = latest.release_id
+                        LEFT JOIN LATERAL (
+                            SELECT state.status, state.reason
+                            FROM run_result_state_event AS state
+                            WHERE state.result_version = latest.result_version
+                            ORDER BY state.event_id DESC
+                            LIMIT 1
+                        ) AS result_state ON TRUE
+                        LEFT JOIN LATERAL (
+                            SELECT child.run_id
+                            FROM run AS child
+                            JOIN run_result AS child_result
+                              ON child_result.run_id = child.run_id
+                             AND child_result.result_kind = 'V1_FORMAL'
+                            WHERE child.session_id = run.session_id
+                              AND child.task_kind = 'REVISE_PLAN'
+                              AND child.parent_result_version = latest.result_version
+                              AND child.state = 'SUCCEEDED'
+                            ORDER BY child.created_at, child.run_id
+                            LIMIT 1
+                        ) AS successor ON TRUE
+                    )
+                    SELECT *
+                    FROM classified
+                    WHERE (%s = '' OR status = %s)
+                    ORDER BY created_at DESC, result_version
+                    LIMIT %s OFFSET %s
+                    """,
+                    (principal_id, normalized_filter, normalized_filter, limit, offset),
+                )
+            ).fetchall()
+        finally:
+            await conn.close()
+        items: list[WishlistSummary] = []
+        for row in rows:
+            task_input = row["task_input"] or {}
+            application_year = int(task_input.get("application_year") or 0)
+            category = str(task_input.get("category") or "")
+            batch = str(task_input.get("batch") or "")
+            stale_reason = row["result_state_reason"]
+            if row["status"] == "STALE" and not stale_reason:
+                stale_reason = "RELEASE_REVOKED"
+            title_parts = [
+                str(application_year) if application_year else "",
+                category,
+                batch,
+                "志愿表",
+            ]
+            items.append(
+                WishlistSummary(
+                    draft_version_id=row["draft_version_id"],
+                    result_version=row["result_version"],
+                    run_id=row["run_id"],
+                    release_id=row["release_id"],
+                    draft_version=int(row["draft_version"]),
+                    title=" ".join(value for value in title_parts if value),
+                    application_year=application_year,
+                    category=category,
+                    batch=batch,
+                    group_count=len(row["selections"]),
+                    major_count=sum(
+                        len(group.get("major_codes") or ())
+                        for group in row["selections"]
+                    ),
+                    status=row["status"],
+                    stale_reason=stale_reason,
+                    successor_run_id=row["successor_run_id"],
+                    saved_at=row["created_at"],
+                )
+            )
+        return tuple(items)
+
+    async def SaveWishlistDraft(
+        self,
+        *,
+        principal_id: str,
+        result_version: UUID,
+        expected_version: int,
+        idempotency_key: str,
+        groups: tuple[WishlistDraftGroup, ...],
+    ) -> WishlistDraft:
+        if not idempotency_key.strip() or expected_version < 0:
+            raise RunLifecycleError("DRAFT_COMMAND_INVALID")
+        normalized = self._normalize_draft_groups(groups)
+        conn = await self._connect(autocommit=True)
+        try:
+            await self._raise_if_principal_unavailable(conn, principal_id)
+            async with conn.transaction():
+                await (
+                    await conn.execute(
+                        """
+                        SELECT pg_advisory_xact_lock(hashtext(%s))
+                        """,
+                        (f"{principal_id}|{result_version}",),
+                    )
+                ).fetchone()
+                result_row = await (
+                    await conn.execute(
+                        """
+                        SELECT rr.run_id, rr.release_id, r.session_id, rr.payload,
+                               rel.status AS release_status,
+                               result_state.status AS result_state
+                        FROM run_result rr
+                        JOIN run r ON r.run_id = rr.run_id
+                        JOIN release rel ON rel.release_id = rr.release_id
+                        LEFT JOIN LATERAL (
+                            SELECT state.status
+                            FROM run_result_state_event state
+                            WHERE state.result_version = rr.result_version
+                            ORDER BY state.event_id DESC
+                            LIMIT 1
+                        ) result_state ON TRUE
+                        WHERE rr.result_version = %s
+                          AND rr.result_kind = 'V1_FORMAL'
+                          AND r.principal_id = %s
+                        """,
+                        (result_version, principal_id),
+                    )
+                ).fetchone()
+                if result_row is None:
+                    raise RunLifecycleError("RESULT_NOT_FOUND")
+                if result_row["release_status"] != "PUBLISHED":
+                    raise RunLifecycleError("RELEASE_REVOKED")
+                if result_row["result_state"] == "STALE":
+                    raise RunLifecycleError("RESULT_STALE")
+                validated = self._validate_draft_selections(
+                    result_row["payload"],
+                    normalized,
+                )
+                request_sha256 = sha256_payload(
+                    {
+                        "result_version": str(result_version),
+                        "groups": [
+                            {
+                                "university_code": group.university_code,
+                                "major_group": group.major_group,
+                                "major_codes": list(group.major_codes),
+                            }
+                            for group in validated
+                        ],
+                    }
+                )
+                replayed = await (
+                    await conn.execute(
+                        """
+                        SELECT draft_version_id, result_version, run_id,
+                               release_id, draft_version, selections,
+                               risk_summary, request_sha256, created_at
+                        FROM wishlist_draft_version
+                        WHERE principal_id = %s
+                          AND result_version = %s
+                          AND idempotency_key = %s
+                        """,
+                        (
+                            principal_id,
+                            result_version,
+                            idempotency_key,
+                        ),
+                    )
+                ).fetchone()
+                if replayed is not None:
+                    if replayed["request_sha256"] != request_sha256:
+                        raise RunLifecycleError("IDEMPOTENCY_CONFLICT")
+                    return self._wishlist_draft_from_row(replayed)
+                latest = await (
+                    await conn.execute(
+                        """
+                        SELECT draft_version_id, result_version, run_id,
+                               release_id, draft_version, selections,
+                               risk_summary, idempotency_key, request_sha256,
+                               created_at
+                        FROM wishlist_draft_version
+                        WHERE principal_id = %s AND result_version = %s
+                        ORDER BY draft_version DESC
+                        LIMIT 1
+                        """,
+                        (principal_id, result_version),
+                    )
+                ).fetchone()
+                current_version = (
+                    int(latest["draft_version"]) if latest is not None else 0
+                )
+                if current_version != expected_version:
+                    raise RunLifecycleError(
+                        "DRAFT_VERSION_CONFLICT",
+                        f"current draft version is {current_version}",
+                    )
+                risk = await self._summarize_draft_risk(
+                    result_row["payload"],
+                    validated,
+                    release_id=result_row["release_id"],
+                    session_id=result_row["session_id"],
+                )
+                draft_version_id = uuid4()
+                draft_version = current_version + 1
+                row = await (
+                    await conn.execute(
+                        """
+                        INSERT INTO wishlist_draft_version (
+                            draft_version_id, principal_id, session_id,
+                            run_id, result_version, release_id,
+                            draft_version, selections, risk_summary,
+                            idempotency_key, request_sha256
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING draft_version_id, result_version, run_id,
+                                  release_id, draft_version, selections,
+                                  risk_summary, created_at
+                        """,
+                        (
+                            draft_version_id,
+                            principal_id,
+                            result_row["session_id"],
+                            result_row["run_id"],
+                            result_version,
+                            result_row["release_id"],
+                            draft_version,
+                            Jsonb([
+                                {
+                                    "university_code": group.university_code,
+                                    "major_group": group.major_group,
+                                    "major_codes": list(group.major_codes),
+                                }
+                                for group in validated
+                            ]),
+                            Jsonb(self._draft_risk_payload(risk)),
+                            idempotency_key,
+                            request_sha256,
+                        ),
+                    )
+                ).fetchone()
+                return self._wishlist_draft_from_row(row)
+        finally:
+            await conn.close()
+
+    async def ListWishlistHistory(
+        self,
+        *,
+        principal_id: str,
+        result_version: UUID,
+    ) -> tuple[WishlistDraft, ...]:
+        conn = await self._connect()
+        try:
+            await self._raise_if_principal_unavailable(conn, principal_id)
+            rows = await (
+                await conn.execute(
+                    """
+                    SELECT draft.draft_version_id, draft.result_version,
+                           draft.run_id, draft.release_id, draft.draft_version,
+                           draft.selections, draft.risk_summary,
+                           draft.created_at
+                    FROM wishlist_draft_version AS draft
+                    JOIN run AS run ON run.run_id = draft.run_id
+                    WHERE draft.principal_id = %s
+                      AND draft.result_version = %s
+                      AND run.principal_id = %s
+                    ORDER BY draft.draft_version DESC
+                    """,
+                    (principal_id, result_version, principal_id),
+                )
+            ).fetchall()
+        finally:
+            await conn.close()
+        if not rows:
+            raise RunLifecycleError("RESULT_NOT_FOUND")
+        return tuple(self._wishlist_draft_from_row(row) for row in rows)
+
+    async def RestoreWishlistDraftVersion(
+        self,
+        *,
+        principal_id: str,
+        result_version: UUID,
+        draft_version: int,
+        idempotency_key: str,
+    ) -> WishlistDraft:
+        if draft_version < 1 or not idempotency_key.strip():
+            raise RunLifecycleError("DRAFT_COMMAND_INVALID")
+        conn = await self._connect()
+        try:
+            await self._raise_if_principal_unavailable(conn, principal_id)
+            source = await (
+                await conn.execute(
+                    """
+                    SELECT draft.draft_version_id, draft.result_version,
+                           draft.run_id, draft.release_id, draft.draft_version,
+                           draft.selections, draft.risk_summary,
+                           draft.created_at
+                    FROM wishlist_draft_version AS draft
+                    JOIN run AS run ON run.run_id = draft.run_id
+                    WHERE draft.principal_id = %s
+                      AND draft.result_version = %s
+                      AND draft.draft_version = %s
+                      AND run.principal_id = %s
+                    """,
+                    (
+                        principal_id,
+                        result_version,
+                        draft_version,
+                        principal_id,
+                    ),
+                )
+            ).fetchone()
+            latest = await (
+                await conn.execute(
+                    """
+                    SELECT draft_version
+                    FROM wishlist_draft_version
+                    WHERE principal_id = %s AND result_version = %s
+                    ORDER BY draft_version DESC
+                    LIMIT 1
+                    """,
+                    (principal_id, result_version),
+                )
+            ).fetchone()
+        finally:
+            await conn.close()
+        if source is None:
+            raise RunLifecycleError("RESULT_NOT_FOUND")
+        source_draft = self._wishlist_draft_from_row(source)
+        return await self.SaveWishlistDraft(
+            principal_id=principal_id,
+            result_version=result_version,
+            expected_version=(
+                int(latest["draft_version"]) if latest is not None else 0
+            ),
+            idempotency_key=idempotency_key,
+            groups=source_draft.groups,
+        )
+
+    async def DeleteWishlist(
+        self,
+        *,
+        principal_id: str,
+        result_version: UUID,
+        request_id: str,
+    ) -> WishlistDeletionReceipt:
+        if not request_id.strip():
+            raise RunLifecycleError("DRAFT_COMMAND_INVALID")
+        conn = await self._connect(autocommit=True)
+        try:
+            await self._raise_if_principal_unavailable(conn, principal_id)
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"wishlist-delete:{principal_id}:{result_version}",),
+                )
+                existing = await (
+                    await conn.execute(
+                        """
+                        SELECT request_id
+                        FROM wishlist_deletion
+                        WHERE principal_id = %s AND result_version = %s
+                        """,
+                        (principal_id, result_version),
+                    )
+                ).fetchone()
+                if existing is not None:
+                    return WishlistDeletionReceipt(
+                        deleted=True,
+                        request_id=existing["request_id"],
+                    )
+                owner = await (
+                    await conn.execute(
+                        """
+                        SELECT rr.run_id
+                        FROM run_result AS rr
+                        JOIN run AS run ON run.run_id = rr.run_id
+                        WHERE rr.result_version = %s
+                          AND rr.result_kind = 'V1_FORMAL'
+                          AND run.principal_id = %s
+                        """,
+                        (result_version, principal_id),
+                    )
+                ).fetchone()
+                if owner is None:
+                    raise RunLifecycleError("RESULT_NOT_FOUND")
+                await conn.execute(
+                    """
+                    INSERT INTO wishlist_deletion (
+                        principal_id, result_version, run_id, request_id
+                    )
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (principal_id, result_version, owner["run_id"], request_id),
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM wishlist_draft_version
+                    WHERE principal_id = %s AND result_version = %s
+                    """,
+                    (principal_id, result_version),
+                )
+                return WishlistDeletionReceipt(
+                    deleted=True,
+                    request_id=request_id,
+                )
+        finally:
+            await conn.close()
+
+    async def RevokeSensitiveConsent(self, *, principal_id: str) -> int:
+        conn = await self._connect()
+        try:
+            await self._raise_if_principal_unavailable(conn, principal_id)
+            result = await conn.execute(
+                """
+                UPDATE consent_record
+                SET revoked_at = COALESCE(revoked_at, NOW())
+                WHERE principal_id = %s
+                  AND purpose = 'SENSITIVE_ELIGIBILITY_EVALUATION'
+                  AND revoked_at IS NULL
+                """,
+                (principal_id,),
+            )
+            return result.rowcount
+        finally:
+            await conn.close()
+
+    @staticmethod
+    def _normalize_draft_groups(
+        groups: tuple[WishlistDraftGroup, ...],
+    ) -> tuple[WishlistDraftGroup, ...]:
+        if not 1 <= len(groups) <= 45:
+            raise RunLifecycleError("DRAFT_SELECTION_INVALID")
+        normalized = []
+        seen_groups: set[tuple[str, str]] = set()
+        for group in groups:
+            university_code = group.university_code.strip()
+            major_group = group.major_group.strip()
+            major_codes = tuple(code.strip() for code in group.major_codes)
+            if (
+                not university_code
+                or not major_group
+                or not 1 <= len(major_codes) <= 6
+                or any(not code for code in major_codes)
+                or len(set(major_codes)) != len(major_codes)
+            ):
+                raise RunLifecycleError("DRAFT_SELECTION_INVALID")
+            identity = (university_code, major_group)
+            if identity in seen_groups:
+                raise RunLifecycleError("DRAFT_SELECTION_INVALID")
+            seen_groups.add(identity)
+            normalized.append(WishlistDraftGroup(
+                university_code=university_code,
+                major_group=major_group,
+                major_codes=major_codes,
+            ))
+        return tuple(normalized)
+
+    @staticmethod
+    def _validate_draft_selections(
+        result_payload: dict[str, Any],
+        groups: tuple[WishlistDraftGroup, ...],
+    ) -> tuple[WishlistDraftGroup, ...]:
+        sections = (
+            (result_payload or {}).get("report", {}).get("sections", ())
+        )
+        candidate_groups: dict[tuple[str, str], dict[str, Any]] = {}
+        for section in sections:
+            if not str(section.get("section_key", "")).startswith("candidate:"):
+                continue
+            university_code = str(section.get("university_code") or "")
+            major_group = str(section.get("major_group") or "")
+            if not university_code or not major_group:
+                raise RunLifecycleError("REPORT_STRUCTURED_MAJORS_MISSING")
+            identity = (university_code, major_group)
+            majors = {
+                str(major.get("major_code") or ""): major
+                for major in section.get("majors", ())
+            }
+            if not majors:
+                raise RunLifecycleError("REPORT_STRUCTURED_MAJORS_MISSING")
+            candidate_groups[identity] = {
+                "final_rank": int(section.get("final_rank") or 0),
+                "majors": majors,
+                "university_name": str(
+                    section.get("university_name") or ""
+                ),
+            }
+        if not candidate_groups:
+            raise RunLifecycleError("REPORT_STRUCTURED_MAJORS_MISSING")
+        validated = []
+        for group in groups:
+            identity = (group.university_code, group.major_group)
+            candidate = candidate_groups.get(identity)
+            if candidate is None:
+                raise RunLifecycleError("DRAFT_SELECTION_INVALID")
+            for code in group.major_codes:
+                major = candidate["majors"].get(code)
+                if (
+                    major is None
+                    or not bool(major.get("selectable", False))
+                ):
+                    raise RunLifecycleError("DRAFT_SELECTION_INVALID")
+            validated.append(group)
+        return tuple(validated)
+
+    async def _summarize_draft_risk(
+        self,
+        result_payload: dict[str, Any],
+        groups: tuple[WishlistDraftGroup, ...],
+        *,
+        release_id: str,
+        session_id: UUID,
+    ) -> WishlistDraftRisk:
+        if self._algo_client is None:
+            raise RunLifecycleError(
+                "DEPENDENCY_UNAVAILABLE",
+                "svc-algo 不可用，无法计算草稿风险",
+            )
+        risk_groups = self._draft_risk_groups(result_payload, groups)
+        request = algo_pb2.SummarizeWishlistDraftRequest(
+            trace=common_pb2.Trace(
+                trace_id=release_id,
+                session_id=str(session_id),
+                node="wishlist_draft_risk",
+            ),
+            release_id=release_id,
+            groups=risk_groups,
+        )
+        try:
+            reply = await self._algo_client.SummarizeWishlistDraft(request)
+        except grpc.RpcError as exc:
+            reason = grpc_error_reason(exc)
+            if reason == "INVALID_CANDIDATE":
+                raise RunLifecycleError(
+                    "DRAFT_SELECTION_INVALID",
+                    "草稿风险输入非法",
+                ) from exc
+            raise RunLifecycleError(
+                "DEPENDENCY_UNAVAILABLE",
+                f"svc-algo 不可用: {exc.code().name}",
+            ) from exc
+        if not reply.HasField("summary"):
+            raise RunLifecycleError(
+                "VALIDATION_FAILED",
+                "svc-algo 未返回草稿风险摘要",
+            )
+        summary = reply.summary
+        if summary.group_count != len(groups):
+            raise RunLifecycleError(
+                "VALIDATION_FAILED",
+                "草稿风险摘要组数不一致",
+            )
+        if (
+            min(
+                summary.rush_count,
+                summary.stable_count,
+                summary.safe_tier_count,
+                summary.safe_guard_count,
+                summary.safe_guard_target,
+            )
+            < 0
+            or not 0 <= summary.slip_rate <= 1
+        ):
+            raise RunLifecycleError(
+                "VALIDATION_FAILED",
+                "草稿风险摘要数值非法",
+            )
+        expected = None
+        if summary.HasField("expected_satisfaction"):
+            expected = float(summary.expected_satisfaction)
+            if not 0 <= expected <= 1:
+                raise RunLifecycleError(
+                    "VALIDATION_FAILED",
+                    "草稿期望满意度非法",
+                )
+        return WishlistDraftRisk(
+            group_count=summary.group_count,
+            rush_count=summary.rush_count,
+            stable_count=summary.stable_count,
+            safe_tier_count=summary.safe_tier_count,
+            safe_guard_count=summary.safe_guard_count,
+            safe_guard_target=summary.safe_guard_target,
+            safe_guard_ok=bool(summary.safe_guard_ok),
+            slip_rate=float(summary.slip_rate),
+            expected_satisfaction=expected,
+        )
+
+    @staticmethod
+    def _draft_risk_groups(
+        result_payload: dict[str, Any],
+        groups: tuple[WishlistDraftGroup, ...],
+    ) -> list[Any]:
+        sections = (
+            (result_payload or {}).get("report", {}).get("sections", ())
+        )
+        by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+        for section in sections:
+            if not str(section.get("section_key", "")).startswith("candidate:"):
+                continue
+            identity = (
+                str(section.get("university_code") or ""),
+                str(section.get("major_group") or ""),
+            )
+            by_identity[identity] = section
+        result = []
+        for group in groups:
+            section = by_identity.get(
+                (group.university_code, group.major_group)
+            )
+            if section is None:
+                raise RunLifecycleError("DRAFT_SELECTION_INVALID")
+            probability = section.get("probability")
+            category = str(section.get("strategy_tier") or "")
+            if (
+                not isinstance(probability, (int, float))
+                or isinstance(probability, bool)
+                or not 0.01 <= float(probability) <= 0.99
+                or category not in {"冲", "稳", "保"}
+            ):
+                raise RunLifecycleError(
+                    "REPORT_STRUCTURED_MAJORS_MISSING",
+                )
+            item = algo_pb2.DraftGroupRiskInput(
+                university_code=group.university_code,
+                major_group=group.major_group,
+                probability=float(probability),
+                category=category,
+            )
+            utility = section.get("utility_score")
+            if utility is not None:
+                if (
+                    not isinstance(utility, (int, float))
+                    or isinstance(utility, bool)
+                    or not 0 <= float(utility) <= 1
+                ):
+                    raise RunLifecycleError("REPORT_STRUCTURED_MAJORS_MISSING")
+                item.utility_score = float(utility)
+            result.append(item)
+        return result
+
+    @staticmethod
+    def _draft_risk_payload(risk: WishlistDraftRisk) -> dict[str, Any]:
+        return {
+            "group_count": risk.group_count,
+            "rush_count": risk.rush_count,
+            "stable_count": risk.stable_count,
+            "safe_tier_count": risk.safe_tier_count,
+            "safe_guard_count": risk.safe_guard_count,
+            "safe_guard_target": risk.safe_guard_target,
+            "safe_guard_ok": risk.safe_guard_ok,
+            "slip_rate": risk.slip_rate,
+            "expected_satisfaction": risk.expected_satisfaction,
+        }
+
+    @staticmethod
+    def _draft_risk_from_dict(value: Any) -> WishlistDraftRisk | None:
+        if not isinstance(value, dict):
+            return None
+        count_fields = (
+            "group_count",
+            "rush_count",
+            "stable_count",
+            "safe_tier_count",
+            "safe_guard_count",
+            "safe_guard_target",
+        )
+        counts = {}
+        for field in count_fields:
+            raw = value.get(field)
+            if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
+                return None
+            counts[field] = raw
+        slip_rate = value.get("slip_rate")
+        if (
+            not isinstance(slip_rate, (int, float))
+            or isinstance(slip_rate, bool)
+            or not 0 <= float(slip_rate) <= 1
+            or not isinstance(value.get("safe_guard_ok"), bool)
+        ):
+            return None
+        expected = value.get("expected_satisfaction")
+        if expected is not None and (
+            not isinstance(expected, (int, float))
+            or isinstance(expected, bool)
+            or not 0 <= float(expected) <= 1
+        ):
+            return None
+        return WishlistDraftRisk(
+            **counts,
+            safe_guard_ok=value["safe_guard_ok"],
+            slip_rate=float(slip_rate),
+            expected_satisfaction=(
+                float(expected) if expected is not None else None
+            ),
+        )
+
+    @staticmethod
+    def _wishlist_draft_from_row(row: dict[str, Any]) -> WishlistDraft:
+        groups = tuple(
+            WishlistDraftGroup(
+                university_code=str(item.get("university_code") or ""),
+                major_group=str(item.get("major_group") or ""),
+                major_codes=tuple(
+                    str(code)
+                    for code in item.get("major_codes", ())
+                ),
+            )
+            for item in row["selections"]
+        )
+        return WishlistDraft(
+            draft_version_id=row["draft_version_id"],
+            result_version=row["result_version"],
+            run_id=row["run_id"],
+            release_id=row["release_id"],
+            draft_version=int(row["draft_version"]),
+            groups=groups,
+            created_at=row["created_at"],
+            risk=RunLifecycle._draft_risk_from_dict(
+                row.get("risk_summary")
+            ),
+        )
+
+    async def SubmitConversationMessage(
+        self,
+        *,
+        principal_id: str,
+        session_id: UUID,
+        profile: StructuredProfileInput,
+        parent_result_version: UUID,
+        message_text: str,
+        idempotency_key: str,
+        region_answer: RegionAnswer | None = None,
+    ) -> ConversationSubmission:
+        text = message_text.strip()
+        if not text:
+            raise RunLifecycleError("MESSAGE_REQUIRED")
+        safety_message = self._safety_response(text)
+        if safety_message is not None:
+            return await self._conversation_only_response(
+                principal_id=principal_id,
+                session_id=session_id,
+                message_text=text,
+                idempotency_key=idempotency_key,
+                status="safety_support",
+                assistant_message=safety_message,
+            )
+        active_region = await self._active_region_clarification(
+            principal_id=principal_id,
+            session_id=session_id,
+        )
+        region_resolution_metadata: dict[str, Any] | None = None
+        if region_answer is not None:
+            if active_region is None:
+                raise RunLifecycleError("REGION_CLARIFICATION_NOT_FOUND")
+            clarification = active_region["clarification"]
+            if region_answer.clarification_id != clarification["clarification_id"]:
+                raise RunLifecycleError("REGION_CLARIFICATION_CONFLICT")
+            parent_context = await self._parent_result_context(
+                principal_id=principal_id,
+                session_id=session_id,
+                parent_result_version=parent_result_version,
+            )
+            if parent_context is None:
+                raise RunLifecycleError("PARENT_RESULT_NOT_FOUND")
+            release_id = parent_context[0]
+            catalog = await self._region_catalog(release_id)
+            try:
+                provinces = validate_region_answer(
+                    catalog=catalog,
+                    catalog_version=region_answer.catalog_version,
+                    provinces=region_answer.provinces,
+                    preset_ids=region_answer.preset_ids,
+                    cancel_region_restriction=(
+                        region_answer.cancel_region_restriction
+                    ),
+                )
+            except MacroRegionError as exc:
+                if exc.reason == "REGION_ANSWER_INVALID":
+                    return await self._region_clarification_response(
+                        principal_id=principal_id,
+                        session_id=session_id,
+                        message_text=text,
+                        idempotency_key=idempotency_key,
+                        clarification=clarification,
+                        assistant_message=(
+                            "我没能确认这次省份选择。请重新选择具体省份；"
+                            "如果确实不想继续追问，请明确选择“取消该地域限制”。"
+                        ),
+                    )
+                raise RunLifecycleError(exc.reason) from exc
+            region_resolution_metadata = {
+                "region_clarification_id": clarification["clarification_id"],
+                "selected_preset_ids": list(region_answer.preset_ids),
+                "region_catalog_version": catalog.version,
+                "resolved_provinces": list(provinces),
+            }
+            if region_answer.cancel_region_restriction:
+                return await self._conversation_only_response(
+                    principal_id=principal_id,
+                    session_id=session_id,
+                    message_text=text,
+                    idempotency_key=idempotency_key,
+                    status="clarification_resolved",
+                    assistant_message=(
+                        "已取消这次地域限制；当前方案保持不变。"
+                        "你可以继续提出其他筛选条件。"
+                    ),
+                    user_metadata={
+                        "resolves_region_clarification_id": (
+                            clarification["clarification_id"]
+                        ),
+                        **region_resolution_metadata,
+                    },
+                )
+            revised_profile = self._apply_resolved_region_to_profile(
+                profile,
+                operation=clarification["operation"],
+                provinces=provinces,
+            )
+            decision = "REVISE_PLAN"
+        elif active_region is not None:
+            clarification = active_region["clarification"]
+            if self._cancels_region_restriction(text):
+                return await self._conversation_only_response(
+                    principal_id=principal_id,
+                    session_id=session_id,
+                    message_text=text,
+                    idempotency_key=idempotency_key,
+                    status="clarification_resolved",
+                    assistant_message=(
+                        "已取消这次地域限制；当前方案保持不变。"
+                        "你可以继续提出其他筛选条件。"
+                    ),
+                    user_metadata={
+                        "resolves_region_clarification_id": (
+                            clarification["clarification_id"]
+                        )
+                    },
+                )
+            return await self._region_clarification_response(
+                principal_id=principal_id,
+                session_id=session_id,
+                message_text=text,
+                idempotency_key=idempotency_key,
+                clarification=clarification,
+                assistant_message=(
+                    "还需要先确认具体省份：你不想去哪些省份？"
+                    "可以多选省份，也可以使用上方的大区快捷组。"
+                ),
+            )
+        else:
+            macro_region = detect_macro_region(text)
+            if macro_region is not None:
+                parent_context = await self._parent_result_context(
+                    principal_id=principal_id,
+                    session_id=session_id,
+                    parent_result_version=parent_result_version,
+                )
+                if parent_context is None:
+                    raise RunLifecycleError("PARENT_RESULT_NOT_FOUND")
+                catalog = await self._region_catalog(parent_context[0])
+                clarification = clarification_payload(
+                    clarification_id=str(uuid4()),
+                    expression=macro_region,
+                    catalog=catalog,
+                )
+                return await self._region_clarification_response(
+                    principal_id=principal_id,
+                    session_id=session_id,
+                    message_text=text,
+                    idempotency_key=idempotency_key,
+                    clarification=clarification,
+                    assistant_message=self._region_question(macro_region.term),
+                )
+            revised_profile = profile
+        decision = (
+            "REVISE_PLAN"
+            if region_answer is not None
+            else self._conversation_decision(text)
+        )
+        more_rush_requested = self._requests_more_rush(text)
+        llm_patch: dict[str, Any] | None = None
+        intent_degraded_reason: str | None = None
+        if region_answer is not None:
+            more_rush_requested = False
+        if decision == "REVISE_PLAN":
+            if region_answer is None:
+                revised_profile = self._apply_conversation_constraints(
+                    profile,
+                    text,
+                )
+            if more_rush_requested:
+                revised_profile = replace(
+                    revised_profile,
+                    risk_appetite="aggressive",
+                    allocation_request="MORE_RUSH",
+                )
+            if revised_profile == profile:
+                decision = "CLARIFY"
+
+        if decision == "CLARIFY" and self._conversation_intent_classifier is not None:
+            parent_context = await self._parent_result_context(
+                principal_id=principal_id,
+                session_id=session_id,
+                parent_result_version=parent_result_version,
+            )
+            if parent_context:
+                (
+                    release_id,
+                    parent_run_id,
+                    rush_count,
+                    stable_count,
+                    safe_count,
+                ) = parent_context
+                try:
+                    intent = (
+                        await self._conversation_intent_classifier.classify(
+                            ConversationIntentRequest(
+                                principal_id=principal_id,
+                                session_id=str(session_id),
+                                run_id=str(parent_run_id),
+                                request_id=idempotency_key,
+                                parent_result_version=str(
+                                    parent_result_version
+                                ),
+                                release_id=release_id,
+                                message_text=text,
+                                risk_appetite=(
+                                    profile.risk_appetite or "balanced"
+                                ),
+                                rush_count=rush_count,
+                                stable_count=stable_count,
+                                safe_count=safe_count,
+                            )
+                        )
+                    )
+                except Exception as exc:
+                    intent = None
+                    intent_degraded_reason = "LLM_UNAVAILABLE"
+                    logger.warning(
+                        "conversation intent deterministic fallback: %s",
+                        type(exc).__name__,
+                    )
+                if intent is not None:
+                    decision = intent.decision
+                    if decision == "REVISE_PLAN":
+                        llm_patch = intent.patch
+                        try:
+                            revised_profile = self._apply_conversation_patch(
+                                profile,
+                                llm_patch,
+                            )
+                        except RunLifecycleError:
+                            decision = "CLARIFY"
+                            intent_degraded_reason = "LLM_OUTPUT_REJECTED"
+                        else:
+                            if revised_profile == profile:
+                                decision = "CLARIFY"
+                                intent_degraded_reason = (
+                                    "LLM_NO_PROFILE_PATCH"
+                                )
+
+        if decision in {"CLARIFY", "OFF_TOPIC", "OUT_OF_SCOPE"}:
+            assistant_message, status = {
+                "CLARIFY": (
+                    "你是想解释当前报告中的排序和概率，还是按冲稳保比例、"
+                    "城市、专业、学校层次等条件重新生成一版方案？",
+                    "clarification_required",
+                ),
+                "OFF_TOPIC": (
+                    "我主要负责湖南 2025 本科批的志愿规划、院校专业和"
+                    "报告解释，不能可靠回答这个问题。你可以继续问录取规则、"
+                    "专业方向，或让我调整当前志愿方案。",
+                    "off_topic",
+                ),
+                "OUT_OF_SCOPE": (
+                    "当前仅支持湖南 2025 本科批物理类/历史类志愿规划，"
+                    "其他省份、年份、升学类型或艺术体育等范围还不能可靠处理。"
+                    "你可以继续问本范围内的院校专业、录取规则，或调整当前方案。",
+                    "out_of_scope",
+                ),
+            }[decision]
+            return await self._conversation_only_response(
+                principal_id=principal_id,
+                session_id=session_id,
+                message_text=text,
+                idempotency_key=idempotency_key,
+                status=status,
+                assistant_message=assistant_message,
+                intent_degraded_reason=intent_degraded_reason,
+                intent_decision=decision,
+            )
+
+        if (
+            decision == "REVISE_PLAN"
+            and revised_profile.risk_appetite == "aggressive"
+            and profile.risk_appetite != "aggressive"
+        ):
+            revised_profile = replace(
+                revised_profile,
+                allocation_request="MORE_RUSH",
+            )
+
+        if decision != "REVISE_PLAN":
+            assistant_message = "正在根据当前已核验报告生成解释。"
+        elif more_rush_requested:
+            assistant_message = (
+                "已收到增加冲档请求，正在核验是否还有可用冲档候选。"
+                "请确认更新后的画像。"
+            )
+        else:
+            assistant_message = (
+                "已收到筛选条件，正在重新计算方案。请确认更新后的画像。"
+            )
+        receipt = await self.SubmitRun(
+            SubmitRunCommand(
+                principal_id=principal_id,
+                session_id=session_id,
+                task_kind=decision,
+                input=revised_profile,
+                idempotency_key=idempotency_key,
+                parent_result_version=parent_result_version,
+                messages=(
+                    *(
+                        (
+                            ChatMessageInput(
+                                client_message_id=(
+                                    f"conversation:{idempotency_key}:user-region"
+                                ),
+                                role="USER",
+                                kind="TEXT",
+                                content=text,
+                                metadata=region_resolution_metadata,
+                            ),
+                        )
+                        if region_resolution_metadata
+                        else ()
+                    ),
+                    ChatMessageInput(
+                        client_message_id=(
+                            f"conversation:{idempotency_key}:assistant"
+                        ),
+                        role="ASSISTANT",
+                        kind="TEXT",
+                        content=assistant_message,
+                        metadata=(
+                            {
+                                "region_clarification_resolved": True,
+                                **region_resolution_metadata,
+                            }
+                            if region_resolution_metadata
+                            else None
+                        ),
+                    ),
+                ),
+                user_message=text,
+            )
+        )
+        return ConversationSubmission(
+            session_id=receipt.session_id,
+            run_id=receipt.run_id,
+            task_kind=decision,
+            status="accepted",
+            assistant_message=assistant_message,
+        )
+
+    async def _conversation_only_response(
+        self,
+        *,
+        principal_id: str,
+        session_id: UUID,
+        message_text: str,
+        idempotency_key: str,
+        status: str,
+        assistant_message: str,
+        intent_degraded_reason: str | None = None,
+        intent_decision: str | None = None,
+        user_metadata: dict[str, Any] | None = None,
+        assistant_metadata: dict[str, Any] | None = None,
+        region_clarification: dict[str, Any] | None = None,
+    ) -> ConversationSubmission:
+        conn = await self._connect()
+        try:
+            async with conn.transaction():
+                await self._raise_if_principal_unavailable(conn, principal_id)
+                session = await (
+                    await conn.execute(
+                        """
+                        SELECT id FROM chat_session
+                        WHERE id = %s AND principal_id = %s
+                        """,
+                        (session_id, principal_id),
+                    )
+                ).fetchone()
+                if session is None:
+                    raise RunLifecycleError("RUN_FORBIDDEN")
+                metadata = {}
+                if intent_degraded_reason:
+                    metadata.update(
+                        {
+                            "generation_mode": "DETERMINISTIC_FALLBACK",
+                            "degradation_reason": intent_degraded_reason,
+                        }
+                    )
+                if intent_decision:
+                    metadata["intent_decision"] = intent_decision
+                metadata.update(assistant_metadata or {})
+                await self._store_messages(
+                    conn,
+                    session_id=session_id,
+                    run_id=None,
+                    messages=(
+                        ChatMessageInput(
+                            client_message_id=(
+                                f"conversation:{idempotency_key}:user"
+                            ),
+                            role="USER",
+                            kind="TEXT",
+                            content=message_text,
+                            metadata=user_metadata,
+                        ),
+                        ChatMessageInput(
+                            client_message_id=(
+                                f"conversation:{idempotency_key}:assistant"
+                            ),
+                            role="ASSISTANT",
+                            kind="TEXT",
+                            content=assistant_message,
+                            metadata=metadata or None,
+                        ),
+                    ),
+                )
+                await conn.execute(
+                    "UPDATE chat_session SET updated_at = NOW() WHERE id = %s",
+                    (session_id,),
+                )
+        finally:
+            await conn.close()
+        return ConversationSubmission(
+            session_id=session_id,
+            run_id=None,
+            task_kind=None,
+            status=status,
+            assistant_message=assistant_message,
+            region_clarification=region_clarification,
+        )
+
+    async def _region_clarification_response(
+        self,
+        *,
+        principal_id: str,
+        session_id: UUID,
+        message_text: str,
+        idempotency_key: str,
+        clarification: dict[str, Any],
+        assistant_message: str,
+    ) -> ConversationSubmission:
+        return await self._conversation_only_response(
+            principal_id=principal_id,
+            session_id=session_id,
+            message_text=message_text,
+            idempotency_key=idempotency_key,
+            status="clarification_required",
+            assistant_message=assistant_message,
+            intent_decision="CLARIFY",
+            assistant_metadata={
+                "clarification_kind": "SELECT_PROVINCES",
+                "reason_code": MACRO_REGION_SCOPE_UNRESOLVED,
+                "region_clarification": clarification,
+            },
+            region_clarification=clarification,
+        )
+
+    async def _region_catalog(self, release_id: str) -> RegionCatalog:
+        conn = await self._connect()
+        try:
+            return await load_region_catalog(conn, release_id)
+        except MacroRegionError as exc:
+            raise RunLifecycleError(exc.reason) from exc
+        finally:
+            await conn.close()
+
+    async def _unresolved_run_macro_region(
+        self,
+        conn: psycopg.AsyncConnection,
+        *,
+        run_id: UUID,
+        fields: dict[str, Any],
+    ) -> tuple[Any, RegionCatalog] | None:
+        required = (fields.get("preferences.required_provinces") or {}).get(
+            "value"
+        ) or ()
+        excluded = (fields.get("preferences.excluded_provinces") or {}).get(
+            "value"
+        ) or ()
+        if required or excluded:
+            return None
+        handled = await (
+            await conn.execute(
+                """
+                SELECT 1
+                FROM run_interrupt
+                WHERE run_id = %s
+                  AND applied_at IS NOT NULL
+                  AND answer_payload ->> 'type' = 'SELECT_PROVINCES'
+                LIMIT 1
+                """,
+                (run_id,),
+            )
+        ).fetchone()
+        if handled is not None:
+            return None
+        rows = await (
+            await conn.execute(
+                """
+                SELECT content
+                FROM chat_message
+                WHERE run_id = %s AND role = 'USER'
+                ORDER BY message_seq
+                """,
+                (run_id,),
+            )
+        ).fetchall()
+        expression = next(
+            (
+                detected
+                for detected in (
+                    detect_macro_region(str(row["content"])) for row in rows
+                )
+                if detected is not None
+            ),
+            None,
+        )
+        if expression is None:
+            return None
+        release = await (
+            await conn.execute(
+                "SELECT release_id FROM run WHERE run_id = %s",
+                (run_id,),
+            )
+        ).fetchone()
+        if release is None:
+            raise RunLifecycleError("RUN_NOT_FOUND")
+        try:
+            catalog = await load_region_catalog(conn, release["release_id"])
+        except MacroRegionError as exc:
+            raise RunLifecycleError(exc.reason) from exc
+        return expression, catalog
+
+    async def _active_region_clarification(
+        self,
+        *,
+        principal_id: str,
+        session_id: UUID,
+    ) -> dict[str, Any] | None:
+        conn = await self._connect()
+        try:
+            await self._raise_if_principal_unavailable(conn, principal_id)
+            row = await (
+                await conn.execute(
+                    """
+                    SELECT message_seq,
+                           metadata -> 'region_clarification'
+                               AS region_clarification
+                    FROM chat_message
+                    WHERE session_id = %s
+                      AND role = 'ASSISTANT'
+                      AND metadata ? 'region_clarification'
+                    ORDER BY message_seq DESC
+                    LIMIT 1
+                    """,
+                    (session_id,),
+                )
+            ).fetchone()
+            if row is None:
+                return None
+            clarification = row["region_clarification"]
+            if not isinstance(clarification, dict):
+                return None
+            clarification_id = clarification.get("clarification_id")
+            if not isinstance(clarification_id, str) or not clarification_id:
+                return None
+            resolved = await (
+                await conn.execute(
+                    """
+                    SELECT 1
+                    FROM chat_message
+                    WHERE session_id = %s
+                      AND role = 'USER'
+                      AND message_seq > %s
+                      AND metadata ->> 'resolves_region_clarification_id' = %s
+                    LIMIT 1
+                    """,
+                    (session_id, row["message_seq"], clarification_id),
+                )
+            ).fetchone()
+            if resolved is not None:
+                return None
+            consumed = await (
+                await conn.execute(
+                    """
+                    SELECT 1
+                    FROM run_interrupt interrupt
+                    JOIN run ON run.run_id = interrupt.run_id
+                    WHERE run.session_id = %s
+                      AND interrupt.state = 'CONSUMED'
+                      AND interrupt.applied_at IS NOT NULL
+                      AND interrupt.answer_payload ->> 'clarification_id' = %s
+                    LIMIT 1
+                    """,
+                    (session_id, clarification_id),
+                )
+            ).fetchone()
+            if consumed is not None:
+                return None
+            return {
+                "message_seq": row["message_seq"],
+                "clarification": clarification,
+            }
+        finally:
+            await conn.close()
+
+    @staticmethod
+    def _region_question(term: str) -> str:
+        return (
+            f"“{term}”的覆盖范围并不唯一。你说的具体范围包括哪些省份？"
+            "请多选省份，或选择一个会明确展开省份的快捷组；"
+            "确认后我才会把它作为地域筛选条件。"
+        )
+
+    @staticmethod
+    def _cancels_region_restriction(text: str) -> bool:
+        return re.search(
+            r"(先不管这个|取消.{0,6}(?:地域|地区|省份).{0,4}限制|"
+            r"不限(?:地域|地区|省份)|这个限制不要了)",
+            text,
+        ) is not None
+
+    @staticmethod
+    def _apply_resolved_region_to_profile(
+        profile: StructuredProfileInput,
+        *,
+        operation: str,
+        provinces: tuple[str, ...],
+    ) -> StructuredProfileInput:
+        selected = set(provinces)
+        required = set(profile.required_provinces)
+        excluded = set(profile.excluded_provinces)
+        if operation == "exclude":
+            excluded.update(selected)
+            required.difference_update(selected)
+        elif operation == "require":
+            required.update(selected)
+            excluded.difference_update(selected)
+        elif operation == "withdraw":
+            required.difference_update(selected)
+            excluded.difference_update(selected)
+        else:
+            raise RunLifecycleError("REGION_ANSWER_INVALID")
+        preferred_cities = tuple(
+            city
+            for city in profile.preferred_cities
+            if _CITY_PROVINCE.get(city) not in excluded
+        )
+        required_cities = tuple(
+            city
+            for city in profile.required_cities
+            if _CITY_PROVINCE.get(city) not in excluded
+        )
+        return replace(
+            profile,
+            required_provinces=tuple(
+                value for value in _CONVERSATION_PROVINCES if value in required
+            ),
+            excluded_provinces=tuple(
+                value for value in _CONVERSATION_PROVINCES if value in excluded
+            ),
+            preferred_cities=preferred_cities,
+            required_cities=required_cities,
+            excluded_cities=tuple(
+                city
+                for city in profile.excluded_cities
+                if city not in required_cities
+            ),
+        )
+
+    @staticmethod
+    def _profile_from_fields(fields: dict[str, Any]) -> StructuredProfileInput:
+        def value(key: str, default: Any) -> Any:
+            field = fields.get(key) or {}
+            if field.get("state") in {"UNKNOWN", "DECLINED"}:
+                return default
+            return field.get("value", default)
+
+        def values(key: str) -> tuple[str, ...]:
+            raw = value(key, ())
+            return tuple(str(item) for item in (raw or ()))
+
+        return StructuredProfileInput(
+            province=str(value("province", "")),
+            application_year=value("application_year", None),
+            category=str(value("category", "")),
+            batch=str(value("batch", "")),
+            score=value("score", None),
+            subjects=values("subjects"),
+            rank=value("rank", None),
+            risk_appetite=str(value("preferences.risk_appetite", "")),
+            priority_dims=values("preferences.priority_dims"),
+            interests=values("preferences.major_interests"),
+            preferred_cities=values("preferences.preferred_cities"),
+            preferred_tiers=values("preferences.preferred_tiers"),
+            required_provinces=values("preferences.required_provinces"),
+            excluded_provinces=values("preferences.excluded_provinces"),
+            required_cities=values("preferences.required_cities"),
+            excluded_cities=values("preferences.excluded_cities"),
+            required_tiers=values("preferences.required_tiers"),
+            required_major_keywords=values(
+                "preferences.required_major_keywords"
+            ),
+            required_major_names=values("preferences.required_major_names"),
+            excluded_major_keywords=values(
+                "preferences.excluded_major_keywords"
+            ),
+            excluded_major_names=values(
+                "preferences.excluded_major_names"
+            ),
+            excluded_universities=values(
+                "preferences.excluded_universities"
+            ),
+        )
+
+    @staticmethod
+    def _safety_response(text: str) -> str | None:
+        if not re.search(
+            r"(自杀|轻生|不想活|结束生命|伤害自己|伤害他人|"
+            r"杀人|有生命危险|活不下去)",
+            text,
+        ):
+            return None
+        return (
+            "听起来你现在可能处在很危险的状态。请先确保自己安全，"
+            "立即联系身边可信赖的人，并联系当地急救或心理援助。"
+            "在中国大陆可拨打 120 或 110。你可以告诉我现在是否安全、"
+            "身边是否有人；志愿填报问题可以稍后再处理。"
+        )
+
+    @staticmethod
+    def _session_summary(row: dict[str, Any]) -> ChatSessionSummary:
+        return ChatSessionSummary(
+            session_id=row["session_id"],
+            title=row["title"],
+            latest_run_id=row["latest_run_id"],
+            latest_state=row["latest_state"] or "EMPTY",
+            latest_result_version=row["latest_result_version"],
+            latest_result_kind=row["latest_result_kind"],
+            run_count=int(row["run_count"] or 0),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _conversation_decision(text: str) -> str:
+        action = re.search(
+            r"(不要|排除|去掉|删除|只看|只想|想看|只学|只读|只要|仅限|只考虑|优先|喜欢|"
+            r"想学|想读|想报|感兴趣|更稳|保守|冲刺|改成|换成|再加|增加|减少|筛选|过滤|"
+            r"不想去|不想在|不想学|不想读|不想报|不去|不学|不报|"
+            r"也可以|能接受|接受|可以考虑)",
+            text,
+        )
+        if action is not None:
+            return "REVISE_PLAN"
+        asks_question = re.search(
+            r"(为什么|怎么|如何|解释|依据|排名|概率|风险|限制|"
+            r"是否|能不能|可以吗|吗[？?]?|呢[？?]?|[？?])",
+            text,
+        )
+        refers_to_report = re.search(
+            r"(当前|这份|这个方案|报告|排序|排名|概率|风险|保底|"
+            r"冲档|稳档|推荐|学校|专业组|结果|排在|放在|"
+            r"这所学校|这所大学)",
+            text,
+        )
+        if asks_question is not None and refers_to_report is not None:
+            return "EXPLAIN_RESULT"
+        return "CLARIFY"
+
+    @staticmethod
+    def _requests_more_rush(text: str) -> bool:
+        return _MORE_RUSH_PATTERN.search(text) is not None
+
+    async def _parent_result_context(
+        self,
+        *,
+        principal_id: str,
+        session_id: UUID,
+        parent_result_version: UUID,
+    ) -> tuple[str, UUID, int, int, int] | None:
+        conn = await self._connect()
+        try:
+            row = await (
+                await conn.execute(
+                    """
+                    SELECT r.release_id, r.run_id, rr.payload
+                    FROM run r
+                    JOIN chat_session cs ON cs.id = r.session_id
+                    JOIN run_result rr
+                      ON rr.run_id = r.run_id
+                     AND rr.result_version = r.result_version
+                    WHERE r.result_version = %s
+                      AND r.session_id = %s
+                      AND cs.principal_id = %s
+                      AND r.result_kind = 'V1_FORMAL'
+                      AND r.state = 'SUCCEEDED'
+                    """,
+                    (parent_result_version, session_id, principal_id),
+                )
+            ).fetchone()
+        finally:
+            await conn.close()
+        if row is None:
+            return None
+        rush_count, stable_count, safe_count = (
+            self._conversation_tier_counts(row["payload"])
+        )
+        return (
+            str(row["release_id"]),
+            row["run_id"],
+            rush_count,
+            stable_count,
+            safe_count,
+        )
+
+    @staticmethod
+    def _conversation_tier_counts(payload: dict[str, Any]) -> tuple[int, int, int]:
+        counts = {"冲": 0, "稳": 0, "保": 0}
+        report = payload.get("report")
+        sections = report.get("sections", ()) if isinstance(report, dict) else ()
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            if not str(section.get("section_key") or "").startswith(
+                "candidate:"
+            ):
+                continue
+            match = re.search(
+                r"策略分档[：:]\s*(冲|稳|保)",
+                str(section.get("body") or ""),
+            )
+            if match is not None:
+                counts[match.group(1)] += 1
+        return counts["冲"], counts["稳"], counts["保"]
+
+    @classmethod
+    async def _formal_tier_counts(
+        cls,
+        conn,
+        result_version: UUID,
+    ) -> tuple[int, int, int] | None:
+        row = await (
+            await conn.execute(
+                """
+                SELECT payload
+                FROM run_result
+                WHERE result_version = %s AND result_kind = 'V1_FORMAL'
+                """,
+                (result_version,),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        return cls._conversation_tier_counts(row["payload"])
+
+    @staticmethod
+    def _apply_conversation_patch(
+        profile: StructuredProfileInput,
+        patch: dict[str, Any],
+    ) -> StructuredProfileInput:
+        allowed = {
+            "score",
+            "risk_appetite",
+            "preferred_cities",
+            "required_cities",
+            "excluded_cities",
+            "required_provinces",
+            "excluded_provinces",
+            "required_tiers",
+            "major_interests",
+            "required_major_keywords",
+            "required_major_names",
+            "excluded_major_keywords",
+            "excluded_major_names",
+            "excluded_universities",
+        }
+        if set(patch) - allowed:
+            raise RunLifecycleError("CONVERSATION_PATCH_INVALID")
+
+        def string_list(
+            key: str,
+            current: tuple[str, ...],
+            *,
+            allowed_values: frozenset[str] | None = None,
+        ) -> tuple[str, ...]:
+            if key not in patch:
+                return current
+            value = patch[key]
+            if (
+                not isinstance(value, list)
+                or len(value) > 20
+                or not all(
+                    isinstance(item, str)
+                    and item.strip()
+                    and len(item.strip()) <= 100
+                    and re.search(r"[\x00-\x1f]", item) is None
+                    for item in value
+                )
+            ):
+                raise RunLifecycleError("CONVERSATION_PATCH_INVALID")
+            normalized = tuple(dict.fromkeys(item.strip() for item in value))
+            if allowed_values is not None and any(
+                item not in allowed_values for item in normalized
+            ):
+                raise RunLifecycleError("CONVERSATION_PATCH_INVALID")
+            return normalized
+
+        score = profile.score
+        if "score" in patch:
+            value = patch["score"]
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+                or value > 750
+            ):
+                raise RunLifecycleError("CONVERSATION_PATCH_INVALID")
+            score = value
+
+        risk = profile.risk_appetite
+        if "risk_appetite" in patch:
+            value = patch["risk_appetite"]
+            if value not in {"conservative", "balanced", "aggressive"}:
+                raise RunLifecycleError("CONVERSATION_PATCH_INVALID")
+            risk = value
+
+        preferred_cities = string_list(
+            "preferred_cities",
+            profile.preferred_cities,
+            allowed_values=frozenset(_CONVERSATION_CITIES),
+        )
+        required_cities = string_list(
+            "required_cities",
+            profile.required_cities,
+            allowed_values=frozenset(_CONVERSATION_CITIES),
+        )
+        excluded_cities = string_list(
+            "excluded_cities",
+            profile.excluded_cities,
+            allowed_values=frozenset(_CONVERSATION_CITIES),
+        )
+        required_provinces = string_list(
+            "required_provinces",
+            profile.required_provinces,
+            allowed_values=frozenset(_CONVERSATION_PROVINCES),
+        )
+        excluded_provinces = string_list(
+            "excluded_provinces",
+            profile.excluded_provinces,
+            allowed_values=frozenset(_CONVERSATION_PROVINCES),
+        )
+        required_tiers = string_list(
+            "required_tiers",
+            profile.required_tiers,
+            allowed_values=frozenset({"985", "211", "双一流"}),
+        )
+        major_interests = string_list(
+            "major_interests",
+            profile.interests,
+        )
+        required_majors = string_list(
+            "required_major_keywords",
+            profile.required_major_keywords,
+        )
+        required_major_names = string_list(
+            "required_major_names",
+            profile.required_major_names,
+        )
+        excluded_majors = string_list(
+            "excluded_major_keywords",
+            profile.excluded_major_keywords,
+        )
+        excluded_major_names = string_list(
+            "excluded_major_names",
+            profile.excluded_major_names,
+        )
+        excluded_universities = string_list(
+            "excluded_universities",
+            profile.excluded_universities,
+        )
+
+        if set(required_cities) & set(excluded_cities):
+            raise RunLifecycleError("CONVERSATION_PATCH_CONFLICT")
+        if set(required_provinces) & set(excluded_provinces):
+            raise RunLifecycleError("CONVERSATION_PATCH_CONFLICT")
+
+        preferred_cities = tuple(
+            city for city in preferred_cities if city not in excluded_cities
+        )
+        required_cities = tuple(
+            city for city in required_cities if city not in excluded_cities
+        )
+        required_provinces = tuple(
+            province
+            for province in required_provinces
+            if province not in excluded_provinces
+        )
+        preferred_cities = tuple(
+            city
+            for city in preferred_cities
+            if _CITY_PROVINCE.get(city) not in excluded_provinces
+        )
+        required_cities = tuple(
+            city
+            for city in required_cities
+            if _CITY_PROVINCE.get(city) not in excluded_provinces
+        )
+        return replace(
+            profile,
+            score=score,
+            risk_appetite=risk,
+            preferred_cities=preferred_cities,
+            required_cities=required_cities,
+            excluded_cities=excluded_cities,
+            required_provinces=required_provinces,
+            excluded_provinces=excluded_provinces,
+            required_tiers=required_tiers,
+            interests=major_interests,
+            required_major_keywords=required_majors,
+            required_major_names=required_major_names,
+            excluded_major_keywords=excluded_majors,
+            excluded_major_names=excluded_major_names,
+            excluded_universities=excluded_universities,
+        )
+
+    @classmethod
+    def _apply_conversation_constraints(
+        cls,
+        profile: StructuredProfileInput,
+        text: str,
+    ) -> StructuredProfileInput:
+        cities = _CONVERSATION_CITIES
+        majors = _CONVERSATION_MAJOR_KEYWORDS
+        required_cities = list(profile.required_cities)
+        excluded_cities = list(profile.excluded_cities)
+        required_provinces = list(profile.required_provinces)
+        excluded_provinces = list(profile.excluded_provinces)
+        preferred_cities = list(profile.preferred_cities)
+        interests = list(profile.interests)
+        required_majors = list(profile.required_major_keywords)
+        required_major_names = list(profile.required_major_names)
+        excluded_majors = list(profile.excluded_major_keywords)
+        excluded_major_names = list(profile.excluded_major_names)
+        excluded_universities = list(profile.excluded_universities)
+        preferred_tiers = list(profile.preferred_tiers)
+        required_tiers = list(profile.required_tiers)
+        risk = profile.risk_appetite
+
+        for province in _CONVERSATION_PROVINCES:
+            if province in _CONVERSATION_CITIES and not re.search(
+                rf"{re.escape(province)}(?:省|市|地区)",
+                text,
+            ):
+                continue
+            if not re.search(
+                rf"(不要|排除|去掉|不去|不考虑|不想去|不想在)"
+                rf"\s*{re.escape(province)}(?:省|市|自治区|地区)?",
+                text,
+            ):
+                if not re.search(
+                    rf"{re.escape(province)}(?:省|市|自治区|地区)?"
+                    r".{0,8}(太远|不想去|不去|不考虑|排除)",
+                    text,
+                ):
+                    continue
+            excluded_provinces = cls._append_unique(
+                excluded_provinces,
+                province,
+            )
+            required_provinces = [
+                value for value in required_provinces if value != province
+            ]
+            preferred_cities = [
+                city
+                for city in preferred_cities
+                if _CITY_PROVINCE.get(city) != province
+            ]
+            required_cities = [
+                city
+                for city in required_cities
+                if _CITY_PROVINCE.get(city) != province
+            ]
+        for province in _CONVERSATION_PROVINCES:
+            if re.search(
+                rf"{re.escape(province)}(?:省|自治区|地区)?"
+                r".{0,8}(也可以|能接受|可以考虑)",
+                text,
+            ):
+                excluded_provinces = [
+                    value for value in excluded_provinces if value != province
+                ]
+        for province in _CONVERSATION_PROVINCES:
+            if not re.search(
+                rf"(只看|只要|仅限|只考虑|必须(?:在|去))"
+                rf"\s*{re.escape(province)}(?:省|自治区|地区)?",
+                text,
+            ):
+                continue
+            required_provinces = cls._append_unique(
+                required_provinces,
+                province,
+            )
+            excluded_provinces = [
+                value for value in excluded_provinces if value != province
+            ]
+
+        for city in cities:
+            if not re.search(
+                rf"(不要|排除|去掉|不去|不考虑|不想去|不想在)"
+                rf"\s*{re.escape(city)}",
+                text,
+            ):
+                if not re.search(
+                    rf"{re.escape(city)}.{{0,8}}"
+                    r"(太远|不想去|不去|不考虑|排除)",
+                    text,
+                ):
+                    continue
+            excluded_cities = cls._append_unique(excluded_cities, city)
+            preferred_cities = [value for value in preferred_cities if value != city]
+            required_cities = [value for value in required_cities if value != city]
+        for city in cities:
+            if re.search(
+                rf"{re.escape(city)}.{{0,8}}(也可以|能接受|可以考虑)",
+                text,
+            ):
+                excluded_cities = [
+                    value for value in excluded_cities if value != city
+                ]
+                preferred_cities = cls._append_unique(
+                    preferred_cities,
+                    city,
+                )
+        for city in cities:
+            if not re.search(
+                rf"(只看|只要|仅限|只考虑|必须(?:在|去))\s*{re.escape(city)}",
+                text,
+            ):
+                continue
+            required_cities = cls._append_unique(required_cities, city)
+            preferred_cities = cls._append_unique(preferred_cities, city)
+            excluded_cities = [value for value in excluded_cities if value != city]
+        for city in cities:
+            if city in text and not any(
+                city in values
+                for values in (
+                    required_cities,
+                    excluded_cities,
+                )
+            ):
+                if re.search(r"(优先|想去|喜欢|倾向)", text):
+                    preferred_cities = cls._append_unique(
+                        preferred_cities,
+                        city,
+                    )
+
+        exact_majors = _CONVERSATION_EXACT_MAJOR_NAMES
+        matched_exact_majors = []
+        for major in exact_majors:
+            if re.search(
+                rf"(不要|排除|去掉|不考虑|不想学|不想读|不想报|"
+                rf"不学|不报)\s*(?:任何)?{re.escape(major)}(?:专业)?",
+                text,
+            ):
+                excluded_major_names = cls._append_unique(
+                    excluded_major_names,
+                    major,
+                )
+                matched_exact_majors.append(major)
+                interests = [value for value in interests if value != major]
+                required_majors = [
+                    value for value in required_majors if value != major
+                ]
+            elif re.search(
+                rf"(?:只看|只想|想看|只学|只读|只要|仅限|只考虑)\s*"
+                rf"(?:本科专业)?{re.escape(major)}(?:专业)?",
+                text,
+            ):
+                required_major_names = cls._append_unique(
+                    required_major_names,
+                    major,
+                )
+                interests = cls._append_unique(interests, major)
+                matched_exact_majors.append(major)
+            elif re.search(
+                rf"(?:想学|想读|想报|喜欢|感兴趣|兴趣|优先)\s*"
+                rf"(?:本科专业)?{re.escape(major)}(?:专业)?",
+                text,
+            ):
+                interests = cls._append_unique(interests, major)
+                matched_exact_majors.append(major)
+
+        if "物理学" in interests and re.search(
+            r"(?:也|可以)?接受\s*(?:物理)?相关专业",
+            text,
+        ):
+            for major in _PHYSICS_RELATED_MAJOR_INTERESTS:
+                interests = cls._append_unique(interests, major)
+
+        for major in majors:
+            if any(major in exact for exact in matched_exact_majors):
+                continue
+            if re.search(
+                rf"(不要|排除|去掉|不考虑|不想学|不想读|不想报|"
+                rf"不学|不报)\s*{re.escape(major)}",
+                text,
+            ):
+                excluded_majors = cls._append_unique(excluded_majors, major)
+                interests = [value for value in interests if value != major]
+                required_majors = [
+                    value for value in required_majors if value != major
+                ]
+            elif major in text and re.search(
+                r"(只看|只要|仅限|只考虑|只想)",
+                text,
+            ):
+                required_majors = cls._append_unique(required_majors, major)
+                interests = cls._append_unique(interests, major)
+                excluded_majors = [
+                    value for value in excluded_majors if value != major
+                ]
+            elif major in text and re.search(r"(喜欢|想学|优先|兴趣)", text):
+                interests = cls._append_unique(interests, major)
+
+        for keyword in _CONVERSATION_MAJOR_EXCLUSION_KEYWORDS:
+            if re.search(
+                rf"(不要|排除|去掉|不考虑|不想学|不想读|不想报|"
+                rf"不学|不报)\s*(?:任何)?{re.escape(keyword)}(?:类|专业)?",
+                text,
+            ):
+                excluded_majors = cls._append_unique(
+                    excluded_majors,
+                    keyword,
+                )
+                interests = [
+                    value
+                    for value in interests
+                    if keyword not in value
+                ]
+                required_majors = [
+                    value
+                    for value in required_majors
+                    if keyword not in value
+                ]
+
+        if "物理" in interests:
+            interests = [
+                "物理学" if value == "物理" else value
+                for value in interests
+            ]
+        if "物理" in required_majors:
+            required_majors = [
+                value for value in required_majors if value != "物理"
+            ]
+            required_major_names = cls._append_unique(
+                required_major_names,
+                "物理学",
+            )
+            interests = cls._append_unique(interests, "物理学")
+
+        for tier in ("985", "211", "双一流"):
+            if tier not in text:
+                continue
+            if re.search(rf"(只看|只要|仅限|只考虑)\s*{tier}", text):
+                required_tiers = cls._append_unique(required_tiers, tier)
+            if tier not in required_tiers:
+                preferred_tiers = cls._append_unique(preferred_tiers, tier)
+
+        for match in re.finditer(
+            r"(?:不要|排除|去掉|不考虑)"
+            r"([\u4e00-\u9fff]{2,30}(?:大学|学院))",
+            text,
+        ):
+            excluded_universities = cls._append_unique(
+                excluded_universities,
+                match.group(1),
+            )
+
+        if re.search(r"(更稳|稳妥|保守|保底)", text):
+            risk = "conservative"
+        elif re.search(r"(冲刺|激进|冲一冲)", text):
+            risk = "aggressive"
+        elif re.search(r"(均衡|平衡)", text):
+            risk = "balanced"
+
+        score_match = re.search(
+            r"(?:改成|变为|换成|分数是)\s*(\d{3})\s*分",
+            text,
+        )
+        score = profile.score
+        if score_match is not None:
+            candidate_score = int(score_match.group(1))
+            if 0 <= candidate_score <= 750:
+                score = candidate_score
+
+        return replace(
+            profile,
+            score=score,
+            risk_appetite=risk,
+            preferred_cities=tuple(preferred_cities),
+            required_cities=tuple(required_cities),
+            excluded_cities=tuple(excluded_cities),
+            required_provinces=tuple(required_provinces),
+            excluded_provinces=tuple(excluded_provinces),
+            interests=tuple(interests),
+            preferred_tiers=tuple(preferred_tiers),
+            required_tiers=tuple(required_tiers),
+            required_major_keywords=tuple(required_majors),
+            required_major_names=tuple(required_major_names),
+            excluded_major_keywords=tuple(excluded_majors),
+            excluded_major_names=tuple(excluded_major_names),
+            excluded_universities=tuple(excluded_universities),
+        )
+
+    @staticmethod
+    def _append_unique(values: list[str], value: str) -> list[str]:
+        if value not in values:
+            return [*values, value]
+        return values
 
     @staticmethod
     async def _raise_if_principal_unavailable(
@@ -987,6 +3453,28 @@ class RunLifecycle:
                         "formal_result": result_summary,
                     },
                     payload_version=3,
+                )
+                await self._store_messages(
+                    conn,
+                    session_id=run["session_id"],
+                    run_id=command.run_id,
+                    messages=(
+                        ChatMessageInput(
+                            client_message_id=(
+                                f"server:{command.run_id}:formal-ready"
+                            ),
+                            role="ASSISTANT",
+                            kind="RESULT",
+                            content=(
+                                "正式推荐方案已生成。你可以继续询问报告依据，"
+                                "或按城市、专业、学校层次和风险偏好调整筛选条件。"
+                            ),
+                        ),
+                    ),
+                )
+                await conn.execute(
+                    "UPDATE chat_session SET updated_at = NOW() WHERE id = %s",
+                    (run["session_id"],),
                 )
         finally:
             await conn.close()
@@ -1633,6 +4121,37 @@ class RunLifecycle:
                         receipt=accepted_receipt,
                         target_run_id=run["run_id"],
                     )
+                    await self._store_messages(
+                        conn,
+                        session_id=run["session_id"],
+                        run_id=run["run_id"],
+                        messages=(
+                            ChatMessageInput(
+                                client_message_id=(
+                                    f"server:{run['run_id']}:"
+                                    f"{command.interrupt_id}:user"
+                                ),
+                                role="USER",
+                                kind="TEXT",
+                                content="确认画像",
+                            ),
+                            ChatMessageInput(
+                                client_message_id=(
+                                    f"server:{run['run_id']}:"
+                                    f"{command.interrupt_id}:assistant"
+                                ),
+                                role="ASSISTANT",
+                                kind="TEXT",
+                                content=(
+                                    "已确认画像，正在核验招生计划与资格规则。"
+                                ),
+                            ),
+                        ),
+                    )
+                    await conn.execute(
+                        "UPDATE chat_session SET updated_at = NOW() WHERE id = %s",
+                        (run["session_id"],),
+                    )
             if self._auto_profile:
                 if accepted_receipt.accepted:
                     await self._resume_accepted_hook(command.run_id)
@@ -1661,6 +4180,7 @@ class RunLifecycle:
                 await conn.execute(
                     """
                     SELECT run_id, session_id, principal_id, task_kind,
+                           parent_result_version,
                            task_input, state, stage,
                            state_version, release_id, working_profile_version,
                            confirmed_profile_version, lease_owner, lease_epoch,
@@ -1720,6 +4240,7 @@ class RunLifecycle:
                       AND state_version = %s
                       AND lease_epoch = %s
                     RETURNING run_id, session_id, principal_id, task_kind,
+                              parent_result_version,
                               task_input, state, stage,
                               state_version, release_id, working_profile_version,
                               confirmed_profile_version, lease_owner, lease_epoch,
@@ -2405,9 +4926,13 @@ class RunLifecycle:
                         )
                         break
                     except ReportNarrativeViolation as exc:
+                        logger.warning(
+                            "report narrative rejected: %s",
+                            exc,
+                        )
                         raise RunLifecycleError(
                             "VALIDATION_FAILED",
-                            "报告叙事越过确定性事实边界",
+                            f"报告叙事越过确定性事实边界: {exc}",
                         ) from exc
                     except ReportNarrativeUnavailable as exc:
                         report_payload = apply_report_fallback(
@@ -2477,8 +5002,9 @@ class RunLifecycle:
             row = await (
                 await conn.execute(
                     """
-                    SELECT run_id, session_id, principal_id, task_input, state, stage,
-                           state_version, release_id, working_profile_version,
+                    SELECT run_id, session_id, principal_id, parent_result_version,
+                           task_kind, task_input, state, stage, state_version,
+                           release_id, working_profile_version,
                            confirmed_profile_version, lease_owner, lease_epoch,
                            lease_expires_at, active_execution_remaining_ms,
                            active_execution_started_at, created_at
@@ -2613,16 +5139,16 @@ class RunLifecycle:
                     ),
                 )
             )
+            eligibility_gate = self._validate_eligibility_result(
+                eligibility,
+                source_candidates=source_candidates,
+            )
             await self._record_formal_gate_artifact(
                 conn,
                 row=row,
                 qualification=self._formal_qualification_summary(
                     eligibility
                 ),
-            )
-            eligibility_gate = self._validate_eligibility_result(
-                eligibility,
-                source_candidates=source_candidates,
             )
             eligible_identities = set(
                 eligibility_gate["eligible_group_keys"]
@@ -2646,6 +5172,10 @@ class RunLifecycle:
                 )
             )
         except grpc.RpcError as exc:
+            reason = grpc_error_reason(exc)
+            if reason in ALGO_BUSINESS_ERROR_REASONS:
+                message = exc.details().strip() if hasattr(exc, "details") else ""
+                raise RunLifecycleError(reason, message or reason) from exc
             raise RunLifecycleError(
                 "DEPENDENCY_UNAVAILABLE",
                 f"svc-algo 不可用: {exc.code().name}",
@@ -2670,6 +5200,47 @@ class RunLifecycle:
                 )
             optimized_identities.add(identity)
 
+        self._apply_major_eligibility_to_wishlist(
+            optimized.wishlist,
+            eligibility,
+        )
+
+        input_data = dict(row["task_input"])
+        if (
+            row["task_kind"] == "REVISE_PLAN"
+            and input_data.get("allocation_request") == "MORE_RUSH"
+        ):
+            parent_counts = await self._formal_tier_counts(
+                conn,
+                row["parent_result_version"],
+            )
+            if parent_counts is None:
+                raise RunLifecycleError(
+                    "VALIDATION_FAILED",
+                    "冲档修订缺少父报告分档摘要",
+                )
+            parent_rush_count = parent_counts[0]
+            revised_rush_count = optimized.wishlist.report.rush_count
+            if revised_rush_count <= parent_rush_count:
+                raise RunLifecycleError(
+                    "TARGET_ALLOCATION_UNSATISFIED",
+                    (
+                        f"当前仅 {estimate.rush_total} 个冲档候选，"
+                        f"新版仍为 {revised_rush_count} 个；"
+                        "无法在现有硬约束下继续增加冲档"
+                    ),
+                )
+
+        allocation_warning = ""
+        if (
+            algo_input["profile"].get("risk_appetite") == "aggressive"
+            and optimized.wishlist.report.rush_count >= estimate.rush_total
+        ):
+            allocation_warning = (
+                f"当前冲档候选仅 {estimate.rush_total} 个，"
+                "且已全部纳入最终志愿表；无法继续增加冲档。"
+            )
+
         result_version = uuid4()
         preview = self._algorithm_preview_payload(
             result_version=result_version,
@@ -2680,8 +5251,87 @@ class RunLifecycle:
             eligibility_gate=eligibility_gate,
             eligible_candidates=eligible_candidates,
             optimized=optimized,
+            allocation_warning=allocation_warning,
         )
         return preview
+
+    @staticmethod
+    def _apply_major_eligibility_to_wishlist(wishlist, eligibility) -> None:
+        group_status = {
+            group.group_key: {
+                major.major_code: major
+                for major in group.majors
+            }
+            for group in eligibility.groups
+        }
+        status_names = {
+            algo_pb2.MajorEligibilityStatus.MAJOR_ELIGIBILITY_STATUS_PASS:
+                "PASS",
+            algo_pb2.MajorEligibilityStatus.MAJOR_ELIGIBILITY_STATUS_FAIL:
+                "FAIL",
+            algo_pb2.MajorEligibilityStatus.MAJOR_ELIGIBILITY_STATUS_UNKNOWN:
+                "UNKNOWN",
+            algo_pb2.MajorEligibilityStatus.MAJOR_ELIGIBILITY_STATUS_NOT_APPLICABLE:
+                "NOT_APPLICABLE",
+            algo_pb2.MajorEligibilityStatus
+            .MAJOR_ELIGIBILITY_STATUS_MISSING_REQUIRED_FACT:
+                "MISSING_REQUIRED_FACT",
+        }
+        for item in wishlist.candidates:
+            candidate = item.cwp.candidate
+            key = f"{candidate.university_code}|{candidate.major_group}"
+            majors_by_code = group_status.get(key)
+            if majors_by_code is None:
+                raise RunLifecycleError(
+                    "VALIDATION_FAILED",
+                    "优化志愿组缺少专业资格结果",
+                )
+            initial_recommendation = {}
+            for major in candidate.majors:
+                result = majors_by_code.get(major.major_code)
+                if result is None:
+                    raise RunLifecycleError(
+                        "VALIDATION_FAILED",
+                        "优化专业缺少资格结果",
+                    )
+                status = status_names.get(result.status, "UNKNOWN")
+                initial_recommendation[major.major_code] = (
+                    major.recommended,
+                    major.recommendation_rank,
+                )
+                major.recommended = False
+                major.recommendation_rank = 0
+                major.selectable = status == "PASS"
+                if status == "PASS":
+                    major.unavailable_reason = ""
+                else:
+                    reasons = tuple(result.failure_rule_keys) + tuple(
+                        result.unknown_reasons
+                    ) + tuple(result.missing_fields)
+                    detail = "、".join(reason for reason in reasons if reason)
+                    major.unavailable_reason = (
+                        f"{status}：{detail}" if detail else status
+                    )
+
+            eligible = []
+            for major in candidate.majors:
+                result = majors_by_code[major.major_code]
+                status = status_names.get(result.status, "UNKNOWN")
+                if status != "PASS":
+                    continue
+                was_recommended, original_rank = initial_recommendation[
+                    major.major_code
+                ]
+                eligible.append((
+                    0 if was_recommended else 1,
+                    original_rank or 2**31 - 1,
+                    major.major_code,
+                    major,
+                ))
+            eligible.sort(key=lambda item: item[:3])
+            for rank, (_, _, _, major) in enumerate(eligible[:6], start=1):
+                major.recommended = True
+                major.recommendation_rank = rank
 
     async def _record_formal_gate_artifact(
         self,
@@ -2783,8 +5433,14 @@ class RunLifecycle:
                 key=lambda item: item[0],
             )
         )
+        eligible_statuses = {
+            algo_pb2.GroupEligibilityStatus.GROUP_ELIGIBILITY_STATUS_PASS,
+            algo_pb2.GroupEligibilityStatus.GROUP_ELIGIBILITY_STATUS_PASS_PARTIAL,
+        }
         groups = []
         for group in eligibility.groups:
+            if group.status not in eligible_statuses:
+                continue
             majors = tuple(
                 sorted(
                     (
@@ -3205,6 +5861,7 @@ class RunLifecycle:
         eligibility_gate,
         eligible_candidates,
         optimized,
+        allocation_warning,
     ) -> dict[str, Any]:
         message_options = {
             "preserving_proto_field_name": True,
@@ -3299,6 +5956,7 @@ class RunLifecycle:
             "algorithm_config_version": row["release_id"],
             "verification_summary": verification_summary,
             "unverified_conditions": unverified_conditions,
+            "allocation_warning": allocation_warning,
             "risk_notice": (
                 "本结果为内部受控算法预览，仅用于验证确定性算法闭环与可审计输出。"
             ),
@@ -3473,6 +6131,22 @@ class RunLifecycle:
             if row["task_kind"] == "POLICY_QA":
                 await self._process_policy_qa(conn, row)
                 return
+            if row["task_kind"] == "EXPLAIN_RESULT":
+                try:
+                    await self._process_explain_result(conn, row)
+                except RunLifecycleError as exc:
+                    if exc.reason == "RUN_STATE_CONFLICT":
+                        if await self._stop_if_cancelled(conn, row):
+                            return
+                    await self._park_claim(
+                        conn,
+                        row,
+                        target_state="FAILED",
+                        stage="EXPLAINING",
+                        terminal_reason=exc.reason,
+                        error_message=str(exc),
+                    )
+                return
             if row["confirmed_profile_version"] is not None:
                 try:
                     await self._process_algorithm_preview(conn, row)
@@ -3486,12 +6160,13 @@ class RunLifecycle:
                         "PROFILE_NOT_CONFIRMED",
                         "RELEASE_REVOKED",
                         "NO_RELIABLE_DATA",
+                        "TARGET_ALLOCATION_UNSATISFIED",
                         "BUDGET_EXHAUSTED",
                         "EXECUTION_TIMEOUT",
                         "CONSENT_REQUIRED",
                         "CONSENT_REVOKED",
                         "SENSITIVE_DATA_NOT_ALLOWED",
-                    }:
+                    } | ALGO_BUSINESS_ERROR_REASONS:
                         raise
                     await self._park_claim(
                         conn,
@@ -3594,22 +6269,50 @@ class RunLifecycle:
                 )
                 revision = revision_row
 
-            kind = (
-                "PROFILE_CONFIRM"
-                if validation.readiness == "READY_FOR_CONFIRMATION"
-                else "INTAKE_ASK"
+            macro_region = await self._unresolved_run_macro_region(
+                conn,
+                run_id=run_id,
+                fields=validation.fields,
             )
-            prompt = {
-                "kind": kind,
-                "question_key": (
-                    "profile.confirm"
-                    if kind == "PROFILE_CONFIRM"
-                    else "profile.input.required"
-                ),
-                "profile_version": str(revision["profile_version"]),
-                "fields": redact_sensitive_profile_fields(validation.fields),
-                "findings": list(validation.findings),
-            }
+            if macro_region is not None:
+                expression, catalog = macro_region
+                clarification = clarification_payload(
+                    clarification_id=str(uuid4()),
+                    expression=expression,
+                    catalog=catalog,
+                )
+                kind = "INTAKE_ASK"
+                prompt = {
+                    "kind": kind,
+                    "question_key": "profile.region.select_provinces",
+                    "profile_version": str(revision["profile_version"]),
+                    "fields": redact_sensitive_profile_fields(
+                        validation.fields
+                    ),
+                    "findings": list(validation.findings),
+                    "clarification_kind": "SELECT_PROVINCES",
+                    "reason_code": MACRO_REGION_SCOPE_UNRESOLVED,
+                    "region_clarification": clarification,
+                }
+            else:
+                kind = (
+                    "PROFILE_CONFIRM"
+                    if validation.readiness == "READY_FOR_CONFIRMATION"
+                    else "INTAKE_ASK"
+                )
+                prompt = {
+                    "kind": kind,
+                    "question_key": (
+                        "profile.confirm"
+                        if kind == "PROFILE_CONFIRM"
+                        else "profile.input.required"
+                    ),
+                    "profile_version": str(revision["profile_version"]),
+                    "fields": redact_sensitive_profile_fields(
+                        validation.fields
+                    ),
+                    "findings": list(validation.findings),
+                }
             config = {"configurable": {"thread_id": str(run_id)}}
             snapshot = await self._profile_graph.aget_state(config)
             pending_interrupt = self._pending_interrupt(snapshot)
@@ -3757,8 +6460,279 @@ class RunLifecycle:
                         ),
                     ),
                 )
+                if kind == "PROFILE_CONFIRM":
+                    await self._store_messages(
+                        conn,
+                        session_id=row["session_id"],
+                        run_id=run_id,
+                        messages=(
+                            ChatMessageInput(
+                                client_message_id=(
+                                    f"server:{run_id}:{interrupt_id}:prompt"
+                                ),
+                                role="ASSISTANT",
+                                kind="PROGRESS",
+                                content=(
+                                    "画像已整理完成。请确认下面的信息，"
+                                    "确认后我会继续核验招生要求并生成正式报告。"
+                                ),
+                            ),
+                        ),
+                    )
+                elif prompt.get("clarification_kind") == "SELECT_PROVINCES":
+                    term = str(
+                        (prompt.get("region_clarification") or {}).get(
+                            "term"
+                        )
+                        or "这个地域范围"
+                    )
+                    await self._store_messages(
+                        conn,
+                        session_id=row["session_id"],
+                        run_id=run_id,
+                        messages=(
+                            ChatMessageInput(
+                                client_message_id=(
+                                    f"server:{run_id}:{interrupt_id}:region"
+                                ),
+                                role="ASSISTANT",
+                                kind="TEXT",
+                                content=self._region_question(term),
+                                metadata={
+                                    "clarification_kind": "SELECT_PROVINCES",
+                                    "reason_code": MACRO_REGION_SCOPE_UNRESOLVED,
+                                    "region_clarification": prompt[
+                                        "region_clarification"
+                                    ],
+                                },
+                            ),
+                        ),
+                    )
+                await conn.execute(
+                    "UPDATE chat_session SET updated_at = NOW() WHERE id = %s",
+                    (row["session_id"],),
+                )
         finally:
             await conn.close()
+
+    async def _process_explain_result(
+        self,
+        conn,
+        row: dict[str, Any],
+    ) -> None:
+        parent_result_version = row.get("parent_result_version")
+        if parent_result_version is None:
+            raise RunLifecycleError("PARENT_RESULT_REQUIRED")
+        parent = await (
+            await conn.execute(
+                """
+                SELECT rr.result_version, rr.run_id, rr.result_kind,
+                       rr.payload, rr.confirmed_profile_version,
+                       r.session_id, r.principal_id,
+                       state.status AS result_state
+                FROM run_result rr
+                JOIN run r ON r.run_id = rr.run_id
+                LEFT JOIN LATERAL (
+                    SELECT status
+                    FROM run_result_state_event event
+                    WHERE event.result_version = rr.result_version
+                    ORDER BY event.event_id DESC
+                    LIMIT 1
+                ) state ON TRUE
+                WHERE rr.result_version = %s
+                """,
+                (parent_result_version,),
+            )
+        ).fetchone()
+        if parent is None:
+            raise RunLifecycleError("PARENT_RESULT_NOT_FOUND")
+        if (
+            parent["session_id"] != row["session_id"]
+            or parent["principal_id"] != row["principal_id"]
+        ):
+            raise RunLifecycleError("PARENT_RESULT_FORBIDDEN")
+        if parent["result_kind"] != "V1_FORMAL":
+            raise RunLifecycleError("PARENT_RESULT_INVALID")
+        if parent["result_state"] not in (None, "ACTIVE"):
+            raise RunLifecycleError("PARENT_RESULT_STALE")
+
+        question_row = await (
+            await conn.execute(
+                """
+                SELECT content
+                FROM chat_message
+                WHERE run_id = %s AND role = 'USER'
+                ORDER BY created_at DESC, message_id DESC
+                LIMIT 1
+                """,
+                (row["run_id"],),
+            )
+        ).fetchone()
+        question = str(
+            question_row["content"] if question_row is not None else ""
+        ).strip()
+        answer = self._deterministic_report_answer(
+            question=question,
+            payload=dict(parent["payload"] or {}),
+        )
+        result_version = uuid4()
+        result_payload = {
+            "result_version": str(result_version),
+            "result_kind": "EXPLAIN_RESULT",
+            "parent_result_version": str(parent_result_version),
+            "answer": answer,
+        }
+
+        async with conn.transaction():
+            current = await (
+                await conn.execute(
+                    """
+                    SELECT state, state_version, lease_owner, lease_epoch,
+                           cancel_requested_at
+                    FROM run
+                    WHERE run_id = %s
+                    FOR UPDATE
+                    """,
+                    (row["run_id"],),
+                )
+            ).fetchone()
+            if (
+                current is None
+                or current["state"] != "RUNNING"
+                or current["lease_owner"] != self._worker_owner
+                or current["lease_epoch"] != row["lease_epoch"]
+                or current["cancel_requested_at"] is not None
+            ):
+                raise RunLifecycleError("RUN_STATE_CONFLICT")
+            next_version = current["state_version"] + 1
+            await conn.execute(
+                """
+                INSERT INTO run_result (
+                    result_version, run_id, release_id,
+                    confirmed_profile_version, result_kind, payload,
+                    verification_summary, unverified_conditions
+                )
+                VALUES (%s, %s, %s, %s, 'EXPLAIN_RESULT', %s, %s, %s)
+                """,
+                (
+                    result_version,
+                    row["run_id"],
+                    row["release_id"],
+                    parent["confirmed_profile_version"],
+                    Jsonb(result_payload),
+                    Jsonb([]),
+                    Jsonb([]),
+                ),
+            )
+            updated = await (
+                await conn.execute(
+                    """
+                    UPDATE run
+                    SET state = 'SUCCEEDED',
+                        stage = 'EXPLAIN_READY',
+                        terminal_reason = NULL,
+                        state_version = %s,
+                        confirmed_profile_version = %s,
+                        result_version = %s,
+                        result_kind = 'EXPLAIN_RESULT',
+                        lease_owner = NULL,
+                        lease_expires_at = NULL,
+                        active_execution_started_at = NULL,
+                        updated_at = NOW()
+                    WHERE run_id = %s
+                      AND state = 'RUNNING'
+                      AND state_version = %s
+                      AND lease_owner = %s
+                      AND lease_epoch = %s
+                    RETURNING run_id
+                    """,
+                    (
+                        next_version,
+                        parent["confirmed_profile_version"],
+                        result_version,
+                        row["run_id"],
+                        current["state_version"],
+                        self._worker_owner,
+                        row["lease_epoch"],
+                    ),
+                )
+            ).fetchone()
+            if updated is None:
+                raise RunLifecycleError("RUN_STATE_CONFLICT")
+            await append_event(
+                conn,
+                run_id=row["run_id"],
+                event_type="STATE_CHANGED",
+                stage="EXPLAIN_READY",
+                state_version=next_version,
+                payload={"from_state": "RUNNING", "to_state": "SUCCEEDED"},
+            )
+            await append_event(
+                conn,
+                run_id=row["run_id"],
+                event_type="RESULT",
+                stage="EXPLAIN_READY",
+                state_version=next_version,
+                payload={
+                    "result_version": str(result_version),
+                    "result_kind": "EXPLAIN_RESULT",
+                    "explanation": result_payload,
+                },
+                payload_version=1,
+            )
+            await self._store_messages(
+                conn,
+                session_id=row["session_id"],
+                run_id=row["run_id"],
+                messages=(
+                    ChatMessageInput(
+                        client_message_id=f"server:{row['run_id']}:explain",
+                        role="ASSISTANT",
+                        kind="TEXT",
+                        content=answer,
+                    ),
+                ),
+            )
+            await conn.execute(
+                "UPDATE chat_session SET updated_at = NOW() WHERE id = %s",
+                (row["session_id"],),
+            )
+
+    @staticmethod
+    def _deterministic_report_answer(
+        *,
+        question: str,
+        payload: dict[str, Any],
+    ) -> str:
+        report = payload.get("report") or {}
+        sections = report.get("sections") or []
+        candidates = [
+            section for section in sections
+            if str(section.get("section_key") or "").startswith("candidate:")
+        ]
+        matched = [
+            section for section in candidates
+            if any(
+                token and token in str(section.get("title") or "")
+                for token in re.findall(r"[\u4e00-\u9fff]{2,20}(?:大学|学院)", question)
+            )
+        ]
+        chosen = matched[:2] if matched else candidates[:3]
+        lines = [
+            "这份方案先使用已确认的画像筛除不符合选科与资格规则的院校专业组，"
+            "再由确定性算法估计录取概率、按志愿策略完成排序；模型不会改写候选身份、"
+            "概率或顺序。"
+        ]
+        if chosen:
+            lines.append("当前方案中可核对的关键说明：")
+            for section in chosen:
+                title = str(section.get("title") or "").strip()
+                body = str(section.get("body") or "").strip()
+                lines.append(f"{title}：{body}")
+        risk_notice = str(payload.get("risk_notice") or "").strip()
+        if risk_notice:
+            lines.append(f"风险提示：{risk_notice}")
+        return "\n".join(lines)
 
     @staticmethod
     def _pending_interrupt(snapshot):
@@ -3967,6 +6941,17 @@ class RunLifecycle:
             return {"type": "REJECT_OR_EDIT_PROFILE", "patch": answer.patch}
         if isinstance(answer, DeclineFieldsAnswer):
             return {"type": "DECLINE_FIELDS", "field_keys": list(answer.field_keys)}
+        if isinstance(answer, RegionAnswer):
+            return {
+                "type": "SELECT_PROVINCES",
+                "clarification_id": answer.clarification_id,
+                "provinces": list(answer.provinces),
+                "selected_preset_ids": list(answer.preset_ids),
+                "region_catalog_version": answer.catalog_version,
+                "cancel_region_restriction": (
+                    answer.cancel_region_restriction
+                ),
+            }
         raise RunLifecycleError("RUN_STATE_CONFLICT")
 
     async def _apply_profile_answer_and_create_revision(
@@ -4008,6 +6993,77 @@ class RunLifecycle:
                         "state": "DECLINED",
                         "source": "USER_FORM",
                         "value": None,
+                    }
+            elif answer["type"] == "SELECT_PROVINCES":
+                clarification = interrupt["payload"].get(
+                    "region_clarification"
+                ) or {}
+                if (
+                    answer.get("clarification_id")
+                    != clarification.get("clarification_id")
+                ):
+                    raise RunLifecycleError("REGION_CLARIFICATION_CONFLICT")
+                catalog = await self._region_catalog(run["release_id"])
+                try:
+                    provinces = validate_region_answer(
+                        catalog=catalog,
+                        catalog_version=str(
+                            answer.get("region_catalog_version") or ""
+                        ),
+                        provinces=tuple(answer.get("provinces") or ()),
+                        preset_ids=tuple(
+                            answer.get("selected_preset_ids") or ()
+                        ),
+                        cancel_region_restriction=bool(
+                            answer.get("cancel_region_restriction")
+                        ),
+                    )
+                except MacroRegionError as exc:
+                    raise RunLifecycleError(exc.reason) from exc
+                if answer.get("cancel_region_restriction"):
+                    patch = {}
+                else:
+                    current_revision = await (
+                        await conn.execute(
+                            """
+                            SELECT fields
+                            FROM profile_revision
+                            WHERE profile_version = %s
+                            """,
+                            (base_version,),
+                        )
+                    ).fetchone()
+                    if current_revision is None:
+                        raise RunLifecycleError("PROFILE_VERSION_CONFLICT")
+                    current_profile = self._profile_from_fields(
+                        current_revision["fields"]
+                    )
+                    resolved = self._apply_resolved_region_to_profile(
+                        current_profile,
+                        operation=str(clarification.get("operation") or ""),
+                        provinces=provinces,
+                    )
+                    patch = {
+                        "preferences.required_provinces": {
+                            "state": "PROVIDED",
+                            "source": "USER_FORM",
+                            "value": list(resolved.required_provinces),
+                        },
+                        "preferences.excluded_provinces": {
+                            "state": "PROVIDED",
+                            "source": "USER_FORM",
+                            "value": list(resolved.excluded_provinces),
+                        },
+                        "preferences.preferred_cities": {
+                            "state": "PROVIDED",
+                            "source": "USER_FORM",
+                            "value": list(resolved.preferred_cities),
+                        },
+                        "preferences.required_cities": {
+                            "state": "PROVIDED",
+                            "source": "USER_FORM",
+                            "value": list(resolved.required_cities),
+                        },
                     }
             else:
                 raise RunLifecycleError("RUN_STATE_CONFLICT")
@@ -4549,6 +7605,122 @@ class RunLifecycle:
         )
         return session_id
 
+    async def _validate_parent_result(
+        self,
+        conn: psycopg.AsyncConnection,
+        *,
+        principal_id: str,
+        session_id: UUID,
+        parent_result_version: UUID,
+    ) -> None:
+        row = await (
+            await conn.execute(
+                """
+                SELECT r.run_id, r.session_id, r.principal_id,
+                       rr.result_kind,
+                       state.status AS result_state
+                FROM run r
+                JOIN run_result rr ON rr.run_id = r.run_id
+                LEFT JOIN LATERAL (
+                    SELECT status
+                    FROM run_result_state_event event
+                    WHERE event.result_version = rr.result_version
+                    ORDER BY event.event_id DESC
+                    LIMIT 1
+                ) state ON TRUE
+                WHERE rr.result_version = %s
+                """,
+                (parent_result_version,),
+            )
+        ).fetchone()
+        if row is None:
+            raise RunLifecycleError("PARENT_RESULT_NOT_FOUND")
+        if (
+            row["principal_id"] != principal_id
+            or row["session_id"] != session_id
+        ):
+            raise RunLifecycleError("PARENT_RESULT_FORBIDDEN")
+        if row["result_kind"] != "V1_FORMAL":
+            raise RunLifecycleError("PARENT_RESULT_INVALID")
+        if row["result_state"] not in (None, "ACTIVE"):
+            raise RunLifecycleError("PARENT_RESULT_STALE")
+
+    async def _store_messages(
+        self,
+        conn: psycopg.AsyncConnection,
+        *,
+        session_id: UUID,
+        run_id: UUID | None,
+        messages: tuple[ChatMessageInput, ...],
+    ) -> None:
+        for message in messages:
+            client_message_id = message.client_message_id.strip()
+            role = message.role.strip().upper()
+            kind = message.kind.strip().upper() or "TEXT"
+            content = message.content.strip()
+            if (
+                not client_message_id
+                or len(client_message_id) > 200
+                or role not in {"USER", "ASSISTANT", "SYSTEM"}
+                or kind not in {"TEXT", "PROGRESS", "RESULT", "ERROR"}
+                or not content
+                or len(content) > 8000
+            ):
+                raise RunLifecycleError("CHAT_MESSAGE_INVALID")
+            await conn.execute(
+                """
+                INSERT INTO chat_message (
+                    message_id, session_id, run_id, client_message_id,
+                    role, kind, content, metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (session_id, client_message_id) DO NOTHING
+                """,
+                (
+                    uuid4(),
+                    session_id,
+                    run_id,
+                    client_message_id,
+                    role,
+                    kind,
+                    content,
+                    Jsonb(message.metadata or {}),
+                ),
+            )
+
+    async def _update_session_for_run(
+        self,
+        conn: psycopg.AsyncConnection,
+        *,
+        session_id: UUID,
+        command: SubmitRunCommand,
+        run_id: UUID,
+    ) -> None:
+        title = None
+        if isinstance(command.input, StructuredProfileInput):
+            category = command.input.category.strip()
+            score = command.input.score
+            if category and score is not None:
+                title = f"{category} {score} 分志愿方案"
+        await conn.execute(
+            """
+            UPDATE chat_session
+            SET title = CASE
+                    WHEN title IS NULL OR btrim(title) = ''
+                    THEN COALESCE(%s, '新的志愿对话')
+                    ELSE title
+                END,
+                current_node = 'INTAKE',
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (title, session_id),
+        )
+        await conn.execute(
+            "UPDATE chat_session SET updated_at = NOW() WHERE id = %s",
+            (session_id,),
+        )
+
     async def _find_receipt(
         self,
         conn: psycopg.AsyncConnection,
@@ -4645,6 +7817,13 @@ class RunLifecycle:
             "session_id": str(command.session_id) if command.session_id else None,
             "task_kind": command.task_kind,
             "input": asdict(command.input),
+            "parent_result_version": (
+                str(command.parent_result_version)
+                if command.parent_result_version
+                else None
+            ),
+            "messages": [asdict(message) for message in command.messages],
+            "user_message": command.user_message,
         }
 
     @staticmethod

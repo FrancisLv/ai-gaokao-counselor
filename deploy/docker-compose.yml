@@ -13,7 +13,11 @@ services:
     ports: ["8000:8000"]
     environment:
       - ORCHESTRATOR_ENDPOINT=orchestrator:9100
+      - GATEWAY_DSN=postgres://app:app@postgres:5432/gaokao?sslmode=disable
+      - GATEWAY_COOKIE_SECURE=false
     depends_on:
+      postgres:
+        condition: service_healthy
       orchestrator:
         condition: service_started
 
@@ -26,6 +30,8 @@ services:
         GO_IMAGE: ${GO_IMAGE:-golang:1.25}
         GO_RUNTIME_IMAGE: ${GO_RUNTIME_IMAGE:-gcr.io/distroless/static-debian12}
         GOPROXY: ${BUILD_GOPROXY:-https://proxy.golang.org,direct}
+    env_file:
+      - ../.env
     environment:
       - LLMGW_DSN=postgres://app:app@postgres:5432/gaokao?sslmode=disable
     working_dir: /

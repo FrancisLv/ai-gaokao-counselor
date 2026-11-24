@@ -14,7 +14,11 @@ async def _serve() -> None:
     import grpc
 
     from app.run_lifecycle import RunLifecycle
+    from app.data_lifecycle import PrincipalDataDeletion
     from app.run_lifecycle.algo import GrpcAlgoClient
+    from app.run_lifecycle.conversation_intent import (
+        GrpcConversationIntentClassifier,
+    )
     from app.run_lifecycle.llm_report import GrpcReportNarrativeWriter
     from app.run_lifecycle.policy import PostgresPolicyRetriever
     from app.run_lifecycle.worker import RunLifecycleWorker
@@ -39,6 +43,11 @@ async def _serve() -> None:
         if llm_gateway_channel is not None
         else None
     )
+    conversation_intent_classifier = (
+        GrpcConversationIntentClassifier(llm_gateway_channel)
+        if llm_gateway_channel is not None
+        else None
+    )
     lifecycle = (
         RunLifecycle(
             dsn,
@@ -54,14 +63,23 @@ async def _serve() -> None:
                 ),
             ),
             report_narrative_writer=report_narrative_writer,
+            conversation_intent_classifier=conversation_intent_classifier,
         )
         if dsn
         else None
     )
     worker = RunLifecycleWorker(lifecycle) if lifecycle is not None else None
+    deletion = (
+        PrincipalDataDeletion(
+            dsn,
+            confirmation_authority=_GatewayDeletionAuthority(),
+        )
+        if dsn
+        else None
+    )
     server = grpc.aio.server()
     orchestrator_pb2_grpc.add_OrchestratorServicer_to_server(
-        OrchestratorServicer(lifecycle=lifecycle),
+        OrchestratorServicer(lifecycle=lifecycle, deletion=deletion),
         server,
     )
     server.add_insecure_port(addr)
@@ -80,6 +98,21 @@ async def _serve() -> None:
             await algo_client.Close()
         if llm_gateway_channel is not None:
             await llm_gateway_channel.close()
+
+
+class _GatewayDeletionAuthority:
+    async def consume(
+        self,
+        *,
+        principal_id: str,
+        request_id: str,
+        confirmation_token: str,
+    ) -> bool:
+        return (
+            bool(principal_id.strip())
+            and bool(request_id.strip())
+            and confirmation_token == "gateway-authenticated"
+        )
 
 
 def main() -> None:

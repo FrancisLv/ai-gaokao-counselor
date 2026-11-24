@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -23,6 +24,7 @@ import (
 	orchestratorv1 "github.com/choucisan/ai-gaokao-counselor/api/orchestrator/v1"
 	"github.com/go-kratos/kratos/v2/transport"
 	khttp "github.com/go-kratos/kratos/v2/transport/http"
+	"github.com/google/uuid"
 )
 
 const defaultSSEHeartbeat = 15 * time.Second
@@ -38,15 +40,48 @@ type runClient interface {
 	GetRun(context.Context, *orchestratorv1.GetRunRequest, ...grpc.CallOption) (*orchestratorv1.RunViewReply, error)
 	CancelRun(context.Context, *orchestratorv1.CancelRunRequest, ...grpc.CallOption) (*orchestratorv1.RunReceiptReply, error)
 	WatchRun(context.Context, *orchestratorv1.WatchRunRequest, ...grpc.CallOption) (runEventStream, error)
+	ListSessions(context.Context, *orchestratorv1.ListSessionsRequest, ...grpc.CallOption) (*orchestratorv1.ListSessionsReply, error)
+	GetSession(context.Context, *orchestratorv1.GetSessionRequest, ...grpc.CallOption) (*orchestratorv1.ChatSessionReply, error)
+	SubmitConversationMessage(context.Context, *orchestratorv1.SubmitConversationMessageRequest, ...grpc.CallOption) (*orchestratorv1.SubmitConversationMessageReply, error)
+	GetWishlistDraft(context.Context, *orchestratorv1.GetWishlistDraftRequest, ...grpc.CallOption) (*orchestratorv1.WishlistDraftReply, error)
+	SaveWishlistDraft(context.Context, *orchestratorv1.SaveWishlistDraftRequest, ...grpc.CallOption) (*orchestratorv1.WishlistDraftReply, error)
+	ListWishlists(context.Context, *orchestratorv1.ListWishlistsRequest, ...grpc.CallOption) (*orchestratorv1.ListWishlistsReply, error)
+	ListWishlistHistory(context.Context, *orchestratorv1.GetWishlistDraftRequest, ...grpc.CallOption) (*orchestratorv1.WishlistHistoryReply, error)
+	RestoreWishlistDraftVersion(context.Context, *orchestratorv1.RestoreWishlistDraftVersionRequest, ...grpc.CallOption) (*orchestratorv1.WishlistDraftReply, error)
+	DeleteWishlist(context.Context, *orchestratorv1.DeleteWishlistRequest, ...grpc.CallOption) (*orchestratorv1.DeleteWishlistReply, error)
+	DeletePrincipalData(context.Context, *orchestratorv1.DeletePrincipalDataRequest, ...grpc.CallOption) (*orchestratorv1.DeletePrincipalDataReply, error)
+	RevokeSensitiveConsent(context.Context, *orchestratorv1.RevokeSensitiveConsentRequest, ...grpc.CallOption) (*orchestratorv1.RevokeSensitiveConsentReply, error)
 }
 
 // Service 实现 gateway.v1.GatewayHTTPServer。
 type Service struct {
-	client runClient
+	client      runClient
+	identity    identityService
+	authOptions AuthOptions
 }
 
 // NewService 构造 Service；orchestrator 连接由 main 负责生命周期。
-func NewService(client runClient) *Service { return &Service{client: client} }
+func NewService(client runClient) *Service {
+	return newServiceWithIdentity(client, nil, AuthOptions{})
+}
+
+func newServiceWithIdentity(
+	client runClient,
+	identity identityService,
+	options AuthOptions,
+) *Service {
+	if options.SessionIdleTTL <= 0 {
+		options.SessionIdleTTL = defaultSessionIdleTTL
+	}
+	if options.SessionAbsoluteTTL <= 0 {
+		options.SessionAbsoluteTTL = defaultSessionAbsoluteTTL
+	}
+	return &Service{
+		client:      client,
+		identity:    identity,
+		authOptions: options,
+	}
+}
 
 type orchestratorRunClient struct {
 	orchestratorv1.OrchestratorClient
@@ -65,23 +100,63 @@ func NewServiceForOrchestrator(client orchestratorv1.OrchestratorClient) *Servic
 	return NewService(orchestratorRunClient{OrchestratorClient: client})
 }
 
+func NewServiceForOrchestratorWithIdentity(
+	client orchestratorv1.OrchestratorClient,
+	identity identityService,
+	options AuthOptions,
+) *Service {
+	return newServiceWithIdentity(
+		orchestratorRunClient{OrchestratorClient: client},
+		identity,
+		options,
+	)
+}
+
+func registerGatewayRoutes(server *khttp.Server, service *Service) {
+	gatewayv1.RegisterGatewayHTTPServer(server, service)
+	RegisterRunEventStream(server, service, EventStreamOptions{})
+}
+
 // EventStreamOptions 只控制传输层心跳；业务事件序号仍由 orchestrator 决定。
 type EventStreamOptions struct {
 	HeartbeatInterval time.Duration
 }
 
 type createPlanPayload struct {
-	SessionID    string `json:"session_id"`
-	TaskKind     string `json:"task_kind"`
-	ProfileInput struct {
-		Province        string   `json:"province"`
-		ApplicationYear int32    `json:"application_year"`
-		Category        string   `json:"category"`
-		Batch           string   `json:"batch"`
-		Score           int32    `json:"score"`
-		Subjects        []string `json:"subjects"`
+	SessionID           string               `json:"session_id"`
+	TaskKind            string               `json:"task_kind"`
+	ParentResultVersion string               `json:"parent_result_version"`
+	UserMessage         string               `json:"user_message"`
+	Messages            []chatMessagePayload `json:"messages"`
+	ProfileInput        struct {
+		Province              string   `json:"province"`
+		ApplicationYear       int32    `json:"application_year"`
+		Category              string   `json:"category"`
+		Batch                 string   `json:"batch"`
+		Score                 int32    `json:"score"`
+		Subjects              []string `json:"subjects"`
+		RiskAppetite          string   `json:"risk_appetite"`
+		PriorityDims          []string `json:"priority_dims"`
+		Interests             []string `json:"interests"`
+		PreferredCities       []string `json:"preferred_cities"`
+		PreferredTiers        []string `json:"preferred_tiers"`
+		RequiredCities        []string `json:"required_cities"`
+		ExcludedCities        []string `json:"excluded_cities"`
+		RequiredTiers         []string `json:"required_tiers"`
+		RequiredMajorNames    []string `json:"required_major_names"`
+		RequiredMajorKeywords []string `json:"required_major_keywords"`
+		ExcludedMajorKeywords []string `json:"excluded_major_keywords"`
+		ExcludedMajorNames    []string `json:"excluded_major_names"`
+		ExcludedUniversities  []string `json:"excluded_universities"`
 	} `json:"profile_input"`
 	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type chatMessagePayload struct {
+	ClientMessageID string `json:"client_message_id"`
+	Role            string `json:"role"`
+	Kind            string `json:"kind"`
+	Content         string `json:"content"`
 }
 
 type resumePayload struct {
@@ -91,10 +166,15 @@ type resumePayload struct {
 	ProfileVersion       string `json:"profile_version"`
 	IdempotencyKey       string `json:"idempotency_key"`
 	Answer               struct {
-		Type      string                     `json:"type"`
-		Fields    map[string]profileFieldDTO `json:"fields"`
-		Patch     map[string]profileFieldDTO `json:"patch"`
-		FieldKeys []string                   `json:"field_keys"`
+		Type                    string                     `json:"type"`
+		Fields                  map[string]profileFieldDTO `json:"fields"`
+		Patch                   map[string]profileFieldDTO `json:"patch"`
+		FieldKeys               []string                   `json:"field_keys"`
+		ClarificationID         string                     `json:"clarification_id"`
+		Provinces               []string                   `json:"provinces"`
+		PresetIDs               []string                   `json:"selected_preset_ids"`
+		RegionCatalogVersion    string                     `json:"region_catalog_version"`
+		CancelRegionRestriction bool                       `json:"cancel_region_restriction"`
 	} `json:"answer"`
 }
 
@@ -105,8 +185,11 @@ type profileFieldDTO struct {
 }
 
 func (s *Service) CreatePlan(ctx context.Context, req *gatewayv1.CreatePlanRequest) (*gatewayv1.CreatePlanReply, error) {
-	principal, err := requirePrincipal(ctx)
+	principal, err := s.requirePrincipal(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateCSRF(ctx); err != nil {
 		return nil, err
 	}
 	var payload createPlanPayload
@@ -127,14 +210,30 @@ func (s *Service) CreatePlan(ctx context.Context, req *gatewayv1.CreatePlanReque
 			SessionId: payload.SessionID,
 			TaskKind:  taskKind,
 			ProfileInput: &orchestratorv1.StructuredProfileInput{
-				Province:        payload.ProfileInput.Province,
-				ApplicationYear: payload.ProfileInput.ApplicationYear,
-				Category:        payload.ProfileInput.Category,
-				Batch:           payload.ProfileInput.Batch,
-				Score:           payload.ProfileInput.Score,
-				Subjects:        payload.ProfileInput.Subjects,
+				Province:              payload.ProfileInput.Province,
+				ApplicationYear:       payload.ProfileInput.ApplicationYear,
+				Category:              payload.ProfileInput.Category,
+				Batch:                 payload.ProfileInput.Batch,
+				Score:                 payload.ProfileInput.Score,
+				Subjects:              payload.ProfileInput.Subjects,
+				RiskAppetite:          payload.ProfileInput.RiskAppetite,
+				PriorityDims:          payload.ProfileInput.PriorityDims,
+				Interests:             payload.ProfileInput.Interests,
+				PreferredCities:       payload.ProfileInput.PreferredCities,
+				PreferredTiers:        payload.ProfileInput.PreferredTiers,
+				RequiredCities:        payload.ProfileInput.RequiredCities,
+				ExcludedCities:        payload.ProfileInput.ExcludedCities,
+				RequiredTiers:         payload.ProfileInput.RequiredTiers,
+				RequiredMajorNames:    payload.ProfileInput.RequiredMajorNames,
+				RequiredMajorKeywords: payload.ProfileInput.RequiredMajorKeywords,
+				ExcludedMajorKeywords: payload.ProfileInput.ExcludedMajorKeywords,
+				ExcludedMajorNames:    payload.ProfileInput.ExcludedMajorNames,
+				ExcludedUniversities:  payload.ProfileInput.ExcludedUniversities,
 			},
-			IdempotencyKey: payload.IdempotencyKey,
+			IdempotencyKey:      payload.IdempotencyKey,
+			ParentResultVersion: payload.ParentResultVersion,
+			UserMessage:         payload.UserMessage,
+			Messages:            chatMessages(payload.Messages),
 		},
 	)
 	if err != nil {
@@ -147,12 +246,28 @@ func (s *Service) CreatePlan(ctx context.Context, req *gatewayv1.CreatePlanReque
 	}, nil
 }
 
+func chatMessages(messages []chatMessagePayload) []*orchestratorv1.ChatMessageInput {
+	result := make([]*orchestratorv1.ChatMessageInput, 0, len(messages))
+	for _, message := range messages {
+		result = append(result, &orchestratorv1.ChatMessageInput{
+			ClientMessageId: message.ClientMessageID,
+			Role:            message.Role,
+			Kind:            message.Kind,
+			Content:         message.Content,
+		})
+	}
+	return result
+}
+
 func (s *Service) CreatePolicyQuery(
 	ctx context.Context,
 	req *gatewayv1.CreatePolicyQueryRequest,
 ) (*gatewayv1.CreatePolicyQueryReply, error) {
-	principal, err := requirePrincipal(ctx)
+	principal, err := s.requirePrincipal(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateCSRF(ctx); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(req.GetQueryText()) == "" {
@@ -191,8 +306,11 @@ func (s *Service) CreatePolicyQuery(
 }
 
 func (s *Service) ConfirmProfile(ctx context.Context, req *gatewayv1.ConfirmProfileRequest) (*gatewayv1.ConfirmProfileReply, error) {
-	principal, err := requirePrincipal(ctx)
+	principal, err := s.requirePrincipal(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateCSRF(ctx); err != nil {
 		return nil, err
 	}
 	var payload resumePayload
@@ -215,8 +333,11 @@ func (s *Service) ConfirmProfile(ctx context.Context, req *gatewayv1.ConfirmProf
 }
 
 func (s *Service) BackfillProfile(ctx context.Context, req *gatewayv1.BackfillProfileRequest) (*gatewayv1.BackfillProfileReply, error) {
-	principal, err := requirePrincipal(ctx)
+	principal, err := s.requirePrincipal(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateCSRF(ctx); err != nil {
 		return nil, err
 	}
 	var payload resumePayload
@@ -239,7 +360,7 @@ func (s *Service) BackfillProfile(ctx context.Context, req *gatewayv1.BackfillPr
 }
 
 func (s *Service) GetRun(ctx context.Context, req *gatewayv1.GetRunRequest) (*orchestratorv1.RunViewReply, error) {
-	principal, err := requirePrincipal(ctx)
+	principal, err := s.requirePrincipal(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -253,8 +374,11 @@ func (s *Service) GetRun(ctx context.Context, req *gatewayv1.GetRunRequest) (*or
 }
 
 func (s *Service) CancelRun(ctx context.Context, req *gatewayv1.CancelRunRequest) (*orchestratorv1.RunReceiptReply, error) {
-	principal, err := requirePrincipal(ctx)
+	principal, err := s.requirePrincipal(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateCSRF(ctx); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(req.GetRunId()) == "" || strings.TrimSpace(req.GetIdempotencyKey()) == "" {
@@ -270,7 +394,7 @@ func (s *Service) CancelRun(ctx context.Context, req *gatewayv1.CancelRunRequest
 }
 
 func (s *Service) WatchRun(ctx context.Context, req *gatewayv1.WatchRunRequest) (runEventStream, error) {
-	principal, err := requirePrincipal(ctx)
+	principal, err := s.requirePrincipal(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -284,6 +408,279 @@ func (s *Service) WatchRun(ctx context.Context, req *gatewayv1.WatchRunRequest) 
 			AfterEventSeq: req.GetAfterEventSeq(),
 		},
 	)
+}
+
+func (s *Service) ListSessions(
+	ctx context.Context,
+	req *gatewayv1.ListSessionsRequest,
+) (*orchestratorv1.ListSessionsReply, error) {
+	principal, err := s.requirePrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.client.ListSessions(
+		outgoingPrincipal(ctx, principal),
+		&orchestratorv1.ListSessionsRequest{Limit: req.GetLimit()},
+	)
+}
+
+func (s *Service) GetSession(
+	ctx context.Context,
+	req *gatewayv1.GetSessionRequest,
+) (*orchestratorv1.ChatSessionReply, error) {
+	principal, err := s.requirePrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.GetSessionId()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "SESSION_ID_REQUIRED")
+	}
+	return s.client.GetSession(
+		outgoingPrincipal(ctx, principal),
+		&orchestratorv1.GetSessionRequest{SessionId: req.GetSessionId()},
+	)
+}
+
+func (s *Service) SubmitConversationMessage(
+	ctx context.Context,
+	req *gatewayv1.SubmitConversationMessageRequest,
+) (*orchestratorv1.SubmitConversationMessageReply, error) {
+	principal, err := s.requirePrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateCSRF(ctx); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.GetSessionId()) == "" ||
+		strings.TrimSpace(req.GetMessageText()) == "" ||
+		strings.TrimSpace(req.GetIdempotencyKey()) == "" {
+		return nil, status.Error(
+			codes.InvalidArgument,
+			"CONVERSATION_COMMAND_INCOMPLETE",
+		)
+	}
+	return s.client.SubmitConversationMessage(
+		outgoingPrincipal(ctx, principal),
+		&orchestratorv1.SubmitConversationMessageRequest{
+			SessionId:           req.GetSessionId(),
+			ProfileInput:        req.GetProfileInput(),
+			ParentResultVersion: req.GetParentResultVersion(),
+			MessageText:         req.GetMessageText(),
+			IdempotencyKey:      req.GetIdempotencyKey(),
+			RegionAnswer:        req.GetRegionAnswer(),
+		},
+	)
+}
+
+func (s *Service) GetWishlistDraft(
+	ctx context.Context,
+	req *gatewayv1.GetWishlistDraftRequest,
+) (*orchestratorv1.WishlistDraftReply, error) {
+	principal, err := s.requirePrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.GetResultVersion()) == "" {
+		return nil, status.Error(
+			codes.InvalidArgument,
+			"RESULT_VERSION_REQUIRED",
+		)
+	}
+	return s.client.GetWishlistDraft(
+		outgoingPrincipal(ctx, principal),
+		&orchestratorv1.GetWishlistDraftRequest{
+			ResultVersion: req.GetResultVersion(),
+		},
+	)
+}
+
+func (s *Service) SaveWishlistDraft(
+	ctx context.Context,
+	req *gatewayv1.SaveWishlistDraftRequest,
+) (*orchestratorv1.WishlistDraftReply, error) {
+	principal, err := s.requirePrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateCSRF(ctx); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.GetResultVersion()) == "" ||
+		strings.TrimSpace(req.GetIdempotencyKey()) == "" ||
+		req.GetExpectedVersion() < 0 {
+		return nil, status.Error(
+			codes.InvalidArgument,
+			"DRAFT_COMMAND_INCOMPLETE",
+		)
+	}
+	return s.client.SaveWishlistDraft(
+		outgoingPrincipal(ctx, principal),
+		&orchestratorv1.SaveWishlistDraftRequest{
+			ResultVersion:   req.GetResultVersion(),
+			ExpectedVersion: req.GetExpectedVersion(),
+			IdempotencyKey:  req.GetIdempotencyKey(),
+			Groups:          req.GetGroups(),
+		},
+	)
+}
+
+func (s *Service) ListWishlists(
+	ctx context.Context,
+	req *gatewayv1.ListWishlistsRequest,
+) (*orchestratorv1.ListWishlistsReply, error) {
+	principal, err := s.requirePrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	limit := req.GetLimit()
+	if limit == 0 {
+		limit = 20
+	}
+	if limit < 1 || limit > 100 || req.GetOffset() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "WISHLIST_QUERY_INVALID")
+	}
+	return s.client.ListWishlists(
+		outgoingPrincipal(ctx, principal),
+		&orchestratorv1.ListWishlistsRequest{
+			Limit:  limit,
+			Offset: req.GetOffset(),
+			Status: req.GetStatus(),
+		},
+	)
+}
+
+func (s *Service) ListWishlistHistory(
+	ctx context.Context,
+	req *gatewayv1.ListWishlistHistoryRequest,
+) (*orchestratorv1.WishlistHistoryReply, error) {
+	principal, err := s.requirePrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.GetResultVersion()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "RESULT_VERSION_REQUIRED")
+	}
+	return s.client.ListWishlistHistory(
+		outgoingPrincipal(ctx, principal),
+		&orchestratorv1.GetWishlistDraftRequest{
+			ResultVersion: req.GetResultVersion(),
+		},
+	)
+}
+
+func (s *Service) RestoreWishlistDraftVersion(
+	ctx context.Context,
+	req *gatewayv1.RestoreWishlistDraftVersionRequest,
+) (*orchestratorv1.WishlistDraftReply, error) {
+	principal, err := s.requirePrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateCSRF(ctx); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.GetResultVersion()) == "" ||
+		req.GetDraftVersion() < 1 ||
+		strings.TrimSpace(req.GetIdempotencyKey()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "DRAFT_RESTORE_INCOMPLETE")
+	}
+	return s.client.RestoreWishlistDraftVersion(
+		outgoingPrincipal(ctx, principal),
+		&orchestratorv1.RestoreWishlistDraftVersionRequest{
+			ResultVersion:  req.GetResultVersion(),
+			DraftVersion:   req.GetDraftVersion(),
+			IdempotencyKey: req.GetIdempotencyKey(),
+		},
+	)
+}
+
+func (s *Service) DeleteWishlist(
+	ctx context.Context,
+	req *gatewayv1.DeleteWishlistRequest,
+) (*orchestratorv1.DeleteWishlistReply, error) {
+	principal, err := s.requirePrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateCSRF(ctx); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.GetResultVersion()) == "" ||
+		strings.TrimSpace(req.GetRequestId()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "WISHLIST_DELETE_INCOMPLETE")
+	}
+	return s.client.DeleteWishlist(
+		outgoingPrincipal(ctx, principal),
+		&orchestratorv1.DeleteWishlistRequest{
+			ResultVersion: req.GetResultVersion(),
+			RequestId:     req.GetRequestId(),
+		},
+	)
+}
+
+func (s *Service) CleanupDormantAccounts(ctx context.Context) error {
+	if s.identity == nil {
+		return nil
+	}
+	accountIDs, err := s.identity.ListDormantAccountIDs(
+		ctx,
+		time.Now().UTC().AddDate(-2, 0, 0),
+	)
+	if err != nil {
+		return err
+	}
+	for _, accountID := range accountIDs {
+		deletion, err := s.client.DeletePrincipalData(
+			outgoingPrincipal(ctx, accountID),
+			&orchestratorv1.DeletePrincipalDataRequest{
+				RequestId: uuid.NewString(),
+			},
+		)
+		if err != nil {
+			return err
+		}
+		if !deletion.GetAccepted() ||
+			deletion.GetStatus() != "DELETION_COMPLETED" {
+			continue
+		}
+		if err := s.identity.CompleteAccountDeletion(ctx, accountID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return "DELETION_FAILED_RETRYABLE"
+}
+
+func (s *Service) RevokeSensitiveConsent(
+	ctx context.Context,
+	_ *gatewayv1.RevokeSensitiveConsentRequest,
+) (*gatewayv1.RevokeSensitiveConsentReply, error) {
+	principal, err := s.requirePrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateCSRF(ctx); err != nil {
+		return nil, err
+	}
+	reply, err := s.client.RevokeSensitiveConsent(
+		outgoingPrincipal(ctx, principal),
+		&orchestratorv1.RevokeSensitiveConsentRequest{},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &gatewayv1.RevokeSensitiveConsentReply{
+		RevokedCount: reply.GetRevokedCount(),
+	}, nil
 }
 
 // RegisterRunEventStream 将 typed RunEvent 流写入标准 SSE；心跳不进入业务序号。
@@ -427,21 +824,51 @@ func resumeRequest(payload resumePayload, confirmation bool) (*orchestratorv1.Re
 				FieldKeys: payload.Answer.FieldKeys,
 			},
 		}
+	case "SELECT_PROVINCES":
+		resume.Answer = &orchestratorv1.ResumeRunRequest_RegionAnswer{
+			RegionAnswer: &orchestratorv1.RegionAnswer{
+				ClarificationId:         payload.Answer.ClarificationID,
+				Provinces:               payload.Answer.Provinces,
+				PresetIds:               payload.Answer.PresetIDs,
+				CatalogVersion:          payload.Answer.RegionCatalogVersion,
+				CancelRegionRestriction: payload.Answer.CancelRegionRestriction,
+			},
+		}
 	default:
 		return nil, status.Error(codes.InvalidArgument, "RESUME_ANSWER_TYPE_UNSUPPORTED")
 	}
 	return resume, nil
 }
 
-func requirePrincipal(ctx context.Context) (string, error) {
+func (s *Service) requirePrincipal(ctx context.Context) (string, error) {
+	if tr, ok := transport.FromServerContext(ctx); ok &&
+		tr.Kind() == transport.KindHTTP {
+		if s.identity == nil {
+			return "", status.Error(codes.Unauthenticated, "PRINCIPAL_REQUIRED")
+		}
+		request, ok := khttp.RequestFromServerContext(ctx)
+		if !ok {
+			return "", status.Error(codes.Unauthenticated, "PRINCIPAL_REQUIRED")
+		}
+		cookie, err := request.Cookie(sessionCookieName)
+		if err != nil || strings.TrimSpace(cookie.Value) == "" {
+			return "", status.Error(codes.Unauthenticated, "PRINCIPAL_REQUIRED")
+		}
+		account, err := s.identity.ResolveSession(ctx, cookie.Value)
+		if errors.Is(err, ErrUnauthenticated) {
+			return "", status.Error(codes.Unauthenticated, "PRINCIPAL_REQUIRED")
+		}
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(account.AccountID) == "" {
+			return "", status.Error(codes.Unauthenticated, "PRINCIPAL_REQUIRED")
+		}
+		return account.AccountID, nil
+	}
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
 		if values := md.Get("x-principal-id"); len(values) > 0 && strings.TrimSpace(values[0]) != "" {
 			return strings.TrimSpace(values[0]), nil
-		}
-	}
-	if tr, ok := transport.FromServerContext(ctx); ok {
-		if principal := strings.TrimSpace(tr.RequestHeader().Get("x-principal-id")); principal != "" {
-			return principal, nil
 		}
 	}
 	return "", status.Error(codes.Unauthenticated, "PRINCIPAL_REQUIRED")

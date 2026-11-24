@@ -281,7 +281,7 @@ func TestIntegration_HistoryCategoryAudit(t *testing.T) {
 				t.Fatal("审计年数不符")
 			}
 			for _, h := range c.Candidate.HistoryData {
-				if h.Year < 2022 || h.Year > 2024 || h.TotalCount <= 0 || h.MinPercentile != float64(h.GroupMinRank)/float64(h.TotalCount) {
+				if h.Year < 2022 || h.Year > 2024 || h.GroupMinScore <= 0 || h.TotalCount <= 0 || h.MinPercentile != float64(h.GroupMinRank)/float64(h.TotalCount) {
 					t.Fatal("历史范围或分母错误")
 				}
 			}
@@ -354,6 +354,33 @@ func TestIntegration_Service_FourRPCs(t *testing.T) {
 	all = append(all, epReply.GetSafeCandidates()...)
 	if len(all) == 0 {
 		t.Fatal("合并候选池为空，无法继续 CheckConstraints/OptimizeWishlist")
+	}
+	var currentPlanMajors, defaultMajors, majorProbabilities int
+	for _, candidate := range all {
+		for _, major := range candidate.GetCandidate().GetMajors() {
+			if !major.GetInCurrentPlan() {
+				continue
+			}
+			currentPlanMajors++
+			if major.PlanCount == nil || *major.PlanCount < 0 {
+				t.Fatalf("专业 %s 缺少报考年计划数", major.GetMajorCode())
+			}
+			if major.GetRecommended() {
+				defaultMajors++
+				if major.GetRecommendationRank() < 1 || major.GetRecommendationRank() > 6 {
+					t.Fatalf("专业 %s 默认顺序 = %d", major.GetMajorCode(), major.GetRecommendationRank())
+				}
+			}
+			if major.AdmissionProbability != nil {
+				majorProbabilities++
+			}
+		}
+	}
+	if currentPlanMajors == 0 || defaultMajors == 0 {
+		t.Fatalf("专业层级字段缺失：current=%d default=%d", currentPlanMajors, defaultMajors)
+	}
+	if majorProbabilities == 0 {
+		t.Error("真实候选未生成任何专业级概率，新增 BatchMajorHistory 可能未接入")
 	}
 
 	// ③ CheckConstraints：候选已在 EstimateProb 内过选科过滤，此处 rejected 应≈0（幂等验证）

@@ -11,12 +11,13 @@ import (
 
 // fakeAdmissionRepo 实现 AdmissionRepo，供 EstimateProb 编排测试（无需 DB）。
 type fakeAdmissionRepo struct {
-	candidates []Candidate
-	historyMap map[GroupKey][]AdmissionRecord
-	planMap    map[GroupKey]PlanChange
-	loadErr    error
-	historyErr error
-	planErr    error
+	candidates      []Candidate
+	historyMap      map[GroupKey][]AdmissionRecord
+	majorHistoryMap map[MajorKey][]MajorAdmissionRecord
+	planMap         map[GroupKey]PlanChange
+	loadErr         error
+	historyErr      error
+	planErr         error
 	// 记录入参，验证编排传参（batch 默认本科批、year 口径）
 	gotBatch string
 	gotYear  int
@@ -36,6 +37,10 @@ func (f *fakeAdmissionRepo) BatchGroupHistory(ctx context.Context, releaseID, pr
 		return nil, f.historyErr
 	}
 	return f.historyMap, nil
+}
+
+func (f *fakeAdmissionRepo) BatchMajorHistory(ctx context.Context, releaseID, province, category, batch string, year, windowYears int) (map[MajorKey][]MajorAdmissionRecord, error) {
+	return f.majorHistoryMap, nil
 }
 
 func (f *fakeAdmissionRepo) BatchGroupPlan(ctx context.Context, releaseID, province, category string, year, prevYear int) (map[GroupKey]PlanChange, error) {

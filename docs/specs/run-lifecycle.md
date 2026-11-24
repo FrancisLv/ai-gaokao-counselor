@@ -9,7 +9,7 @@
 
 ## 1. Module
 
-`RunLifecycle` 是一个深模块：对外只暴露五个操作，内部隐藏状态机、租约、幂等、事件序号、中断消费、检查点关联和发布条件。
+`RunLifecycle` 是一个深模块：对外暴露运行命令、事件读取与对话历史操作，内部隐藏状态机、租约、幂等、事件序号、中断消费、检查点关联和发布条件。
 
 worker 的正式发布使用内部命令 `PublishFormalResult`。它不是新增客户端入口：
 调用方只提交绑定当前 run 的 `EvidencePackage`，`RunLifecycle` 通过唯一
@@ -22,6 +22,9 @@ ResumeRun(command)  -> RunReceipt
 WatchRun(query)     -> stream<RunEvent>
 GetRun(query)       -> RunView
 CancelRun(command)  -> RunReceipt
+ListSessions(query) -> tuple<ChatSessionSummary>
+GetSession(query)   -> ChatSessionView
+SubmitConversationMessage(command) -> ConversationSubmission
 ```
 
 这个 seam 是 caller 和测试共同使用的接口。Gateway、worker 和测试不得绕过它直接修改 run 状态。
@@ -41,6 +44,17 @@ Principal
 Session
   session_id: UUID
   principal_id
+  title
+  created_at
+
+ChatMessage
+  message_id: UUID
+  session_id
+  run_id: UUID | null
+  role: USER | ASSISTANT | SYSTEM
+  kind: TEXT | PROGRESS | RESULT | ERROR
+  content
+  metadata
   created_at
 
 Run
@@ -71,6 +85,8 @@ Run
 - `principal_id` 只来自可信认证上下文，不接受请求正文自称。
 - `session_id` 是容器，不是恢复幂等键。
 - 一个 session 可有多个 run；修订和新生成都创建新 run。
+- 用户可见消息保存在 `chat_message`；`run_event` 仍是执行审计事件，两者不能互相冒充。
+- 历史列表与详情只按可信 `principal_id` 读取；消息正文不进入 gateway 业务裁决。
 - `state_version` 每次对外可见状态变化递增，用于乐观并发控制。
 - `lease_epoch` 每次 worker 取得执行权递增；旧 epoch 不得提交状态、事件或结果。
 - `release_id` 在 `SubmitRun` 时绑定当前有效 release；绑定后不可变。范围变化必须创建新 run。
@@ -256,6 +272,53 @@ Interrupt
 - 服务端不得根据自由文本猜测用户是在确认还是改分数字段。
 - interrupt 必须“先有 durable checkpoint，后对外可见”。
 
+### 6.1 报告后继续对话
+
+- 解释类输入创建绑定父 `V1_FORMAL` 的 `EXPLAIN_RESULT` run；不重新计算候选、概率或排序。
+- 省份、城市、专业、学校层次、院校排除、风险偏好等筛选变化创建 `REVISE_PLAN` run，并记录
+  `parent_result_version`。
+- 专业表达分为软兴趣与硬限定：“想学 / 喜欢 / 感兴趣”只写
+  `preferences.major_interests`；“只看 / 仅限 / 必须”才写
+  `preferences.required_major_names`。相关专业扩围必须由用户明确接受，不能从
+  “物理学”静默扩展为应用物理学等名称。
+- 明确否定表达（如“不想去北京”“不想学物理学专业”）直接形成画像 patch，不先追问
+  解释或重做；问号、语气词不能覆盖明确筛选语义。
+- 精确专业排除与专业关键词排除是不同字段；用户指定“物理学专业”时不能误伤名称相近
+  或包含该词的其它专业。
+- 修订沿用同一 session，旧结果不可变；新结果必须重新确认画像并走完整资格、算法、
+  Verifier 与正式发布门禁。
+- 意图采用确定性规则优先；无法可靠区分时可调用受限 LLM 分类器输出
+  `EXPLAIN_RESULT / REVISE_PLAN / CLARIFY` 和结构化 patch。LLM 不可用、输出越界或
+  服务端校验失败时返回澄清消息，不猜测为修订或解释。
+- deterministic 产生零变化 patch 后仍进入一次 LLM 兜底；意图模型只收到当前风险偏好和
+  冲/稳/保数量摘要。“增加几个冲”映射为偏冲刺，不生成任意数量。
+- 天气、编程、娱乐等无关问题返回 `off_topic`；其他省份、年份、考研、留学、艺术体育
+  等返回 `out_of_scope`。两者只写对话历史，不创建 run、不改变画像或报告。
+- 自伤、自杀、现实人身危险等输入返回 `safety_support`，不调用普通意图分类。
+- “北方”“南方”“华南”等大区表达进入 `SELECT_PROVINCES` 结构化澄清；首次画像
+  在 `INTAKE_ASK` 中断中等待，报告后不创建 `REVISE_PLAN`。用户确认具体省份后才写
+  `required_provinces / excluded_provinces`；未解决原因固定为
+  `MACRO_REGION_SCOPE_UNRESOLVED`，只有明确取消限制才可继续。
+- 首次生成允许目标档候选不足并以结构化告警发布；已有报告后的明确增档修订若目标档
+  实际数量未增加，以 `TARGET_ALLOCATION_UNSATISFIED` 终止且不发布新版。
+- 用户调整拟填院校专业组、专业组顺序或组内拟填专业时，不创建 `REVISE_PLAN`；系统保存独立
+  `wishlist_draft_version`，绑定父 `result_version + release_id`。草稿保存 1–45 个正式报告
+  候选组的非空子集（可等于全集），并保留用户组顺序；正式报告、候选身份、组级概率和专业级概率保持不变。
+- 专业组集合或顺序变化后，RunLifecycle 调用 algo `SummarizeWishlistDraft`，仅用草稿保留组的
+  已验证概率和效用重算组数、冲稳保数量、稳拿保底、滑档率与期望满意度。风险不足允许保存并告警，
+  不自动补回已移出的组。
+- 草稿显式保存并携带 expected version：首次创建为 0，后续版本不匹配返回
+  `DRAFT_VERSION_CONFLICT`；相同幂等键与相同内容重放返回原版本，不同内容返回
+  `IDEMPOTENCY_CONFLICT`。
+- 保存时要求推荐中的每个组均保留 1–6 个不重复、资格 PASS 且属于该 release 报考年
+  计划的专业；空组、未知专业、不可填专业或超过 6 个均返回 `DRAFT_SELECTION_INVALID`。
+- 旧版正式报告缺少结构化专业字段时返回 `REPORT_STRUCTURED_MAJORS_MISSING`，提示重新生成，
+  不从报告正文正则猜测专业资格。
+- LLM 调用失败不得阻断确定性推荐主流程。报告叙事失败退回
+  `DETERMINISTIC_FALLBACK` 并在正式报告中记录原因；意图失败退回规则/澄清并在消息
+  metadata 记录降级。模型输出不得冒充确定性事实。
+- 对话消息默认保留 30 天；保留清理删除正文，principal 删除由 session 级联清理。
+
 ## 7. Idempotency 与 Receipt
 
 幂等作用域：
@@ -308,6 +371,7 @@ expires_at
 | `run_evidence_package` | `V1_FORMAL` 已剥离证据包正文与输入/发布摘要，insert-only |
 | `run_verification_report` | `V1_FORMAL` 完整 `VerificationReport` 与摘要，insert-only |
 | `run_result_state_event` | 发布结果后的 `ACTIVE / STALE` 独立追加状态 |
+| `wishlist_draft_version` | 绑定正式结果的不可变拟填院校专业组草稿版本、用户组顺序、组内专业、算法风险摘要、幂等键与内容摘要；不属于正式推荐结果 |
 | `data_retention_policy` | 版本化 7/30/180 天保留策略与 DELETE/DEIDENTIFY 动作 |
 | `data_retention_sweep` / `data_retention_ledger` | 保留清理的非敏感审计、逐资源结果与行数 |
 

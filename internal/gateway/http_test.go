@@ -42,12 +42,26 @@ func newGatewayHTTPServerWithOptions(
 ) *httptest.Server {
 	t.Helper()
 	server := khttp.NewServer()
-	service := NewService(client)
+	service := newServiceWithIdentity(client, testIdentity{}, AuthOptions{
+		CookieSecure: false,
+	})
 	gatewayv1.RegisterGatewayHTTPServer(server, service)
 	RegisterRunEventStream(server, service, options)
 	ts := httptest.NewServer(server)
 	t.Cleanup(ts.Close)
 	return ts
+}
+
+func authenticateRequest(req *http.Request, principal string) {
+	req.AddCookie(&http.Cookie{
+		Name:  sessionCookieName,
+		Value: "test:" + principal,
+	})
+	req.AddCookie(&http.Cookie{
+		Name:  csrfCookieName,
+		Value: "test-csrf",
+	})
+	req.Header.Set("X-CSRF-Token", "test-csrf")
 }
 
 func newGatewayHTTPServer(t *testing.T, client runClient) *httptest.Server {
@@ -67,7 +81,7 @@ func TestCreatePlanReturnsRunIDThroughHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-principal-id", "principal-a")
+	authenticateRequest(req, "principal-a")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -109,7 +123,7 @@ func TestCreatePolicyQueryReturnsRunIDThroughHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-principal-id", "principal-policy")
+	authenticateRequest(req, "principal-policy")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -135,7 +149,7 @@ func TestGetRunReturnsResumeContextThroughHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("x-principal-id", "principal-a")
+	authenticateRequest(req, "principal-a")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -209,7 +223,7 @@ func TestGetRunReturnsPolicyEvidenceThroughHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("x-principal-id", "principal-policy")
+	authenticateRequest(req, "principal-policy")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -257,7 +271,7 @@ func TestCancelRunReturnsReceiptThroughHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-principal-id", "principal-a")
+	authenticateRequest(req, "principal-a")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -299,7 +313,7 @@ func TestCancelTerminalRunPassesStableReasonThroughHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-principal-id", "principal-a")
+	authenticateRequest(req, "principal-a")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -359,7 +373,7 @@ func TestWatchRunResumesAfterLastEventIDThroughSSE(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("x-principal-id", "principal-a")
+	authenticateRequest(req, "principal-a")
 	req.Header.Set("Last-Event-ID", "1")
 
 	resp, err := http.DefaultClient.Do(req)
@@ -415,7 +429,7 @@ func TestWatchRunUsesQueryCursorInsteadOfHeaderThroughSSE(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("x-principal-id", "principal-a")
+	authenticateRequest(req, "principal-a")
 	req.Header.Set("Last-Event-ID", "1")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -443,7 +457,7 @@ func TestSSEHeartbeatDoesNotConsumeEventID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("x-principal-id", "principal-a")
+	authenticateRequest(req, "principal-a")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -476,6 +490,166 @@ func TestGetRunRequiresTrustedPrincipal(t *testing.T) {
 	}
 }
 
+func TestListSessionsReturnsPersistedConversationSummaries(t *testing.T) {
+	client := &fakeRunClient{}
+	ts := newGatewayHTTPServer(t, client)
+	req, err := http.NewRequest(
+		http.MethodGet,
+		ts.URL+"/v1/sessions?limit=10",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticateRequest(req, "principal-a")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if client.listReq.GetLimit() != 10 {
+		t.Fatalf("limit = %d", client.listReq.GetLimit())
+	}
+	if client.sessionMeta.Get("x-principal-id")[0] != "principal-a" {
+		t.Fatalf("principal metadata = %v", client.sessionMeta)
+	}
+	if len(got["sessions"].([]any)) != 1 {
+		t.Fatalf("sessions = %#v", got["sessions"])
+	}
+}
+
+func TestGetSessionReturnsMessagesAndRuns(t *testing.T) {
+	client := &fakeRunClient{}
+	ts := newGatewayHTTPServer(t, client)
+	req, err := http.NewRequest(
+		http.MethodGet,
+		ts.URL+"/v1/sessions/00000000-0000-0000-0000-000000000002",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticateRequest(req, "principal-a")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if client.sessionReq.GetSessionId() != "00000000-0000-0000-0000-000000000002" {
+		t.Fatalf("session id = %q", client.sessionReq.GetSessionId())
+	}
+	if len(got["messages"].([]any)) != 1 {
+		t.Fatalf("messages = %#v", got["messages"])
+	}
+}
+
+func TestSaveWishlistDraftRoutesThroughHTTP(t *testing.T) {
+	client := &fakeRunClient{}
+	ts := newGatewayHTTPServer(t, client)
+	body := []byte(`{
+		"result_version":"00000000-0000-0000-0000-000000000010",
+		"expected_version":0,
+		"idempotency_key":"draft-http-save",
+		"groups":[{
+			"university_code":"1001",
+			"major_group":"03",
+			"major_codes":["080901","080902"]
+		}]
+	}`)
+	req, err := http.NewRequest(
+		http.MethodPost,
+		ts.URL+"/v1/results/00000000-0000-0000-0000-000000000010/wishlist-draft",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	authenticateRequest(req, "principal-draft")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d body=%s", resp.StatusCode, payload)
+	}
+	if client.draftReq.GetIdempotencyKey() != "draft-http-save" {
+		t.Fatalf("idempotency_key = %q", client.draftReq.GetIdempotencyKey())
+	}
+	if got := client.draftReq.Groups[0].GetMajorCodes(); len(got) != 2 {
+		t.Fatalf("major_codes = %v", got)
+	}
+	if got := client.sessionMeta.Get("x-principal-id"); len(got) != 1 || got[0] != "principal-draft" {
+		t.Fatalf("principal metadata = %v", got)
+	}
+}
+
+func TestSubmitConversationMessageRoutesToRevision(t *testing.T) {
+	client := &fakeRunClient{}
+	ts := newGatewayHTTPServer(t, client)
+	body := []byte(`{
+		"session_id":"00000000-0000-0000-0000-000000000002",
+		"profile_input":{
+			"province":"湖南",
+			"application_year":2025,
+			"category":"物理类",
+			"batch":"本科批",
+			"score":612,
+			"subjects":["物理","化学","生物"]
+		},
+		"parent_result_version":"00000000-0000-0000-0000-000000000006",
+		"message_text":"不要武汉，只看计算机",
+		"idempotency_key":"conversation-1"
+	}`)
+	req, err := http.NewRequest(
+		http.MethodPost,
+		ts.URL+"/v1/sessions/00000000-0000-0000-0000-000000000002/messages",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	authenticateRequest(req, "principal-a")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if client.messageReq.GetMessageText() != "不要武汉，只看计算机" {
+		t.Fatalf("message = %q", client.messageReq.GetMessageText())
+	}
+	if client.messageReq.GetParentResultVersion() != "00000000-0000-0000-0000-000000000006" {
+		t.Fatalf(
+			"parent result = %q",
+			client.messageReq.GetParentResultVersion(),
+		)
+	}
+}
+
 func TestConfirmProfileReturnsRunIDThroughHTTP(t *testing.T) {
 	client := &fakeRunClient{}
 	ts := newGatewayHTTPServer(t, client)
@@ -491,7 +665,7 @@ func TestConfirmProfileReturnsRunIDThroughHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-principal-id", "principal-a")
+	authenticateRequest(req, "principal-a")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -524,7 +698,7 @@ func TestBackfillProfileReturnsRunIDThroughHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-principal-id", "principal-a")
+	authenticateRequest(req, "principal-a")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -555,7 +729,7 @@ func TestDoubleConfirmUsesOneIdempotencyKeyThroughHTTP(t *testing.T) {
 			t.Fatal(err)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("x-principal-id", "principal-a")
+		authenticateRequest(req, "principal-a")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)

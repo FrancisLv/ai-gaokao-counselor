@@ -369,6 +369,70 @@ class EligibilityRunLifecycleTests(RunLifecyclePostgresTest):
         self.assertIsNone(completed.result)
         self.assertIsNone(completed.formal_result)
 
+    async def test_failed_diagnostic_groups_are_excluded_from_formal_qualification(self):
+        eligible = _candidate("U001")
+        failed = _candidate("U002")
+        reply = algo_pb2.EvaluateEligibilityReply(
+            status=algo_pb2.EligibilityResultStatus.ELIGIBILITY_RESULT_STATUS_COMPLETE,
+            groups=[
+                _group(
+                    "U001",
+                    algo_pb2.GroupEligibilityStatus.GROUP_ELIGIBILITY_STATUS_PASS,
+                    [
+                        algo_pb2.MajorEligibility(
+                            major_code="M01",
+                            status=algo_pb2.MajorEligibilityStatus.MAJOR_ELIGIBILITY_STATUS_PASS,
+                        )
+                    ],
+                ),
+                _group(
+                    "U002",
+                    algo_pb2.GroupEligibilityStatus.GROUP_ELIGIBILITY_STATUS_FAIL,
+                    [
+                        algo_pb2.MajorEligibility(
+                            major_code="M01",
+                            status=algo_pb2.MajorEligibilityStatus.MAJOR_ELIGIBILITY_STATUS_FAIL,
+                            failure_rule_keys=["SUBJECT_REQUIREMENT"],
+                        )
+                    ],
+                ),
+            ],
+            coverage=[
+                algo_pb2.EligibilityRuleCoverage(
+                    rule_type="SUBJECT_REQUIREMENT",
+                    status=algo_pb2.RuleCoverageStatus.RULE_COVERAGE_STATUS_FULL,
+                    covered_data_sources=["2025 admissions plan"],
+                )
+            ],
+            diagnostics=algo_pb2.EligibilityDiagnostics(
+                evaluated_rule_count=1,
+                unknown_count=0,
+            ),
+        )
+        algo = EligibilityAlgo([eligible, failed], reply)
+
+        _, _, _, completed = await self._run_preview(
+            algo,
+            "failed-diagnostic",
+        )
+
+        self.assertEqual(completed.state, "SUCCEEDED", completed.terminal_reason)
+        self.assertEqual(
+            [item.candidate.university_code for item in algo.calls[3][1].candidates],
+            ["U001"],
+        )
+        qualification = next(
+            section
+            for section in completed.formal_result.report["sections"]
+            if section["section_key"] == "qualification"
+        )
+        self.assertIn("U001|01=PASS", qualification["body"])
+        self.assertNotIn("U002|01", qualification["body"])
+        self.assertEqual(
+            completed.formal_result.verification_report["status"],
+            "PASS",
+        )
+
     async def test_pass_partial_group_remains_eligible_with_restricted_majors(self):
         source = _candidate("U001", major_codes=("M01", "M02"))
         reply = algo_pb2.EvaluateEligibilityReply(

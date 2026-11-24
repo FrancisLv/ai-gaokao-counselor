@@ -173,6 +173,13 @@ class FormalResultPayload(TypedDict):
     stale_reason: str | None
 
 
+class ExplainResultPayload(TypedDict):
+    result_version: str
+    result_kind: str
+    parent_result_version: str
+    answer: str
+
+
 RunEventPayload = (
     dict[str, Any]
     | ProgressPayload
@@ -193,6 +200,23 @@ class StructuredProfileInput:
     rank: int | None = None
     school_ids: tuple[str, ...] = ()
     document_types: tuple[str, ...] = ()
+    risk_appetite: str = ""
+    priority_dims: tuple[str, ...] = ()
+    interests: tuple[str, ...] = ()
+    preferred_cities: tuple[str, ...] = ()
+    preferred_tiers: tuple[str, ...] = ()
+    required_provinces: tuple[str, ...] = ()
+    excluded_provinces: tuple[str, ...] = ()
+    required_cities: tuple[str, ...] = ()
+    excluded_cities: tuple[str, ...] = ()
+    required_tiers: tuple[str, ...] = ()
+    required_major_keywords: tuple[str, ...] = ()
+    required_major_names: tuple[str, ...] = ()
+    excluded_major_keywords: tuple[str, ...] = ()
+    excluded_major_names: tuple[str, ...] = ()
+    excluded_universities: tuple[str, ...] = ()
+    # 仅服务端生成的执行要求，不进入画像确认或 algo 画像输入。
+    allocation_request: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,12 +232,24 @@ class PolicyQaInput:
 
 
 @dataclass(frozen=True, slots=True)
+class ChatMessageInput:
+    client_message_id: str
+    role: str
+    kind: str
+    content: str
+    metadata: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SubmitRunCommand:
     principal_id: str
     session_id: UUID | None
     task_kind: TaskKind
     input: StructuredProfileInput | PolicyQaInput
     idempotency_key: str
+    parent_result_version: UUID | None = None
+    messages: tuple[ChatMessageInput, ...] = ()
+    user_message: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,11 +272,21 @@ class DeclineFieldsAnswer:
     field_keys: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RegionAnswer:
+    clarification_id: str
+    provinces: tuple[str, ...]
+    preset_ids: tuple[str, ...]
+    catalog_version: str
+    cancel_region_restriction: bool = False
+
+
 ResumeAnswer = (
     AnswerFields
     | ConfirmProfileAnswer
     | RejectOrEditProfileAnswer
     | DeclineFieldsAnswer
+    | RegionAnswer
 )
 
 
@@ -282,6 +328,120 @@ class ResultReference:
 
 
 @dataclass(frozen=True, slots=True)
+class ChatMessage:
+    message_id: UUID
+    session_id: UUID
+    run_id: UUID | None
+    role: str
+    kind: str
+    content: str
+    metadata: dict[str, Any]
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRunSummary:
+    run_id: UUID
+    task_kind: TaskKind
+    state: RunState
+    stage: str
+    terminal_reason: str | None
+    parent_result_version: UUID | None
+    result_version: UUID | None
+    result_kind: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ChatSessionSummary:
+    session_id: UUID
+    title: str
+    latest_run_id: UUID | None
+    latest_state: str
+    latest_result_version: UUID | None
+    latest_result_kind: str | None
+    run_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ChatSessionView:
+    summary: ChatSessionSummary
+    messages: tuple[ChatMessage, ...]
+    runs: tuple[SessionRunSummary, ...]
+    profile_fields: ProfileFields
+
+
+@dataclass(frozen=True, slots=True)
+class WishlistDraftGroup:
+    university_code: str
+    major_group: str
+    major_codes: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class WishlistDraftRisk:
+    group_count: int
+    rush_count: int
+    stable_count: int
+    safe_tier_count: int
+    safe_guard_count: int
+    safe_guard_target: int
+    safe_guard_ok: bool
+    slip_rate: float
+    expected_satisfaction: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class WishlistDraft:
+    draft_version_id: UUID
+    result_version: UUID
+    run_id: UUID
+    release_id: str
+    draft_version: int
+    groups: tuple[WishlistDraftGroup, ...]
+    created_at: datetime
+    risk: WishlistDraftRisk | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WishlistSummary:
+    draft_version_id: UUID
+    result_version: UUID
+    run_id: UUID
+    release_id: str
+    draft_version: int
+    title: str
+    application_year: int
+    category: str
+    batch: str
+    group_count: int
+    major_count: int
+    status: str
+    stale_reason: str | None
+    successor_run_id: UUID | None
+    saved_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class WishlistDeletionReceipt:
+    deleted: bool
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationSubmission:
+    session_id: UUID
+    run_id: UUID | None
+    task_kind: TaskKind | None
+    status: str
+    assistant_message: str
+    region_clarification: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class InterruptView:
     interrupt_id: UUID
     kind: str
@@ -315,6 +475,8 @@ class RunView:
         | None
     )
     formal_result: FormalResultView | None
+    parent_result_version: UUID | None
+    conversation_answer: str | None
     created_at: datetime
     updated_at: datetime
     expires_at: datetime

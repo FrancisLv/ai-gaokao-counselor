@@ -26,6 +26,7 @@ MIGRATIONS = (
     "migrations/24_eligibility_profile_fields.sql",
     "migrations/25_rule_coverage_contract.sql",
     "migrations/26_release_bound_profile_fields.sql",
+    "migrations/44_macro_region_catalog.sql",
 )
 
 

@@ -32,11 +32,21 @@ type RankQuery struct {
 
 // UserProfile 用户画像（用于效用打分）。
 type UserProfile struct {
-	RiskAppetite    string   // 风险偏好：conservative/balanced/aggressive
-	PriorityDims    []string // 优先维度：["tier", "major", "location", "strength"]
-	Interests       []string // 兴趣专业方向（utility 专业匹配用，由 LLM 从对话提取）
-	PreferredCities []string // 偏好城市
-	PreferredTiers  []string // 偏好学校层次：["985", "211", "双一流"]
+	RiskAppetite          string   // 风险偏好：conservative/balanced/aggressive
+	PriorityDims          []string // 优先维度：["tier", "major", "location", "strength"]
+	Interests             []string // 兴趣专业：服务端确认的受控专业名称
+	PreferredCities       []string // 偏好城市
+	PreferredTiers        []string // 偏好学校层次：["985", "211", "双一流"]
+	RequiredProvinces     []string // 硬筛选：只看院校所在这些省份
+	ExcludedProvinces     []string // 硬筛选：排除院校所在这些省份
+	RequiredCities        []string // 硬筛选：只看这些城市
+	ExcludedCities        []string // 硬筛选：排除这些城市
+	RequiredTiers         []string // 硬筛选：只看这些学校层次
+	RequiredMajorNames    []string // 硬筛选：按专业名称精确匹配
+	RequiredMajorKeywords []string // 硬筛选：保留组内命中的专业
+	ExcludedMajorKeywords []string // 硬筛选：移除组内命中的专业
+	ExcludedMajorNames    []string // 硬筛选：按专业名称精确排除
+	ExcludedUniversities  []string // 硬筛选：排除名称命中的院校
 	// 注：CareerGoal 已删除（死参数，YAGNI）。
 }
 
@@ -64,36 +74,70 @@ type Candidate struct {
 	Province       string        // 省份（utility 地域"同省"判断用）
 	SubjectReq     []string      // 选科要求
 	// 学校实力/升学资源（来自 university 表，utility 打分用）
-	NumMaster      int  // 硕士点数量
-	NumDoctor      int  // 博士点数量
-	RuankeRank     int  // 软科排名
-	PlanCount      int  // 报考年该院校专业组计划数
-	PlanCountKnown bool // false 表示计划数 UNKNOWN，不得按 0 处理
+	NumMaster              int  // 硕士点数量
+	NumDoctor              int  // 博士点数量
+	RuankeRank             int  // 软科排名
+	PlanCount              int  // 报考年该院校专业组计划数
+	PlanCountKnown         bool // false 表示计划数 UNKNOWN，不得按 0 处理
+	PreviousPlanCount      int
+	PreviousPlanCountKnown bool
+	PlanAdjustFactor       *float64 // Deprecated：兼容保留，当前不生成
 	// 历史录取数据（由 service 层填充）
 	HistoryData []AdmissionRecord
 }
 
 // AdmissionRecord 某年录取记录（专业组维度）。
 type AdmissionRecord struct {
-	Year          int     // 所属年份（落在窗口 [year-W, year-1] 内，不含报考年）
-	GroupMinRank  int     // 组投档线位次（组内最低位次）
-	TotalCount    int     // 该省该年总人数（用于算百分位）
-	MinPercentile float64 // 组投档线百分位 = GroupMinRank / TotalCount
-	EnrollCount   int     // 招生人数
+	Year              int     // 所属年份（落在窗口 [year-W, year-1] 内，不含报考年）
+	GroupMinScore     int     // 专业组最低录取分（组内最低分）
+	GroupMinRank      int     // 同一专业组最低分记录的最低录取位次
+	TotalCount        int     // 该省该年总人数（用于算百分位）
+	MinPercentile     float64 // 组投档线百分位 = GroupMinRank / TotalCount
+	EnrollCount       int     // 招生人数
+	MappingMethod     string  // EXACT_CODE / MAJOR_NAME_JACCARD
+	MappingConfidence float64 // 跨年组身份映射置信度
 }
 
 // MajorDetail 组内专业详情（major_admission JOIN major）。
 type MajorDetail struct {
-	MajorCode     string  // 专业代码
-	MajorName     string  // 专业名称
-	SubjectReq    string  // 选科要求，如"首选物理，再选不限"
-	Duration      string  // 学制，如"四年"（来自 major 表）
-	Tuition       float64 // 学费（元/年，来自 major 表）
-	MajorNote     string  // 备注，如"（卓越班）"、中外合作等
-	MinScore      int     // 该专业历史最低分（专业级参考）
-	MinRank       int     // 该专业历史最低位次（仅展示，不用于概率计算）
-	AdmitCount    int     // 录取人数
-	InCurrentPlan bool    // 该专业代码是否存在于报考年招生计划
+	MajorCode              string   // 专业代码
+	MajorName              string   // 专业名称
+	SubjectReq             string   // 选科要求，如"首选物理，再选不限"
+	Duration               string   // 学制，如"四年"（来自 major 表）
+	Tuition                float64  // 学费（元/年，来自 major 表）
+	HasTuition             bool     // tuition 是否可靠；false 时不得展示为零学费
+	MajorNote              string   // 备注，如"（卓越班）"、中外合作等
+	MinScore               int      // 最近可映射同代码专业历史最低分
+	MinRank                int      // 最近可映射同代码专业历史最低位次
+	ReferenceYear          int      // MinScore/MinRank 对应历史年份；0=UNKNOWN
+	AdmitCount             int      // 上一年同代码专业实际录取人数
+	PlanCount              *int     // 报考年该专业招生计划数
+	AdmissionProbability   *float64 // 专业级历史估计；nil=UNKNOWN
+	ProbabilityDataYears   int      // 专业级概率有效历史年数
+	ProbabilitySampleYears []int    // 专业级概率有效历史年份（升序）
+	Recommended            bool     // 是否属于系统默认拟填专业
+	RecommendationRank     int      // 默认拟填顺序 1..6；0=未推荐
+	Selectable             bool     // 资格是否允许选入志愿草稿
+	UnavailableReason      string   // 不可选原因
+	InCurrentPlan          bool     // 该专业代码是否存在于报考年招生计划
+}
+
+// MajorKey 是组内专业稳定身份。
+type MajorKey struct {
+	UniversityCode string
+	MajorGroup     string
+	MajorCode      string
+}
+
+// MajorAdmissionRecord 是同代码专业在映射历史组中的一个年度参考。
+type MajorAdmissionRecord struct {
+	Year          int
+	MajorName     string
+	MinScore      int
+	MinRank       int
+	AdmitCount    int
+	TotalCount    int
+	MinPercentile float64
 }
 
 // Category 分档标签（ProbEstimate.Category 取值；单一真相源，prob/optimize 共用，§3.2/§3.5）。
@@ -147,6 +191,28 @@ type OptimizationReport struct {
 	ExpectedSatisfaction float64 // 期望满意度 = 志愿表效用分均值
 }
 
+// DraftGroupRiskInput 是用户已选专业组的最小风险汇总输入。
+type DraftGroupRiskInput struct {
+	UniversityCode string
+	MajorGroup     string
+	Probability    float64
+	Category       string
+	UtilityScore   *float64
+}
+
+// WishlistDraftRisk 是专业组级志愿草稿的确定性风险摘要。
+type WishlistDraftRisk struct {
+	GroupCount           int
+	RushCount            int
+	StableCount          int
+	SafeTierCount        int
+	SafeGuardCount       int
+	SafeGuardTarget      int
+	SafeGuardOK          bool
+	SlipRate             float64
+	ExpectedSatisfaction *float64
+}
+
 // AuditBasis 全局审计依据（对应 pb.AuditBasis，EstimateProbReply.basis 返回）。
 type AuditBasis struct {
 	UserRank       int     // 用户位次
@@ -191,7 +257,7 @@ type RecommendConfig struct {
 
 	// 分档参数
 	DecayFactor     float64 // 时效衰减（默认 0.7）
-	PlanAdjust      float64 // 计划修正因子（默认 0.5）
+	PlanAdjust      float64 // Deprecated：兼容配置读取，当前不参与概率计算
 	RushThreshold   float64 // 冲阈值（默认 0.2）
 	StableThreshold float64 // 稳阈值（默认 0.5）
 	SafeThreshold   float64 // 保阈值（默认 0.8）

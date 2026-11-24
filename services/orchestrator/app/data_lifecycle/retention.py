@@ -233,6 +233,11 @@ class DataRetention:
                         JOIN run_result rr ON rr.run_id = r.run_id
                         WHERE r.state = 'SUCCEEDED'
                           AND r.updated_at < %s
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM wishlist_draft_version AS draft
+                              WHERE draft.run_id = r.run_id
+                          )
                         """,
                         (cutoff,),
                     )
@@ -314,6 +319,11 @@ class DataRetention:
                             'SUCCEEDED', 'FAILED', 'EXPIRED', 'CANCELLED'
                         )
                           AND updated_at < %s
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM wishlist_draft_version AS draft
+                              WHERE draft.run_id = run.run_id
+                          )
                         """,
                         (cutoff,),
                     )
@@ -337,6 +347,13 @@ class DataRetention:
                                 'SUCCEEDED', 'FAILED', 'EXPIRED', 'CANCELLED'
                             )
                             AND updated_at < %s
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM run AS saved_run
+                            JOIN wishlist_draft_version AS draft
+                              ON draft.run_id = saved_run.run_id
+                            WHERE saved_run.session_id = run.session_id
                         )
                         """,
                         (candidate_session_ids, cutoff),
@@ -363,7 +380,13 @@ class DataRetention:
                     (run_ids,),
                 )
                 sessions = 0
+                messages = 0
                 if session_ids:
+                    message_result = await conn.execute(
+                        "DELETE FROM chat_message WHERE session_id = ANY(%s::uuid[])",
+                        (session_ids,),
+                    )
+                    messages = message_result.rowcount
                     result = await conn.execute(
                         """
                         UPDATE chat_session
@@ -372,13 +395,14 @@ class DataRetention:
                             profile = NULL,
                             status = 'retention_expired',
                             current_node = NULL,
+                            title = NULL,
                             updated_at = NOW()
                         WHERE id = ANY(%s::uuid[])
                         """,
                         (session_ids,),
                     )
                     sessions = result.rowcount
-                return interrupts.rowcount + runs.rowcount + sessions
+                return interrupts.rowcount + runs.rowcount + messages + sessions
         finally:
             await conn.close()
 

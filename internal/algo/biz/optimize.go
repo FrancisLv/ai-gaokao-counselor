@@ -80,6 +80,20 @@ func (u *OptimizeUsecase) OptimizeWishlist(ctx context.Context, candidates []Can
 	return OptimizeWishlist(withScore, params)
 }
 
+// SummarizeWishlistDraft 汇总用户已选组；不重排、不补组，也不修改任何概率。
+func (u *OptimizeUsecase) SummarizeWishlistDraft(
+	ctx context.Context,
+	groups []DraftGroupRiskInput,
+) (WishlistDraftRisk, error) {
+	if err := ctx.Err(); err != nil {
+		return WishlistDraftRisk{}, err
+	}
+	if u.configErr != nil {
+		return WishlistDraftRisk{}, u.configErr
+	}
+	return SummarizeWishlistDraft(groups, u.defaultProps)
+}
+
 // RatioFromRisk 风险偏好 → 冲稳保配比（纯函数，实现 §3.6 表；Q20/DR2）。
 // 空/未知 risk → balanced 默认（防御，不报错）。
 func RatioFromRisk(risk string) RatioConfig {
@@ -138,6 +152,81 @@ func OptimizeWishlist(candidates []CandidateWithScore, params OptimizeParams) (W
 	report.StableCount = countByCategory(wishlist, CategoryStable)
 
 	return WishlistResult{Candidates: wishlist, Report: report}, nil
+}
+
+// SummarizeWishlistDraft 对用户选定顺序的组集合计算草稿风险。
+// 组数与保底目标遵守同一优化配置；风险不足只通过 SafeGuardOK=false 表达，不拒绝用户保存。
+func SummarizeWishlistDraft(
+	groups []DraftGroupRiskInput,
+	params OptimizeParams,
+) (WishlistDraftRisk, error) {
+	if err := validateOptimizeParams(params); err != nil {
+		return WishlistDraftRisk{}, err
+	}
+	limit := params.MaxWishlistSize
+	if limit <= 0 {
+		limit = defaultMaxWishlistSize
+	}
+	if len(groups) < 1 || len(groups) > limit {
+		return WishlistDraftRisk{}, errs.ErrInvalidCandidate
+	}
+	threshold := params.SafeGuardThreshold
+	if threshold <= 0 {
+		threshold = defaultSafeGuardThreshold
+	}
+
+	seen := make(map[GroupKey]struct{}, len(groups))
+	summary := WishlistDraftRisk{
+		GroupCount:      len(groups),
+		SafeGuardTarget: params.MinSafeCount,
+		SlipRate:        1,
+	}
+	utilitySum := 0.0
+	utilityCount := 0
+	for _, group := range groups {
+		if group.UniversityCode == "" || group.MajorGroup == "" ||
+			!finite(group.Probability) ||
+			group.Probability < 0.01 ||
+			group.Probability > 0.99 {
+			return WishlistDraftRisk{}, errs.ErrInvalidCandidate
+		}
+		key := GroupKey{
+			UniversityCode: group.UniversityCode,
+			MajorGroup:     group.MajorGroup,
+		}
+		if _, ok := seen[key]; ok {
+			return WishlistDraftRisk{}, errs.ErrInvalidCandidate
+		}
+		seen[key] = struct{}{}
+		switch group.Category {
+		case CategoryRush:
+			summary.RushCount++
+		case CategoryStable:
+			summary.StableCount++
+		case CategorySafe:
+			summary.SafeTierCount++
+		default:
+			return WishlistDraftRisk{}, errs.ErrInvalidCandidate
+		}
+		if group.Probability >= threshold {
+			summary.SafeGuardCount++
+		}
+		if group.UtilityScore != nil {
+			score := *group.UtilityScore
+			if !finite(score) || score < 0 || score > 1 {
+				return WishlistDraftRisk{}, errs.ErrInvalidCandidate
+			}
+			utilitySum += score
+			utilityCount++
+		}
+		summary.SlipRate *= 1 - group.Probability
+	}
+	summary.SafeGuardOK = summary.SafeGuardCount >= summary.SafeGuardTarget
+	if utilityCount == len(groups) {
+		value := utilitySum / float64(utilityCount)
+		summary.ExpectedSatisfaction = &value
+	}
+	return summary, nil
 }
 
 // splitByCategory 按 Category 分档（Step1）。返回的 slice 保持 candidates 输入序（DH1），后续各自排序。

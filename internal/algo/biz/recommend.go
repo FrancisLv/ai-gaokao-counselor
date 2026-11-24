@@ -82,9 +82,17 @@ func (u *RecommendUsecase) EstimateProb(ctx context.Context, q UserQuery, profil
 	if err != nil {
 		return RecommendResult{}, err
 	}
+	kept = FilterCandidatesByProfile(kept, profile)
+	if len(kept) == 0 {
+		return RecommendResult{}, errs.ErrNoReliableData
+	}
 
 	// d. 批量取历史 + 计划（各一条批量 SQL，避免 N+1），注入纯函数算概率 + 分档
 	historyMap, err := u.admission.BatchGroupHistory(ctx, q.ReleaseID, q.Province, q.Category, batch, q.Year, cfg.WindowYears)
+	if err != nil {
+		return RecommendResult{}, err
+	}
+	majorHistoryMap, err := u.admission.BatchMajorHistory(ctx, q.ReleaseID, q.Province, q.Category, batch, q.Year, cfg.WindowYears)
 	if err != nil {
 		return RecommendResult{}, err
 	}
@@ -93,6 +101,8 @@ func (u *RecommendUsecase) EstimateProb(ctx context.Context, q UserQuery, profil
 		return RecommendResult{}, err
 	}
 
+	attachMajorProbabilities(kept, userPercentile, majorHistoryMap, cfg)
+	selectRecommendedMajors(kept, profile)
 	res := RecommendCandidates(kept, userPercentile, historyMap, planMap, cfg)
 	// 回填全局审计依据（§4.2②：RecommendResult = 三档 + AuditBasis）。
 	// SampleYears = 概率窗口 [报考年-W, 报考年-1]（不含报考年，与 BatchGroupHistory 同口径）。

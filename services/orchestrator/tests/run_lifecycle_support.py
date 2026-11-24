@@ -64,6 +64,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                 DROP FUNCTION IF EXISTS invalidate_llm_result_cache_on_release_revoke() CASCADE;
                 DROP FUNCTION IF EXISTS reject_eval_run_record_mutation() CASCADE;
                 DROP FUNCTION IF EXISTS reject_release_gate_security_record_mutation() CASCADE;
+                DROP FUNCTION IF EXISTS reject_region_preset_catalog_mutation() CASCADE;
                 """
             )
             await conn.execute(
@@ -100,7 +101,11 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                     eligibility_profile_field,
                     rule_coverage,
                     rule_version,
+                    wishlist_deletion,
+                    wishlist_draft_version,
                     run_result,
+                    admission_group_lineage,
+                    chat_message,
                     run_interrupt,
                     profile_confirmation,
                     profile_revision,
@@ -108,6 +113,7 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                     run_command_receipt,
                     run,
                     release_scope,
+                    region_preset_catalog,
                     release,
                     chat_session,
                     checkpoint_writes,
@@ -169,6 +175,11 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                 statement = statement.strip()
                 if statement:
                     await conn.execute(statement)
+            migration = ROOT / "migrations" / "18_policy_retrieval_config_identity.sql"
+            for statement in migration.read_text(encoding="utf-8").split(";"):
+                statement = statement.strip()
+                if statement:
+                    await conn.execute(statement)
             migration = ROOT / "migrations" / "19_policy_evidence_results.sql"
             for statement in migration.read_text(encoding="utf-8").split(";"):
                 statement = statement.strip()
@@ -226,6 +237,24 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
             migration = ROOT / "migrations" / "40_immutable_eval_run.sql"
             await conn.execute(migration.read_text(encoding="utf-8"))
             migration = ROOT / "migrations" / "41_release_gate_security_attestation.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "42_conversation_history.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "43_admission_group_lineage.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "44_macro_region_catalog.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "45_wishlist_draft_versions.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "46_stale_major_identity_results.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "47_stale_probability_boundary_results.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "48_stale_probability_critical_band_results.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "50_wishlist_deletion.sql"
+            await conn.execute(migration.read_text(encoding="utf-8"))
+            migration = ROOT / "migrations" / "55_wishlist_draft_risk.sql"
             await conn.execute(migration.read_text(encoding="utf-8"))
             await conn.execute(
                 """
@@ -327,6 +356,43 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                 conn,
                 "migrations/41_release_gate_security_attestation.sql",
             )
+            await self._apply_sql_file(
+                conn,
+                "migrations/42_conversation_history.sql",
+            )
+            await self._apply_sql_file(
+                conn,
+                "migrations/43_admission_group_lineage.sql",
+            )
+            await self._apply_sql_file(
+                conn,
+                "migrations/44_macro_region_catalog.sql",
+            )
+            await self._apply_sql_file(
+                conn,
+                "migrations/45_wishlist_draft_versions.sql",
+            )
+            if apply_formal_result_migration:
+                await self._apply_sql_file(
+                    conn,
+                    "migrations/46_stale_major_identity_results.sql",
+                )
+                await self._apply_sql_file(
+                    conn,
+                    "migrations/47_stale_probability_boundary_results.sql",
+                )
+                await self._apply_sql_file(
+                    conn,
+                    "migrations/48_stale_probability_critical_band_results.sql",
+                )
+            await self._apply_sql_file(
+                conn,
+                "migrations/50_wishlist_deletion.sql",
+            )
+            await self._apply_sql_file(
+                conn,
+                "migrations/55_wishlist_draft_risk.sql",
+            )
         finally:
             await conn.close()
 
@@ -360,6 +426,10 @@ class RunLifecyclePostgresTest(unittest.IsolatedAsyncioTestCase):
                     VALUES (%s, '湖南', 2025, '物理类', '本科批')
                     ON CONFLICT DO NOTHING
                     """,
+                    (value,),
+                )
+                await conn.execute(
+                    "SELECT ensure_region_preset_catalog(%s)",
                     (value,),
                 )
         finally:

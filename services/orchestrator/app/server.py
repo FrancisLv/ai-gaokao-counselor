@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 from uuid import UUID
 
 import grpc
@@ -19,9 +19,11 @@ from api.orchestrator.v1 import orchestrator_pb2, orchestrator_pb2_grpc
 from app.run_lifecycle import (
     AnswerFields,
     CancelRunCommand,
+    ChatMessageInput,
     ConfirmProfileAnswer,
     DeclineFieldsAnswer,
     PolicyQaInput,
+    RegionAnswer,
     RunEvent,
     RunLifecycle,
     RunLifecycleError,
@@ -31,20 +33,27 @@ from app.run_lifecycle import (
     ResumeRunCommand,
     StructuredProfileInput,
     SubmitRunCommand,
+    WishlistDraftGroup,
 )
 from app.run_lifecycle.wire import (
     populate_error,
     populate_interrupt,
     populate_interrupt_from_event,
     populate_progress,
+    populate_region_clarification,
 )
 
 log = logging.getLogger(__name__)
 
 
 class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
-    def __init__(self, lifecycle: RunLifecycle | None = None) -> None:
+    def __init__(
+        self,
+        lifecycle: RunLifecycle | None = None,
+        deletion=None,
+    ) -> None:
         self._lifecycle = lifecycle
+        self._deletion = deletion
 
     async def BuildRetrievalGraph(
         self,
@@ -200,6 +209,8 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
         if request.task_kind not in {
             orchestrator_pb2.GENERATE_PLAN,
             orchestrator_pb2.POLICY_QA,
+            orchestrator_pb2.EXPLAIN_RESULT,
+            orchestrator_pb2.REVISE_PLAN,
         }:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "UNSUPPORTED_TASK_KIND")
         try:
@@ -235,22 +246,36 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             except RunLifecycleError as exc:
                 await self._abort_lifecycle(context, exc)
             return self._receipt_reply(receipt)
+        task_kind = orchestrator_pb2.TaskKind.Name(request.task_kind)
         try:
             receipt = await lifecycle.SubmitRun(
                 SubmitRunCommand(
                     principal_id=principal_id,
                     session_id=session_id,
-                    task_kind="GENERATE_PLAN",
-                    input=StructuredProfileInput(
-                        province=request.profile_input.province,
-                        application_year=request.profile_input.application_year,
-                        category=request.profile_input.category,
-                        batch=request.profile_input.batch or None,
-                        score=request.profile_input.score,
-                        subjects=tuple(request.profile_input.subjects),
-                    ),
+                    task_kind=task_kind,
+                    input=self._structured_profile(request.profile_input),
                     idempotency_key=request.idempotency_key,
+                    parent_result_version=(
+                        UUID(request.parent_result_version)
+                        if request.parent_result_version
+                        else None
+                    ),
+                    messages=tuple(
+                        ChatMessageInput(
+                            client_message_id=message.client_message_id,
+                            role=message.role,
+                            kind=message.kind,
+                            content=message.content,
+                        )
+                        for message in request.messages
+                    ),
+                    user_message=request.user_message,
                 )
+            )
+        except ValueError:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "INVALID_PARENT_RESULT_VERSION",
             )
         except RunLifecycleError as exc:
             await self._abort_lifecycle(context, exc)
@@ -291,6 +316,16 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
         elif answer_kind == "decline_fields":
             answer = DeclineFieldsAnswer(
                 field_keys=tuple(request.decline_fields.field_keys),
+            )
+        elif answer_kind == "region_answer":
+            answer = RegionAnswer(
+                clarification_id=request.region_answer.clarification_id,
+                provinces=tuple(request.region_answer.provinces),
+                preset_ids=tuple(request.region_answer.preset_ids),
+                catalog_version=request.region_answer.catalog_version,
+                cancel_region_restriction=(
+                    request.region_answer.cancel_region_restriction
+                ),
             )
         else:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "ANSWER_REQUIRED")
@@ -347,6 +382,323 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             await self._abort_lifecycle(context, exc)
         return self._receipt_reply(receipt)
 
+    async def ListSessions(self, request, context) -> "orchestrator_pb2.ListSessionsReply":
+        lifecycle = await self._require_lifecycle(context)
+        principal_id = await self._principal(context)
+        try:
+            sessions = await lifecycle.ListSessions(
+                principal_id=principal_id,
+                limit=request.limit or 20,
+            )
+        except RunLifecycleError as exc:
+            await self._abort_lifecycle(context, exc)
+        return orchestrator_pb2.ListSessionsReply(
+            sessions=[
+                self._session_summary_reply(session)
+                for session in sessions
+            ]
+        )
+
+    async def GetSession(self, request, context) -> "orchestrator_pb2.ChatSessionReply":
+        lifecycle = await self._require_lifecycle(context)
+        principal_id = await self._principal(context)
+        try:
+            session_id = UUID(request.session_id)
+        except ValueError:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "INVALID_SESSION_ID",
+            )
+        try:
+            view = await lifecycle.GetSession(
+                principal_id=principal_id,
+                session_id=session_id,
+            )
+        except RunLifecycleError as exc:
+            await self._abort_lifecycle(context, exc)
+        return self._chat_session_reply(view)
+
+    async def GetWishlistDraft(
+        self,
+        request,
+        context,
+    ) -> "orchestrator_pb2.WishlistDraftReply":
+        lifecycle = await self._require_lifecycle(context)
+        principal_id = await self._principal(context)
+        try:
+            result_version = UUID(request.result_version)
+        except ValueError:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "INVALID_RESULT_VERSION",
+            )
+        try:
+            draft = await lifecycle.GetWishlistDraft(
+                principal_id=principal_id,
+                result_version=result_version,
+            )
+        except RunLifecycleError as exc:
+            await self._abort_lifecycle(context, exc)
+        return self._wishlist_draft_reply(draft)
+
+    async def SaveWishlistDraft(
+        self,
+        request,
+        context,
+    ) -> "orchestrator_pb2.WishlistDraftReply":
+        lifecycle = await self._require_lifecycle(context)
+        principal_id = await self._principal(context)
+        if not request.idempotency_key.strip():
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "IDEMPOTENCY_KEY_REQUIRED",
+            )
+        try:
+            result_version = UUID(request.result_version)
+        except ValueError:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "INVALID_RESULT_VERSION",
+            )
+        groups = tuple(
+            WishlistDraftGroup(
+                university_code=group.university_code,
+                major_group=group.major_group,
+                major_codes=tuple(group.major_codes),
+            )
+            for group in request.groups
+        )
+        try:
+            draft = await lifecycle.SaveWishlistDraft(
+                principal_id=principal_id,
+                result_version=result_version,
+                expected_version=request.expected_version,
+                idempotency_key=request.idempotency_key,
+                groups=groups,
+            )
+        except RunLifecycleError as exc:
+            await self._abort_lifecycle(context, exc)
+        return self._wishlist_draft_reply(draft)
+
+    async def ListWishlists(
+        self,
+        request,
+        context,
+    ) -> "orchestrator_pb2.ListWishlistsReply":
+        lifecycle = await self._require_lifecycle(context)
+        principal_id = await self._principal(context)
+        try:
+            items = await lifecycle.ListWishlists(
+                principal_id=principal_id,
+                limit=request.limit or 20,
+                offset=request.offset,
+                status_filter=request.status,
+            )
+        except RunLifecycleError as exc:
+            await self._abort_lifecycle(context, exc)
+        return orchestrator_pb2.ListWishlistsReply(
+            wishlists=[
+                self._wishlist_summary_reply(item)
+                for item in items
+            ]
+        )
+
+    async def ListWishlistHistory(
+        self,
+        request,
+        context,
+    ) -> "orchestrator_pb2.WishlistHistoryReply":
+        lifecycle = await self._require_lifecycle(context)
+        principal_id = await self._principal(context)
+        try:
+            result_version = UUID(request.result_version)
+        except ValueError:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "INVALID_RESULT_VERSION",
+            )
+        try:
+            drafts = await lifecycle.ListWishlistHistory(
+                principal_id=principal_id,
+                result_version=result_version,
+            )
+        except RunLifecycleError as exc:
+            await self._abort_lifecycle(context, exc)
+        return orchestrator_pb2.WishlistHistoryReply(
+            drafts=[
+                self._wishlist_draft_message(draft)
+                for draft in drafts
+            ]
+        )
+
+    async def RestoreWishlistDraftVersion(
+        self,
+        request,
+        context,
+    ) -> "orchestrator_pb2.WishlistDraftReply":
+        lifecycle = await self._require_lifecycle(context)
+        principal_id = await self._principal(context)
+        if not request.idempotency_key.strip():
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "IDEMPOTENCY_KEY_REQUIRED",
+            )
+        try:
+            result_version = UUID(request.result_version)
+        except ValueError:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "INVALID_RESULT_VERSION",
+            )
+        try:
+            draft = await lifecycle.RestoreWishlistDraftVersion(
+                principal_id=principal_id,
+                result_version=result_version,
+                draft_version=request.draft_version,
+                idempotency_key=request.idempotency_key,
+            )
+        except RunLifecycleError as exc:
+            await self._abort_lifecycle(context, exc)
+        return self._wishlist_draft_reply(draft)
+
+    async def DeleteWishlist(
+        self,
+        request,
+        context,
+    ) -> "orchestrator_pb2.DeleteWishlistReply":
+        lifecycle = await self._require_lifecycle(context)
+        principal_id = await self._principal(context)
+        if not request.request_id.strip():
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "IDEMPOTENCY_KEY_REQUIRED",
+            )
+        try:
+            result_version = UUID(request.result_version)
+        except ValueError:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "INVALID_RESULT_VERSION",
+            )
+        try:
+            receipt = await lifecycle.DeleteWishlist(
+                principal_id=principal_id,
+                result_version=result_version,
+                request_id=request.request_id,
+            )
+        except RunLifecycleError as exc:
+            await self._abort_lifecycle(context, exc)
+        return orchestrator_pb2.DeleteWishlistReply(
+            deleted=receipt.deleted,
+            request_id=receipt.request_id,
+        )
+
+    async def DeletePrincipalData(
+        self,
+        request,
+        context,
+    ) -> "orchestrator_pb2.DeletePrincipalDataReply":
+        if self._deletion is None:
+            await context.abort(
+                grpc.StatusCode.UNAVAILABLE,
+                "PRINCIPAL_DELETION_UNAVAILABLE",
+            )
+        principal_id = await self._principal(context)
+        if not request.request_id.strip():
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "REQUEST_ID_REQUIRED",
+            )
+        from app.data_lifecycle import DeletePrincipalDataCommand
+
+        receipt = await self._deletion.DeletePrincipalData(
+            DeletePrincipalDataCommand(
+                principal_id=principal_id,
+                request_id=request.request_id,
+                confirmation_token="gateway-authenticated",
+            )
+        )
+        return orchestrator_pb2.DeletePrincipalDataReply(
+            accepted=receipt.accepted,
+            status=receipt.status,
+            reason=receipt.reason or "",
+        )
+
+    async def RevokeSensitiveConsent(
+        self,
+        _request,
+        context,
+    ) -> "orchestrator_pb2.RevokeSensitiveConsentReply":
+        lifecycle = await self._require_lifecycle(context)
+        principal_id = await self._principal(context)
+        try:
+            count = await lifecycle.RevokeSensitiveConsent(
+                principal_id=principal_id,
+            )
+        except RunLifecycleError as exc:
+            await self._abort_lifecycle(context, exc)
+        return orchestrator_pb2.RevokeSensitiveConsentReply(
+            revoked_count=count,
+        )
+
+    async def SubmitConversationMessage(
+        self,
+        request,
+        context,
+    ) -> "orchestrator_pb2.SubmitConversationMessageReply":
+        lifecycle = await self._require_lifecycle(context)
+        principal_id = await self._principal(context)
+        if not request.idempotency_key.strip():
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "IDEMPOTENCY_KEY_REQUIRED",
+            )
+        try:
+            session_id = UUID(request.session_id)
+            parent_result_version = UUID(request.parent_result_version)
+        except ValueError:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "INVALID_CONVERSATION_IDENTITY",
+            )
+        try:
+            region_answer = None
+            if request.HasField("region_answer"):
+                region_answer = RegionAnswer(
+                    clarification_id=request.region_answer.clarification_id,
+                    provinces=tuple(request.region_answer.provinces),
+                    preset_ids=tuple(request.region_answer.preset_ids),
+                    catalog_version=request.region_answer.catalog_version,
+                    cancel_region_restriction=(
+                        request.region_answer.cancel_region_restriction
+                    ),
+                )
+            reply = await lifecycle.SubmitConversationMessage(
+                principal_id=principal_id,
+                session_id=session_id,
+                profile=self._structured_profile(request.profile_input),
+                parent_result_version=parent_result_version,
+                message_text=request.message_text,
+                idempotency_key=request.idempotency_key,
+                region_answer=region_answer,
+            )
+        except RunLifecycleError as exc:
+            await self._abort_lifecycle(context, exc)
+        return orchestrator_pb2.SubmitConversationMessageReply(
+            session_id=str(reply.session_id),
+            run_id=str(reply.run_id) if reply.run_id else "",
+            task_kind=reply.task_kind or "",
+            status=reply.status,
+            assistant_message=reply.assistant_message,
+            region_clarification=(
+                OrchestratorServicer._region_clarification_message(
+                    reply.region_clarification
+                )
+                if reply.region_clarification
+                else None
+            ),
+        )
+
     async def _require_lifecycle(self, context) -> RunLifecycle:
         if self._lifecycle is None:
             await context.abort(grpc.StatusCode.UNAVAILABLE, "RUN_LIFECYCLE_UNAVAILABLE")
@@ -379,6 +731,27 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
             "PROFILE_UNSUPPORTED_SCOPE": grpc.StatusCode.FAILED_PRECONDITION,
             "PROFILE_UNSUPPORTED_INPUT": grpc.StatusCode.INVALID_ARGUMENT,
             "PROFILE_NOT_CONFIRMED": grpc.StatusCode.FAILED_PRECONDITION,
+            "PARENT_RESULT_REQUIRED": grpc.StatusCode.INVALID_ARGUMENT,
+            "PARENT_RESULT_NOT_FOUND": grpc.StatusCode.NOT_FOUND,
+            "PARENT_RESULT_FORBIDDEN": grpc.StatusCode.PERMISSION_DENIED,
+            "PARENT_RESULT_INVALID": grpc.StatusCode.FAILED_PRECONDITION,
+            "PARENT_RESULT_STALE": grpc.StatusCode.FAILED_PRECONDITION,
+            "SESSION_REQUIRED": grpc.StatusCode.INVALID_ARGUMENT,
+            "SESSION_NOT_FOUND": grpc.StatusCode.NOT_FOUND,
+            "RESULT_NOT_FOUND": grpc.StatusCode.NOT_FOUND,
+            "RESULT_STALE": grpc.StatusCode.FAILED_PRECONDITION,
+            "DRAFT_COMMAND_INVALID": grpc.StatusCode.INVALID_ARGUMENT,
+            "DRAFT_SELECTION_INVALID": grpc.StatusCode.INVALID_ARGUMENT,
+            "DRAFT_VERSION_CONFLICT": grpc.StatusCode.ABORTED,
+            "REPORT_STRUCTURED_MAJORS_MISSING":
+                grpc.StatusCode.FAILED_PRECONDITION,
+            "MESSAGE_REQUIRED": grpc.StatusCode.INVALID_ARGUMENT,
+            "CHAT_MESSAGE_INVALID": grpc.StatusCode.INVALID_ARGUMENT,
+            "REGION_ANSWER_INVALID": grpc.StatusCode.INVALID_ARGUMENT,
+            "REGION_CLARIFICATION_NOT_FOUND": grpc.StatusCode.NOT_FOUND,
+            "REGION_CLARIFICATION_CONFLICT": grpc.StatusCode.ABORTED,
+            "MACRO_REGION_SCOPE_UNRESOLVED": grpc.StatusCode.FAILED_PRECONDITION,
+            "MACRO_REGION_CATALOG_UNAVAILABLE": grpc.StatusCode.FAILED_PRECONDITION,
             "RETRIEVAL_QUERY_REQUIRED": grpc.StatusCode.INVALID_ARGUMENT,
             "RETRIEVAL_SCOPE_REQUIRED": grpc.StatusCode.FAILED_PRECONDITION,
             "RETRIEVAL_SCOPE_INVALID": grpc.StatusCode.INVALID_ARGUMENT,
@@ -417,6 +790,12 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
                 str(view.confirmed_profile_version) if view.confirmed_profile_version else ""
             ),
             active_execution_remaining_ms=view.active_execution_remaining_ms,
+            parent_result_version=(
+                str(view.parent_result_version)
+                if view.parent_result_version
+                else ""
+            ),
+            conversation_answer=view.conversation_answer or "",
         )
         if view.cancel_requested_at is not None:
             reply.cancel_requested_at.FromDatetime(view.cancel_requested_at)
@@ -451,7 +830,10 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
                         view.result_payload
                     )
                 )
-            elif view.result is None or view.result.result_kind != "V1_FORMAL":
+            elif (
+                view.result is None
+                or view.result.result_kind == "ALGORITHM_PREVIEW"
+            ):
                 reply.result_preview.CopyFrom(
                     OrchestratorServicer._algorithm_preview_message(
                         view.result_payload
@@ -460,6 +842,184 @@ class OrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServicer):
         reply.created_at.FromDatetime(view.created_at)
         reply.updated_at.FromDatetime(view.updated_at)
         reply.expires_at.FromDatetime(view.expires_at)
+        return reply
+
+    @staticmethod
+    def _structured_profile(profile) -> StructuredProfileInput:
+        return StructuredProfileInput(
+            province=profile.province,
+            application_year=profile.application_year,
+            category=profile.category,
+            batch=profile.batch or None,
+            score=profile.score,
+            subjects=tuple(profile.subjects),
+            risk_appetite=profile.risk_appetite,
+            priority_dims=tuple(profile.priority_dims),
+            interests=tuple(profile.interests),
+            preferred_cities=tuple(profile.preferred_cities),
+            preferred_tiers=tuple(profile.preferred_tiers),
+            required_provinces=tuple(profile.required_provinces),
+            excluded_provinces=tuple(profile.excluded_provinces),
+            required_cities=tuple(profile.required_cities),
+            excluded_cities=tuple(profile.excluded_cities),
+            required_tiers=tuple(profile.required_tiers),
+            required_major_names=tuple(profile.required_major_names),
+            required_major_keywords=tuple(profile.required_major_keywords),
+            excluded_major_keywords=tuple(profile.excluded_major_keywords),
+            excluded_major_names=tuple(profile.excluded_major_names),
+            excluded_universities=tuple(profile.excluded_universities),
+        )
+
+    @staticmethod
+    def _region_clarification_message(payload: dict[str, Any]):
+        message = orchestrator_pb2.RegionClarificationView()
+        populate_region_clarification(message, payload)
+        return message
+
+    @staticmethod
+    def _session_summary_reply(session):
+        reply = orchestrator_pb2.ChatSessionSummary(
+            session_id=str(session.session_id),
+            title=session.title,
+            latest_run_id=(
+                str(session.latest_run_id) if session.latest_run_id else ""
+            ),
+            latest_state=session.latest_state,
+            latest_result_version=(
+                str(session.latest_result_version)
+                if session.latest_result_version
+                else ""
+            ),
+            latest_result_kind=session.latest_result_kind or "",
+            run_count=session.run_count,
+        )
+        reply.created_at.FromDatetime(session.created_at)
+        reply.updated_at.FromDatetime(session.updated_at)
+        return reply
+
+    @classmethod
+    def _chat_session_reply(cls, view):
+        reply = orchestrator_pb2.ChatSessionReply(
+            summary=cls._session_summary_reply(view.summary),
+        )
+        for message in view.messages:
+            item = reply.messages.add(
+                message_id=str(message.message_id),
+                run_id=str(message.run_id) if message.run_id else "",
+                role=message.role,
+                kind=message.kind,
+                content=message.content,
+            )
+            item.created_at.FromDatetime(message.created_at)
+            for key, value in message.metadata.items():
+                item.metadata[str(key)] = (
+                    value
+                    if isinstance(value, str)
+                    else json.dumps(
+                        value,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+        for run in view.runs:
+            item = reply.runs.add(
+                run_id=str(run.run_id),
+                task_kind=orchestrator_pb2.TaskKind.Value(run.task_kind),
+                state=orchestrator_pb2.RunState.Value(run.state),
+                stage=run.stage,
+                terminal_reason=run.terminal_reason or "",
+                parent_result_version=(
+                    str(run.parent_result_version)
+                    if run.parent_result_version
+                    else ""
+                ),
+                result_version=(
+                    str(run.result_version) if run.result_version else ""
+                ),
+                result_kind=run.result_kind or "",
+            )
+            item.created_at.FromDatetime(run.created_at)
+            item.updated_at.FromDatetime(run.updated_at)
+        for key, value in view.profile_fields.items():
+            field = reply.profile_fields[key]
+            field.state = str(value.get("state") or "")
+            field.source = str(value.get("source") or "")
+            raw = value.get("value")
+            if isinstance(raw, list):
+                field.string_list.values.extend(str(item) for item in raw)
+            elif isinstance(raw, int) and not isinstance(raw, bool):
+                field.int_value = raw
+            elif raw is not None:
+                field.string_value = str(raw)
+        return reply
+
+    @staticmethod
+    def _wishlist_draft_reply(draft) -> "orchestrator_pb2.WishlistDraftReply":
+        reply = orchestrator_pb2.WishlistDraftReply()
+        if draft is None:
+            return reply
+        OrchestratorServicer._populate_wishlist_draft(reply.draft, draft)
+        return reply
+
+    @staticmethod
+    def _wishlist_draft_message(draft) -> "orchestrator_pb2.WishlistDraft":
+        reply = orchestrator_pb2.WishlistDraft()
+        OrchestratorServicer._populate_wishlist_draft(reply, draft)
+        return reply
+
+    @staticmethod
+    def _populate_wishlist_draft(target, draft) -> None:
+        target.draft_version_id = str(draft.draft_version_id)
+        target.result_version = str(draft.result_version)
+        target.run_id = str(draft.run_id)
+        target.release_id = draft.release_id
+        target.draft_version = draft.draft_version
+        for group in draft.groups:
+            target.groups.add(
+                university_code=group.university_code,
+                major_group=group.major_group,
+                major_codes=group.major_codes,
+            )
+        if draft.risk is not None:
+            risk = target.risk
+            risk.group_count = draft.risk.group_count
+            risk.rush_count = draft.risk.rush_count
+            risk.stable_count = draft.risk.stable_count
+            risk.safe_tier_count = draft.risk.safe_tier_count
+            risk.safe_guard_count = draft.risk.safe_guard_count
+            risk.safe_guard_target = draft.risk.safe_guard_target
+            risk.safe_guard_ok = draft.risk.safe_guard_ok
+            risk.slip_rate = draft.risk.slip_rate
+            if draft.risk.expected_satisfaction is not None:
+                risk.expected_satisfaction = (
+                    draft.risk.expected_satisfaction
+                )
+        target.created_at.FromDatetime(draft.created_at)
+
+    @staticmethod
+    def _wishlist_summary_reply(item) -> "orchestrator_pb2.WishlistSummary":
+        reply = orchestrator_pb2.WishlistSummary(
+            draft_version_id=str(item.draft_version_id),
+            result_version=str(item.result_version),
+            run_id=str(item.run_id),
+            release_id=item.release_id,
+            draft_version=item.draft_version,
+            title=item.title,
+            application_year=item.application_year,
+            category=item.category,
+            batch=item.batch,
+            group_count=item.group_count,
+            major_count=item.major_count,
+            status=item.status,
+            stale_reason=item.stale_reason or "",
+            successor_run_id=(
+                str(item.successor_run_id)
+                if item.successor_run_id is not None
+                else ""
+            ),
+        )
+        reply.saved_at.FromDatetime(item.saved_at)
         return reply
 
     @staticmethod

@@ -63,6 +63,8 @@ PYTHONPATH=services/orchestrator:services/orchestrator/pb \
 ```bash
 GATEWAY_ADDR=127.0.0.1:18000 \
 ORCHESTRATOR_ENDPOINT=localhost:9100 \
+GATEWAY_DSN="$DSN" \
+GATEWAY_COOKIE_SECURE=false \
 go run ./cmd/gateway
 ```
 
@@ -72,7 +74,6 @@ go run ./cmd/gateway
 
 ```bash
 cd frontend
-VITE_PRINCIPAL_ID=principal-m4a-acceptance \
 VITE_GATEWAY_TARGET=http://127.0.0.1:18000 \
 npm run dev -- --host 127.0.0.1
 ```
@@ -83,8 +84,9 @@ npm run dev -- --host 127.0.0.1
 http://127.0.0.1:5173
 ```
 
-浏览器请求仍需要可信 `x-principal-id`。当前验收前端通过
-`VITE_PRINCIPAL_ID` 注入；该变量只能用于本地验收，生产身份仍由 gateway 认证层提供。
+浏览器身份来自 Gateway 的 HttpOnly 登录 Cookie。先使用
+`make account-invites DSN="$DSN"` 生成邀请码，在 `login.html` 注册或登录；客户端不再
+接受 `VITE_PRINCIPAL_ID` / `x-principal-id`。
 
 ## 3. 手工验收步骤
 

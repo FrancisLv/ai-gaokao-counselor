@@ -1,6 +1,8 @@
 package data
 
 import (
+	"strings"
+
 	"github.com/choucisan/ai-gaokao-counselor/internal/algo/biz"
 	"github.com/choucisan/ai-gaokao-counselor/internal/algo/data/dbgen"
 )
@@ -22,7 +24,7 @@ func assembleCandidates(groups []dbgen.ListCandidateGroupsRow, majors []dbgen.Li
 func candidateFromRow(row dbgen.ListCandidateGroupsRow) biz.Candidate {
 	return biz.Candidate{
 		// 表字段可空，但组查询的非空检查和 INNER JOIN 已保证这里有院校 ID。
-		UniversityID:   int(row.UniversityID.Int64),
+		UniversityID:   int(row.UniversityID),
 		UniversityCode: row.UniversityCode,
 		UniversityName: row.UniversityName,
 		MajorGroup:     row.MajorGroup,
@@ -45,6 +47,10 @@ func attachMajors(candidates []biz.Candidate, index map[biz.GroupKey]int, rows [
 		if !ok {
 			continue // 身份冲突等原因被组查询排除的明细，不重新加入候选池。
 		}
+		if strings.TrimSpace(row.MajorCode) == "" {
+			// 历史库存在缺专业代码的旧明细；没有稳定专业身份，不能进入资格评估或报告。
+			continue
+		}
 		candidate := &candidates[idx]
 		candidate.Majors = append(candidate.Majors, majorFromRow(row))
 		if row.SubjectReq == "" {
@@ -62,16 +68,21 @@ func attachMajors(candidates []biz.Candidate, index map[biz.GroupKey]int, rows [
 
 // majorFromRow 保留 SQL 已处理的空值兜底，不用专业级位次参与组概率计算。
 func majorFromRow(row dbgen.ListCandidateMajorsRow) biz.MajorDetail {
+	planCount := int(row.PlanCount)
 	return biz.MajorDetail{
 		MajorCode:     row.MajorCode,
 		MajorName:     row.MajorName,
 		SubjectReq:    row.SubjectReq,
 		Duration:      row.Duration,
 		Tuition:       row.Tuition,
+		HasTuition:    row.Tuition > 0,
 		MajorNote:     row.MajorNote,
 		MinScore:      int(row.MinScore),
 		MinRank:       int(row.MinRank),
+		ReferenceYear: int(row.ReferenceYear),
 		AdmitCount:    int(row.AdmitCount),
+		PlanCount:     &planCount,
+		Selectable:    true,
 		InCurrentPlan: row.InCurrentPlan,
 	}
 }
@@ -82,9 +93,32 @@ func groupHistoryRows(rows []dbgen.ListGroupHistoryRow) map[biz.GroupKey][]biz.A
 	for _, row := range rows {
 		key := biz.GroupKey{UniversityCode: row.UniversityCode, MajorGroup: row.MajorGroup}
 		history[key] = append(history[key], biz.AdmissionRecord{
-			Year:         int(row.Year),
-			GroupMinRank: int(row.GroupMinRank),
-			TotalCount:   int(row.TotalCount),
+			Year:              int(row.Year),
+			GroupMinScore:     int(row.GroupMinScore),
+			GroupMinRank:      int(row.GroupMinRank),
+			TotalCount:        int(row.TotalCount),
+			MappingMethod:     row.MappingMethod,
+			MappingConfidence: row.MappingConfidence,
+		})
+	}
+	return history
+}
+
+func majorHistoryRows(rows []dbgen.ListMajorHistoryRow) map[biz.MajorKey][]biz.MajorAdmissionRecord {
+	history := make(map[biz.MajorKey][]biz.MajorAdmissionRecord)
+	for _, row := range rows {
+		key := biz.MajorKey{
+			UniversityCode: row.UniversityCode,
+			MajorGroup:     row.MajorGroup,
+			MajorCode:      row.MajorCode,
+		}
+		history[key] = append(history[key], biz.MajorAdmissionRecord{
+			Year:       int(row.Year),
+			MajorName:  row.MajorName,
+			MinScore:   int(row.MinScore),
+			MinRank:    int(row.MinRank),
+			AdmitCount: int(row.AdmitCount),
+			TotalCount: int(row.TotalCount),
 		})
 	}
 	return history

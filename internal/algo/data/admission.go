@@ -63,12 +63,29 @@ func (r *admissionRepo) BatchGroupHistory(ctx context.Context, releaseID, provin
 	rows, err := r.d.queries.ListGroupHistory(ctx, dbgen.ListGroupHistoryParams{
 		ReleaseID: releaseID,
 		Province:  province, Category: category, Batch: batch,
-		LowerYear: int32(year - windowYears), UpperYear: int32(year - 1),
+		LowerYear:  int32(year - windowYears),
+		UpperYear:  int32(year - 1),
+		ReportYear: int32(year),
 	})
 	if err != nil {
 		return nil, err
 	}
 	return groupHistoryRows(rows), nil
+}
+
+// BatchMajorHistory 只返回当年计划专业代码在映射历史组中的同代码记录。
+func (r *admissionRepo) BatchMajorHistory(ctx context.Context, releaseID, province, category, batch string, year, windowYears int) (map[biz.MajorKey][]biz.MajorAdmissionRecord, error) {
+	rows, err := r.d.queries.ListMajorHistory(ctx, dbgen.ListMajorHistoryParams{
+		ReleaseID: releaseID,
+		Province:  province, Category: category, Batch: batch,
+		ReportYear: int32(year),
+		LowerYear:  int32(year - windowYears),
+		UpperYear:  int32(year - 1),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return majorHistoryRows(rows), nil
 }
 
 // BatchGroupPlan 一次读取两年计划，分别填入当前与上一年计划数，不逐组查库。

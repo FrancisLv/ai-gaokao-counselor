@@ -19,7 +19,7 @@ import (
 // ProviderSet 是 service 层的 wire provider 集。
 var ProviderSet = wire.NewSet(NewAlgo)
 
-// Service 实现 algov1.AlgoServer（既有四 RPC + 结构化资格 EvaluateEligibility）。
+// Service 实现 algov1.AlgoServer（核心确定性算法 + 结构化资格 + 草稿风险汇总）。
 type Service struct {
 	algov1.UnimplementedAlgoServer
 	rank        *biz.RankUsecase
@@ -108,6 +108,26 @@ func (s *Service) OptimizeWishlist(ctx context.Context, req *algov1.OptimizeWish
 		return nil, toKratosErr(err)
 	}
 	return &algov1.OptimizeWishlistReply{Wishlist: toPbWishlistResult(res)}, nil
+}
+
+// SummarizeWishlistDraft 只汇总用户选中的组，不重排候选或回填任何组。
+func (s *Service) SummarizeWishlistDraft(
+	ctx context.Context,
+	req *algov1.SummarizeWishlistDraftRequest,
+) (*algov1.SummarizeWishlistDraftReply, error) {
+	if req.GetReleaseId() == "" {
+		return nil, kerrors.BadRequest("RELEASE_REQUIRED", "release_id 不能为空")
+	}
+	result, err := s.optimize.SummarizeWishlistDraft(
+		ctx,
+		fromPbDraftGroupRiskInputs(req.GetGroups()),
+	)
+	if err != nil {
+		return nil, toKratosErr(err)
+	}
+	return &algov1.SummarizeWishlistDraftReply{
+		Summary: toPbWishlistDraftRisk(result),
+	}, nil
 }
 
 // parseYear 解析 req.Year（string，报考年如 "2025"）→ int；空/非法 → INVALID_YEAR（DE2）。
